@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- MANDATORY: Declare support for both light and dark themes -->
+  <meta name="color-scheme" content="light dark" />
+  <title>agent-leash — AI Agent &amp; MCP Watchdog</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --bg-light: #f4f7f5;
+      --bg-dark: #080B09;
+      --surface-light: #ffffff;
+      --surface-dark: #0D120F;
+      --surface-2-light: #edf2ee;
+      --surface-2-dark: #0B0F0D;
+      --border-light: #cdd8d1;
+      --border-dark: #1F2C25;
+      --text-strong-light: #09110c;
+      --text-strong-dark: #F2F7F4;
+      --text-body-light: #2b3b32;
+      --text-body-dark: #C9D6CE;
+      --text-muted-light: #52665b;
+      --text-muted-dark: #8FA197;
+      --accent-light: #0d8a4e;
+      --accent-dark: #5BE49B;
+
+      --bg: var(--bg-dark);
+      --surface: var(--surface-dark);
+      --surface-2: var(--surface-2-dark);
+      --border: var(--border-dark);
+      --text-strong: var(--text-strong-dark);
+      --text-body: var(--text-body-dark);
+      --text-muted: var(--text-muted-dark);
+      --accent: var(--accent-dark);
+
+      /* MANDATORY: Fallback for browsers without light-dark support */
+      @media (prefers-color-scheme: dark) {
+        --bg: var(--bg-dark);
+        --surface: var(--surface-dark);
+        --surface-2: var(--surface-2-dark);
+        --border: var(--border-dark);
+        --text-strong: var(--text-strong-dark);
+        --text-body: var(--text-body-dark);
+        --text-muted: var(--text-muted-dark);
+        --accent: var(--accent-dark);
+      }
+
+      @supports (color: light-dark(white, black)) {
+        --bg: light-dark(var(--bg-light), var(--bg-dark));
+        --surface: light-dark(var(--surface-light), var(--surface-dark));
+        --surface-2: light-dark(var(--surface-2-light), var(--surface-2-dark));
+        --border: light-dark(var(--border-light), var(--border-dark));
+        --text-strong: light-dark(var(--text-strong-light), var(--text-strong-dark));
+        --text-body: light-dark(var(--text-body-light), var(--text-body-dark));
+        --text-muted: light-dark(var(--text-muted-light), var(--text-muted-dark));
+        --accent: light-dark(var(--accent-light), var(--accent-dark));
+      }
+
+      /* Force dark console appearance by default while respecting color-scheme mechanics */
+      color-scheme: dark;
+      accent-color: var(--accent);
+    }
+
+    body {
+      background-color: #080B09;
+      background-image: radial-gradient(70% 30% at 20% 0%, rgba(91, 228, 155, 0.07), transparent);
+      color: #E4ECE7;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      min-height: 100vh;
+    }
+
+    .console-card {
+      background-color: #0D120F;
+      border: 1px solid #1F2C25;
+      border-radius: 12px;
+      box-shadow: 0 0 0 1px rgba(91, 228, 155, 0.04), 0 24px 64px rgba(0, 0, 0, 0.45);
+    }
+
+    .console-header {
+      background-color: #0B0F0D;
+      border-bottom: 1px solid #1F2C25;
+    }
+
+    .status-dot-live {
+      background-color: #5BE49B;
+      box-shadow: 0 0 8px #5BE49B;
+    }
+
+    /* MANDATORY dialog scroll containment rules */
+    dialog:modal {
+      overscroll-behavior: contain;
+    }
+    dialog::backdrop {
+      overflow: hidden;
+      overscroll-behavior: contain;
+      background: rgba(4, 8, 6, 0.82);
+      backdrop-filter: blur(3px);
+    }
+  </style>
+</head>
+<body class="antialiased selection:bg-[#5BE49B]/25 selection:text-[#F2F7F4]">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+    <!-- Top Terminal Bar -->
+    <header class="console-card overflow-hidden">
+      <div class="console-header px-4 py-2.5 flex items-center justify-between text-xs text-[#8FA197]">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-[#2A3A31] inline-block"></span>
+          <span class="w-2.5 h-2.5 rounded-full bg-[#2A3A31] inline-block"></span>
+          <span class="w-2.5 h-2.5 rounded-full bg-[#2A3A31] inline-block"></span>
+          <span class="ml-2 text-[#B4C3BA]">~/agent-leash — watchdog</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="connection-badge" class="inline-flex items-center gap-1.5 text-[#5BE49B]">
+            <span id="connection-dot" class="w-2 h-2 rounded-full status-dot-live"></span>
+            <span id="connection-text">stream: connected</span>
+          </span>
+        </div>
+      </div>
+
+      <div class="p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+        <div>
+          <p class="text-xs text-[#8FA197] mb-1">
+            <span class="text-[#5BE49B]">$</span> npx agent-leash watch <span id="repo-path" class="text-[#B4C3BA]">.</span>
+          </p>
+          <h1 class="text-2xl sm:text-3xl font-semibold text-[#F2F7F4] tracking-tight">
+            agent-leash <span class="text-[#5BE49B] font-normal text-lg">v0.1.0</span>
+          </h1>
+          <p class="text-xs sm:text-sm text-[#8FA197] mt-1">
+            Real-time AI Coding Agent &amp; MCP Watchdog · File Guard · Thrashing Circuit Breaker · Zombie Killer
+          </p>
+        </div>
+
+        <!-- Mode Switcher & Panic CTA -->
+        <div class="flex flex-wrap items-center gap-4">
+          <div class="bg-[#0B0F0D] border border-[#1F2C25] rounded-lg p-1 flex items-center gap-1" role="group" aria-label="Guard protection mode">
+            <button
+              type="button"
+              data-mode="strict"
+              class="mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors text-[#8FA197] hover:text-[#F2F7F4]"
+            >
+              strict
+            </button>
+            <button
+              type="button"
+              data-mode="balanced"
+              class="mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors bg-[#5BE49B] text-[#06140C] font-semibold"
+            >
+              balanced
+            </button>
+            <button
+              type="button"
+              data-mode="yolo"
+              class="mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors text-[#8FA197] hover:text-[#F2F7F4]"
+            >
+              yolo
+            </button>
+          </div>
+
+          <button
+            type="button"
+            id="panic-open-btn"
+            command="show-modal"
+            commandfor="panic-dialog"
+            class="px-4 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 text-white font-semibold text-xs sm:text-sm tracking-wide uppercase shadow-lg shadow-red-950/60 border border-red-400/40 transition flex items-center gap-2 cursor-pointer"
+          >
+            <span class="w-2 h-2 rounded-full bg-white animate-ping"></span>
+            PANIC ROLLBACK &amp; KILL ALL
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Key Metrics Bar -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" aria-label="Watchdog metrics">
+      <div class="console-card p-4">
+        <div class="text-xs text-[#8FA197] uppercase">active mode</div>
+        <div id="metric-mode" class="text-xl font-semibold text-[#5BE49B] mt-1">balanced</div>
+        <div id="metric-mode-desc" class="text-xs text-[#8FA197] mt-1">Warns on mass edits · blocks loops &amp; .env</div>
+      </div>
+
+      <div class="console-card p-4">
+        <div class="text-xs text-[#8FA197] uppercase">modified files</div>
+        <div class="flex items-baseline gap-2 mt-1">
+          <span id="metric-files" class="text-xl font-semibold text-[#F2F7F4]">0</span>
+          <span id="metric-files-limit" class="text-xs text-[#8FA197]">/ 15 warn · 40 stop</span>
+        </div>
+        <div id="metric-checkpoint" class="text-xs text-[#8FA197] mt-1 truncate">checkpoint: initializing...</div>
+      </div>
+
+      <div class="console-card p-4">
+        <div class="text-xs text-[#8FA197] uppercase">circuit breaker (60s window)</div>
+        <div id="metric-breaker" class="text-xl font-semibold text-[#5BE49B] mt-1">ARMED</div>
+        <div id="metric-breaker-sub" class="text-xs text-[#8FA197] mt-1">max 5 edits/file/min</div>
+      </div>
+
+      <div class="console-card p-4">
+        <div class="text-xs text-[#8FA197] uppercase">mcp &amp; agent processes</div>
+        <div class="flex items-baseline gap-2 mt-1">
+          <span id="metric-procs" class="text-xl font-semibold text-[#F2F7F4]">0</span>
+          <span id="metric-frozen" class="text-xs text-[#8FA197]">0 frozen</span>
+        </div>
+        <div id="metric-silence-limit" class="text-xs text-[#8FA197] mt-1">zombie threshold: 45s silence</div>
+      </div>
+    </section>
+
+    <!-- Main 2-Column Grid: Live Activity Ticker & Process/MCP Monitor -->
+    <main class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <!-- Live Activity Ticker -->
+      <section class="console-card lg:col-span-7 flex flex-col overflow-hidden" aria-labelledby="ticker-heading">
+        <div class="console-header px-4 py-3 flex items-center justify-between">
+          <div>
+            <h2 id="ticker-heading" class="text-sm font-semibold text-[#F2F7F4]">
+              <span class="text-[#5BE49B]">$</span> tail -f .agentguard/events.log
+            </h2>
+            <p class="text-xs text-[#8FA197]">Live file edits, protected file blocks &amp; thrashing alerts</p>
+          </div>
+          <span id="event-count-badge" class="text-xs px-2 py-0.5 rounded bg-[#16201B] text-[#B4C3BA] border border-[#1F2C25]">
+            0 events
+          </span>
+        </div>
+
+        <div id="activity-list" class="divide-y divide-[#16201B] max-h-[460px] overflow-y-auto p-2 space-y-1">
+          <div class="p-6 text-center text-xs text-[#8FA197]">
+            Waiting for file system or MCP events...
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP & Process Heartbeat Monitor -->
+      <section class="console-card lg:col-span-5 flex flex-col overflow-hidden" aria-labelledby="proc-heading">
+        <div class="console-header px-4 py-3 flex items-center justify-between">
+          <div>
+            <h2 id="proc-heading" class="text-sm font-semibold text-[#F2F7F4]">
+              <span class="text-[#5BE49B]">$</span> watch -n 2 ps aux | grep mcp
+            </h2>
+            <p class="text-xs text-[#8FA197]">CPU/RAM heartbeat &amp; 1-click zombie process killer</p>
+          </div>
+          <button
+            type="button"
+            id="kill-frozen-btn"
+            class="hidden text-xs px-2.5 py-1 rounded bg-red-600/90 hover:bg-red-500 text-white font-medium cursor-pointer"
+          >
+            Kill All Frozen
+          </button>
+        </div>
+
+        <div id="process-list" class="divide-y divide-[#16201B] max-h-[460px] overflow-y-auto p-2 space-y-1">
+          <div class="p-6 text-center text-xs text-[#8FA197]">
+            Scanning for active MCP &amp; agent child processes...
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Protected Patterns Footer -->
+    <footer class="console-card px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-[#8FA197]">
+      <div>
+        <span class="text-[#5BE49B]">protected globs:</span>
+        <span id="protected-globs" class="text-[#C9D6CE] ml-1">.env*, docker-compose*.yml, .git/**</span>
+      </div>
+      <div id="status-toast" class="text-[#5BE49B]">ready</div>
+    </footer>
+  </div>
+
+  <!-- Native Modal Confirmation Dialog for PANIC ROLLBACK & KILL ALL -->
+  <dialog
+    id="panic-dialog"
+    aria-labelledby="panic-dialog-title"
+    closedby="any"
+    class="bg-[#0D120F] text-[#E4ECE7] border border-red-500/50 rounded-xl p-6 max-w-md w-full shadow-2xl"
+  >
+    <h2 id="panic-dialog-title" class="text-lg font-semibold text-[#F2F7F4] flex items-center gap-2">
+      <span class="w-2.5 h-2.5 rounded-full bg-red-500 inline-block"></span>
+      Confirm Panic Rollback &amp; Kill All
+    </h2>
+    <p class="text-xs text-[#C9D6CE] mt-2 leading-relaxed">
+      This will immediately revert all modified files in the working tree back to the session checkpoint and send <code class="text-red-400">SIGKILL</code> to all monitored MCP &amp; agent child processes.
+    </p>
+    <form method="dialog" class="mt-5 flex items-center justify-end gap-3">
+      <button
+        type="submit"
+        value="cancel"
+        autofocus
+        class="px-3.5 py-2 rounded-lg border border-[#2E4237] text-xs font-medium text-[#E4ECE7] hover:border-[#5BE49B] cursor-pointer"
+      >
+        Cancel
+      </button>
+      <button
+        type="submit"
+        value="confirm-panic"
+        class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-xs font-semibold text-white uppercase tracking-wide cursor-pointer"
+      >
+        Execute Panic Rollback
+      </button>
+    </form>
+  </dialog>
+
+  <script>
+    const modeDescriptions = {
+      strict: 'Hard stops on unusual file volume, loops & protected files',
+      balanced: 'Warns on mass edits · blocks loops & protected files',
+      yolo: 'File count limits disabled · keeps .env guard & loop breaker',
+    };
+
+    const panicDialog = document.getElementById('panic-dialog');
+    const panicOpenBtn = document.getElementById('panic-open-btn');
+
+    // Fallback for browsers without Invoker Commands (`command="show-modal"`)
+    if (!('commandForElement' in HTMLButtonElement.prototype) && panicOpenBtn && panicDialog) {
+      panicOpenBtn.addEventListener('click', () => {
+        if (!panicDialog.open) panicDialog.showModal();
+      });
+    }
+
+    // Fallback for browsers without `<dialog closedby="any">`
+    if (!('closedBy' in HTMLDialogElement.prototype) && panicDialog) {
+      const outside = (e, dialog) => {
+        const r = dialog.getBoundingClientRect();
+        return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+      };
+      let pressedOutside = false;
+      panicDialog.addEventListener('pointerdown', (e) => {
+        pressedOutside = outside(e, panicDialog);
+      });
+      panicDialog.addEventListener('pointerup', (e) => {
+        if (pressedOutside && outside(e, panicDialog)) panicDialog.close();
+      });
+    }
+
+    if (panicDialog) {
+      panicDialog.addEventListener('close', async () => {
+        const choice = panicDialog.returnValue;
+        panicDialog.returnValue = '';
+        if (choice === 'confirm-panic') {
+          await triggerPanic();
+        }
+      });
+    }
+
+    function setToast(msg, isAlert = false) {
+      const el = document.getElementById('status-toast');
+      if (!el) return;
+      el.textContent = msg;
+      el.className = isAlert ? 'text-red-400 font-semibold' : 'text-[#5BE49B]';
+    }
+
+    async function setMode(mode) {
+      const res = await fetch('/api/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        renderStatus(data.status);
+        setToast('mode switched to ' + mode);
+      }
+    }
+
+    async function killProcess(pid) {
+      const res = await fetch('/api/kill/' + pid, { method: 'POST' });
+      if (res.ok) {
+        setToast('killed process PID ' + pid, true);
+        await fetchStatus();
+      }
+    }
+
+    async function rollbackFile(filePath) {
+      const res = await fetch('/api/rollback-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath }),
+      });
+      if (res.ok) {
+        setToast('rolled back ' + filePath);
+        await fetchStatus();
+      }
+    }
+
+    async function triggerPanic() {
+      setToast('executing PANIC ROLLBACK & KILL ALL...', true);
+      const res = await fetch('/api/panic', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setToast(
+          'PANIC complete: ' + data.restoredCount + ' files restored, ' + data.killedPids.length + ' processes terminated',
+          true
+        );
+        await fetchStatus();
+      }
+    }
+
+    document.querySelectorAll('.mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.getAttribute('data-mode');
+        if (mode) setMode(mode);
+      });
+    });
+
+    const killFrozenBtn = document.getElementById('kill-frozen-btn');
+    if (killFrozenBtn) {
+      killFrozenBtn.addEventListener('click', async () => {
+        const res = await fetch('/api/kill-frozen', { method: 'POST' });
+        if (res.ok) {
+          setToast('killed all frozen processes', true);
+          await fetchStatus();
+        }
+      });
+    }
+
+    function renderStatus(state) {
+      if (!state) return;
+      const cfg = state.config;
+      document.getElementById('repo-path').textContent = state.rootDir || '.';
+      document.getElementById('metric-mode').textContent = cfg.mode;
+      document.getElementById('metric-mode-desc').textContent = modeDescriptions[cfg.mode] || '';
+      document.getElementById('protected-globs').textContent = (cfg.protectedFiles || []).join(', ');
+
+      // Highlight active mode button
+      document.querySelectorAll('.mode-btn').forEach((btn) => {
+        const m = btn.getAttribute('data-mode');
+        if (m === cfg.mode) {
+          btn.className = 'mode-btn px-3 py-1.5 rounded text-xs transition-colors bg-[#5BE49B] text-[#06140C] font-semibold';
+        } else {
+          btn.className = 'mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors text-[#8FA197] hover:text-[#F2F7F4]';
+        }
+      });
+
+      const modCount = (state.modifiedFiles || []).length;
+      document.getElementById('metric-files').textContent = String(modCount);
+      document.getElementById('metric-files-limit').textContent =
+        cfg.mode === 'yolo'
+          ? '/ unlimited (yolo)'
+          : '/ ' + cfg.limits.maxFilesWarn + ' warn · ' + cfg.limits.maxFilesHardStop + ' stop';
+
+      if (state.checkpoint) {
+        document.getElementById('metric-checkpoint').textContent =
+          'checkpoint: ' + state.checkpoint.ref + ' (' + state.checkpoint.snapshottedFiles + ' files)';
+      }
+
+      const tripped = state.trippedFiles || [];
+      const breakerEl = document.getElementById('metric-breaker');
+      if (tripped.length > 0) {
+        breakerEl.textContent = 'TRIPPED (' + tripped.length + ')';
+        breakerEl.className = 'text-xl font-semibold text-red-400 mt-1';
+      } else {
+        breakerEl.textContent = 'ARMED';
+        breakerEl.className = 'text-xl font-semibold text-[#5BE49B] mt-1';
+      }
+      document.getElementById('metric-breaker-sub').textContent =
+        'max ' + cfg.limits.maxEditsPerFilePerMinute + ' edits/file/min';
+
+      const procs = state.processes || [];
+      const reclaimable = procs.filter((p) => p.status === 'FROZEN' || p.status === 'STALE' || p.safety === 'safe-to-kill');
+      const reclaimableMb = reclaimable.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
+      const totalMb = procs.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
+
+      document.getElementById('metric-procs').textContent = String(procs.length);
+      const frozenEl = document.getElementById('metric-frozen');
+      frozenEl.textContent =
+        reclaimable.length > 0
+          ? reclaimable.length + ' stale/frozen (' + reclaimableMb.toFixed(0) + ' MB)'
+          : '0 stale · ' + totalMb.toFixed(0) + ' MB total';
+      frozenEl.className = reclaimable.length > 0 ? 'text-xs text-amber-400 font-semibold' : 'text-xs text-[#8FA197]';
+      document.getElementById('metric-silence-limit').textContent =
+        reclaimable.length > 0
+          ? 'reclaimable RAM: ' + reclaimableMb.toFixed(1) + ' MB (safe to kill)'
+          : 'zombie threshold: ' + cfg.limits.mcpSilenceTimeoutSec + 's silence';
+
+      if (killFrozenBtn) {
+        killFrozenBtn.textContent = 'Clean Up ' + reclaimable.length + ' (' + reclaimableMb.toFixed(0) + ' MB)';
+        killFrozenBtn.classList.toggle('hidden', reclaimable.length === 0);
+      }
+
+      renderEvents(state.events || []);
+      renderProcesses(procs);
+    }
+
+    function renderEvents(events) {
+      const container = document.getElementById('activity-list');
+      const badge = document.getElementById('event-count-badge');
+      if (badge) badge.textContent = events.length + ' events';
+      if (!container) return;
+
+      if (events.length === 0) {
+        container.innerHTML = '<div class="p-6 text-center text-xs text-[#8FA197]">No file activity recorded yet.</div>';
+        return;
+      }
+
+      container.innerHTML = events
+        .map((ev) => {
+          const time = new Date(ev.timestamp).toLocaleTimeString();
+          const badgeColor =
+            ev.severity === 'critical'
+              ? 'bg-red-950/80 text-red-300 border-red-500/40'
+              : ev.severity === 'warn'
+              ? 'bg-amber-950/80 text-amber-300 border-amber-500/40'
+              : 'bg-[#16201B] text-[#5BE49B] border-[#1F2C25]';
+
+          const rollbackBtn = ev.filePath
+            ? `<button type="button" onclick="window.__rollbackFile('${ev.filePath.replace(/'/g, "\\'")}')" class="text-[11px] px-2 py-0.5 rounded border border-[#2E4237] text-[#B4C3BA] hover:border-[#5BE49B] hover:text-[#F2F7F4] cursor-pointer">revert</button>`
+            : '';
+
+          return `
+            <div class="px-3 py-2 rounded-lg hover:bg-[#0B0F0D] flex items-center justify-between gap-3 text-xs">
+              <div class="flex items-center gap-2.5 min-w-0">
+                <span class="text-[#8FA197] shrink-0">${time}</span>
+                <span class="px-1.5 py-0.5 rounded border text-[10px] uppercase font-semibold shrink-0 ${badgeColor}">${ev.type}</span>
+                <span class="text-[#E4ECE7] truncate" title="${ev.message}">${ev.message}</span>
+              </div>
+              <div class="shrink-0">${rollbackBtn}</div>
+            </div>
+          `;
+        })
+        .join('');
+    }
+
+    function renderProcesses(procs) {
+      const container = document.getElementById('process-list');
+      if (!container) return;
+
+      if (procs.length === 0) {
+        container.innerHTML = '<div class="p-6 text-center text-xs text-[#8FA197]">No active MCP or agent child processes detected.</div>';
+        return;
+      }
+
+      container.innerHTML = procs
+        .map((proc) => {
+          const isSafeToKill = proc.status === 'FROZEN' || proc.status === 'STALE' || proc.safety === 'safe-to-kill';
+          const statusBadge =
+            proc.status === 'FROZEN'
+              ? 'bg-red-950 text-red-300 border-red-500/50 animate-pulse'
+              : proc.status === 'STALE'
+              ? 'bg-amber-950 text-amber-300 border-amber-500/50'
+              : proc.status === 'ACTIVE'
+              ? 'bg-[#16201B] text-[#5BE49B] border-[#2E4237]'
+              : proc.status === 'STANDBY'
+              ? 'bg-[#0B0F0D] text-[#B4C3BA] border-[#2E4237]'
+              : 'bg-[#0B0F0D] text-[#8FA197] border-[#1F2C25]';
+
+          const safetyPill = isSafeToKill
+            ? '<span class="px-1.5 py-0.2 rounded bg-red-950/80 text-red-300 border border-red-500/40 text-[10px] font-semibold">SAFE TO KILL</span>'
+            : proc.safety === 'standby-mcp'
+            ? '<span class="px-1.5 py-0.2 rounded bg-[#16201B] text-[#8FA197] border border-[#1F2C25] text-[10px]">STANDBY CHILD</span>'
+            : '<span class="px-1.5 py-0.2 rounded bg-[#16201B] text-[#5BE49B] border border-[#2E4237] text-[10px]">ACTIVE IN REPO</span>';
+
+          const cwdLine = proc.cwd
+            ? `<div class="text-[11px] ${isSafeToKill ? 'text-amber-300' : 'text-[#5BE49B]'} truncate max-w-md" title="${proc.cwd}">cwd: ${proc.cwd}</div>`
+            : '';
+
+          const reasonLine = proc.reason
+            ? `<div class="text-[11px] ${isSafeToKill ? 'text-red-300' : 'text-[#8FA197]'} truncate max-w-md" title="${proc.reason}">${proc.reason}</div>`
+            : '';
+
+          const mbDisplay = typeof proc.memoryMb === 'number' ? proc.memoryMb.toFixed(1) + ' MB' : proc.memory.toFixed(1) + '%';
+          const uptimeDisplay = proc.uptime || (proc.silenceSec + 's');
+
+          return `
+            <div class="px-3 py-2.5 rounded-lg ${isSafeToKill ? 'bg-red-950/20 border border-red-500/30' : 'hover:bg-[#0B0F0D]'} flex items-center justify-between gap-3 text-xs">
+              <div class="min-w-0 space-y-0.5">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="font-semibold text-[#F2F7F4]">PID ${proc.pid}</span>
+                  <span class="px-1.5 py-0.2 rounded border text-[10px] uppercase ${statusBadge}">${proc.status}</span>
+                  ${safetyPill}
+                  <span class="text-[#8FA197]">[${proc.category}]</span>
+                </div>
+                <div class="text-[#C9D6CE] truncate max-w-md" title="${proc.cmd}">${proc.cmd}</div>
+                ${cwdLine}
+                <div class="text-[11px] text-[#8FA197]">
+                  RAM: <span class="text-[#F2F7F4] font-semibold">${mbDisplay}</span> · Age: <span class="text-[#C9D6CE]">${uptimeDisplay}</span> · CPU: ${proc.cpu.toFixed(1)}%
+                </div>
+                ${reasonLine}
+              </div>
+              <button
+                type="button"
+                onclick="window.__killPid(${proc.pid})"
+                class="shrink-0 px-2.5 py-1.5 rounded ${isSafeToKill ? 'bg-red-600 hover:bg-red-500 text-white font-semibold' : 'border border-[#2E4237] text-[#B4C3BA] hover:border-red-400 hover:text-red-300'} cursor-pointer"
+                title="${isSafeToKill ? 'Safe to kill without breaking your active session' : 'Active or standby process in current session'}"
+              >
+                ${isSafeToKill ? 'Kill Stale' : 'Kill PID'}
+              </button>
+            </div>
+          `;
+        })
+        .join('');
+    }
+
+    window.__killPid = killProcess;
+    window.__rollbackFile = rollbackFile;
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        if (res.ok) {
+          const data = await res.json();
+          renderStatus(data);
+        }
+      } catch {
+        // Ignore transient network errors
+      }
+    }
+
+    function connectStream() {
+      const es = new EventSource('/api/events');
+      const dot = document.getElementById('connection-dot');
+      const txt = document.getElementById('connection-text');
+
+      es.onopen = () => {
+        if (dot) dot.className = 'w-2 h-2 rounded-full status-dot-live';
+        if (txt) txt.textContent = 'stream: connected';
+      };
+
+      es.onmessage = (evt) => {
+        try {
+          const payload = JSON.parse(evt.data);
+          if (payload.status) {
+            renderStatus(payload.status);
+          }
+        } catch {
+          // Ignore malformed event
+        }
+      };
+
+      es.onerror = () => {
+        if (dot) dot.className = 'w-2 h-2 rounded-full bg-amber-400';
+        if (txt) txt.textContent = 'stream: reconnecting...';
+      };
+    }
+
+    fetchStatus();
+    connectStream();
+  </script>
+</body>
+</html>
