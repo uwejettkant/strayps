@@ -1,7 +1,7 @@
 {
   "name": "agent-leash",
   "version": "0.1.0",
-  "description": "The AI Agent & MCP Watchdog for local repositories — circuit breaker for file thrashing, .env guard, and zombie MCP killer",
+  "description": "The AI Agent & MCP Watchdog for local repositories \u2014 circuit breaker for file thrashing, .env guard, and zombie MCP killer",
   "license": "MIT",
   "author": "Uwe Jettkant",
   "keywords": [
@@ -19,6 +19,15 @@
   "bin": {
     "agent-leash": "./dist/cli.js"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "src/ui/public",
@@ -26,10 +35,15 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/cli.ts --format cjs --dts --clean",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "dev": "tsx src/cli.ts watch",
-    "demo": "tsx src/cli.ts watch --demo"
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run typecheck && npm test && npm run build",
+    "dev": "tsx src/cli.ts watch --no-auto-rollback",
+    "demo": "tsx src/cli.ts watch --demo",
+    "prepublishOnly": "npm run check"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.8",
