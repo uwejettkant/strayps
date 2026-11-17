@@ -3,7 +3,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
-import { CONFIG_FILENAME, GuardConfigManager, parseMode } from './core/guard-config.js';
+import {
+  CONFIG_FILENAME,
+  CONFIG_KEY_INFO,
+  CONFIG_KEYS,
+  type ConfigKey,
+  GuardConfigManager,
+  type GuardLimits,
+  type GuardMode,
+  parseConfigValue,
+  parseMode,
+  resolveConfigKey,
+  writeConfigValue,
+} from './core/guard-config.js';
 import { LoopDetector } from './core/loop-detector.js';
 import { ProcessMonitor, type RawProcessInfo } from './core/process-monitor.js';
 import { WatchdogSession } from './core/session.js';
@@ -183,9 +195,11 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   const demo = Boolean(options.demo);
   const startedAt = Date.now();
 
+  // The demo never writes: a mode switch in the demo must not end up in the user's config file
   const configManager = new GuardConfigManager(
     rootDir,
     modeOverride ? { mode: modeOverride } : undefined,
+    { readOnly: demo },
   );
   const cfg = configManager.getConfig();
 
@@ -206,6 +220,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   const processMonitor = new ProcessMonitor({
     rootDir,
     mcpSilenceTimeoutSec: cfg.limits.mcpSilenceTimeoutSec,
+    staleSessionHours: cfg.limits.staleSessionHours,
     pollIntervalMs: 2000,
     ...(demo
       ? {
@@ -224,6 +239,8 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
 
   const checkpoint = await watcher.start();
   processMonitor.start();
+  // Edits to .agentguard.json apply to the running watchdog
+  session.watchConfigFile();
 
   let running: RunningWatchdogServer | null = null;
   if (options.dashboard !== false) {
@@ -341,12 +358,13 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   out(`  Mode:        ${cfg.mode.toUpperCase()}`);
   out(`  Checkpoint:  ${checkpoint.ref} (${checkpoint.type}, ${checkpoint.snapshottedFiles} files)`);
   out(`  Dashboard:   ${running ? running.url : 'off (--no-dashboard)'}`);
-  out(`  Limits:      warn=${cfg.limits.maxFilesWarn}, stop=${cfg.limits.maxFilesHardStop}, loop=${cfg.limits.maxEditsPerFilePerMinute}/min, mcp=${cfg.limits.mcpSilenceTimeoutSec}s`);
+  out(`  Limits:      warn=${cfg.limits.maxFilesWarn}, stop=${cfg.limits.maxFilesHardStop}, loop=${cfg.limits.maxEditsPerFilePerMinute}/min, mcp=${cfg.limits.mcpSilenceTimeoutSec}s, stale=${cfg.limits.staleSessionHours}h`);
   if (requestedPort === undefined && running && running.port !== DEFAULT_PORT) {
     out(palette.warn(`  Note:        port ${DEFAULT_PORT} was taken, using ${running.port}`));
   }
   for (const warning of configManager.getWarnings()) {
-    out(palette.warn(`  Config:      ${CONFIG_FILENAME}: ${warning}`));
+    // Warnings quote keys and values from the file, which the watched agent can write
+    out(palette.warn(`  Config:      ${CONFIG_FILENAME}: ${sanitize(warning)}`));
   }
   if (wantsTui && !foreground) {
     out(palette.dim('  Running as a background job: live view and commands are off, stop with "kill -TERM".'));
@@ -369,11 +387,13 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
 
 async function runStatus(dir: string): Promise<void> {
   const rootDir = resolveTargetDir(dir);
-  const configManager = new GuardConfigManager(rootDir);
+  const configManager = new GuardConfigManager(rootDir, undefined, { readOnly: true });
   const watcher = new RepoWatcher({ rootDir, configManager, dryRun: true });
+  const limits = configManager.getConfig().limits;
   const processMonitor = new ProcessMonitor({
     rootDir,
-    mcpSilenceTimeoutSec: configManager.getConfig().limits.mcpSilenceTimeoutSec,
+    mcpSilenceTimeoutSec: limits.mcpSilenceTimeoutSec,
+    staleSessionHours: limits.staleSessionHours,
   });
   const session = new WatchdogSession({ rootDir, configManager, watcher, processMonitor });
   await processMonitor.scan();
@@ -387,6 +407,104 @@ async function runStatus(dir: string): Promise<void> {
 
   process.stdout.write(`\n${palette.accent('agent-leash status')}\n${report.join('\n')}\n\n`);
   session.dispose();
+}
+
+/** A value for the terminal; it may come from `.agentguard.json`, so it is untrusted text. */
+function displayValue(value: unknown): string {
+  return sanitize(Array.isArray(value) ? value.join(', ') : String(value));
+}
+
+function effectiveValue(manager: GuardConfigManager, key: ConfigKey): string {
+  const config = manager.getConfig();
+  if (key === 'mode') return config.mode;
+  if (key === 'protectedFiles') return config.protectedFiles.join(', ');
+  return String(config.limits[key.slice('limits.'.length) as keyof GuardLimits]);
+}
+
+function runConfigShow(dir: string): void {
+  const rootDir = resolveTargetDir(dir);
+  const manager = new GuardConfigManager(rootDir, undefined, { readOnly: true });
+  const palette = createPalette(shouldUseColor(process.stdout), supportsTruecolor());
+  const sources = manager.getSources();
+  const lines: string[] = [
+    '',
+    `${palette.accent('agent-leash config')} — ${sanitize(tildify(rootDir))}`,
+    manager.hasConfigFile()
+      ? `  ${CONFIG_FILENAME} found; values marked (file) come from it, all others are built-in defaults.`
+      : `  No ${CONFIG_FILENAME} here; every value is a built-in default.`,
+    '',
+  ];
+  for (const key of CONFIG_KEYS) {
+    const source = sources[key];
+    const sourceLabel = source === 'default' ? palette.dim('(default)') : palette.ok(`(${source})`);
+    lines.push(`  ${palette.strong(key)} = ${palette.accent(sanitize(effectiveValue(manager, key)))}  ${sourceLabel}`);
+    lines.push(`      ${palette.dim(CONFIG_KEY_INFO[key])}`);
+  }
+  const warnings = manager.getWarnings();
+  if (warnings.length > 0) {
+    lines.push('', palette.warn(`  Problems in ${CONFIG_FILENAME}:`));
+    for (const warning of warnings) lines.push(palette.warn(`    - ${sanitize(warning)}`));
+  }
+  lines.push(
+    '',
+    `  Change a value:    agent-leash config set limits.maxFilesWarn 20`,
+    `  Back to default:   agent-leash config unset limits.maxFilesWarn`,
+    `  Edits to the file, by hand or with these commands, apply to a running agent-leash within a second.`,
+    '',
+  );
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+function requireConfigKey(input: string): ConfigKey {
+  const key = resolveConfigKey(input);
+  if (!key) {
+    throw new CliError(`Unknown setting "${input}". Known settings: ${CONFIG_KEYS.join(', ')}`);
+  }
+  return key;
+}
+
+function writeOrFail(rootDir: string, key: ConfigKey, value: GuardMode | number | string[] | undefined) {
+  try {
+    return writeConfigValue(rootDir, key, value);
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function reportConfigProblems(rootDir: string): void {
+  const warnings = new GuardConfigManager(rootDir, undefined, { readOnly: true }).getWarnings();
+  for (const warning of warnings) {
+    process.stdout.write(`  Note: ${sanitize(warning)}\n`);
+  }
+}
+
+function runConfigSet(rawKey: string, rawValue: string, dir: string): void {
+  const rootDir = resolveTargetDir(dir);
+  const key = requireConfigKey(rawKey);
+  const parsed = parseConfigValue(key, rawValue);
+  if (!parsed.ok) {
+    throw new CliError(parsed.error);
+  }
+  const result = writeOrFail(rootDir, key, parsed.value);
+  const was = result.previous !== undefined ? ` (was ${displayValue(result.previous)})` : '';
+  process.stdout.write(
+    `${result.created ? 'Created' : 'Updated'} ${tildify(result.filePath)}: ${key} = ${displayValue(parsed.value)}${was}\n`,
+  );
+  reportConfigProblems(rootDir);
+  process.stdout.write('A running agent-leash picks this up within a second.\n');
+}
+
+function runConfigUnset(rawKey: string, dir: string): void {
+  const rootDir = resolveTargetDir(dir);
+  const key = requireConfigKey(rawKey);
+  const result = writeOrFail(rootDir, key, undefined);
+  const fallback = sanitize(effectiveValue(new GuardConfigManager(rootDir, undefined, { readOnly: true }), key));
+  if (!result.changed) {
+    process.stdout.write(`${key} is not set in ${CONFIG_FILENAME}; the default (${fallback}) already applies.\n`);
+    return;
+  }
+  process.stdout.write(`Removed ${key} from ${tildify(result.filePath)}; the default (${fallback}) applies now.\n`);
+  reportConfigProblems(rootDir);
 }
 
 function runInit(dir: string, options: { mode: string; force?: boolean }): void {
@@ -422,7 +540,7 @@ export function createCliProgram(): Command {
     .option('--no-tui', 'Plain log output instead of the full-screen terminal view')
     .option('--no-dashboard', 'Do not start the local web dashboard')
     .option('-q, --quiet', 'Plain output only: print warnings and critical events, not every edit')
-    .option('--demo', 'Simulated rogue agent and stale processes; reads and writes nothing')
+    .option('--demo', 'Simulated rogue agent and stale processes; changes no files and no processes')
     .action((dir: string, options: WatchOptions) => runWatch(dir, options));
 
   program
@@ -439,6 +557,31 @@ export function createCliProgram(): Command {
     .option('-f, --force', 'Replace an existing .agentguard.json')
     .action((dir: string, options: { mode: string; force?: boolean }) => runInit(dir, options));
 
+  const config = program
+    .command('config')
+    .description('Show or change the settings in .agentguard.json');
+
+  config
+    .command('show', { isDefault: true })
+    .description('Show every setting, its value, where it comes from and what it does')
+    .argument('[dir]', 'Target repository directory', '.')
+    .action((dir: string) => runConfigShow(dir));
+
+  config
+    .command('set')
+    .description('Set one value in .agentguard.json (the file is created if missing)')
+    .argument('<key>', 'Setting, e.g. limits.maxFilesWarn, maxFilesWarn or mode')
+    .argument('<value>', 'New value; protectedFiles takes globs separated by commas')
+    .option('-C, --dir <dir>', 'Target repository directory', '.')
+    .action((key: string, value: string, options: { dir: string }) => runConfigSet(key, value, options.dir));
+
+  config
+    .command('unset')
+    .description('Remove one value from .agentguard.json, so the built-in default applies')
+    .argument('<key>', 'Setting, e.g. limits.maxFilesWarn')
+    .option('-C, --dir <dir>', 'Target repository directory', '.')
+    .action((key: string, options: { dir: string }) => runConfigUnset(key, options.dir));
+
   return program;
 }
 
@@ -448,7 +591,8 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
     await createCliProgram().parseAsync(argv);
   } catch (err) {
     if (err instanceof CliError) {
-      process.stderr.write(`agent-leash: ${err.message}\n`);
+      // Messages can quote .agentguard.json (V8 parse errors include its text): untrusted
+      process.stderr.write(`agent-leash: ${sanitize(err.message)}\n`);
     } else {
       process.stderr.write(
         `agent-leash error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,

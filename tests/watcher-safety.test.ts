@@ -214,6 +214,34 @@ describe('RepoWatcher rollback: what it may touch', () => {
   });
 });
 
+describe('RepoWatcher protected files', () => {
+  it('applies directory patterns like secrets/** even when started from another directory', () => {
+    const repo = makeTmpDir();
+    expect(process.cwd()).not.toBe(repo);
+    writeFiles(repo, {
+      'secrets/key.pem': 'original key\n',
+      'prisma/schema.prisma': 'model A {}\n',
+      'src/secrets/not-protected.ts': 'x\n',
+    });
+    const configManager = new GuardConfigManager(repo, {
+      protectedFiles: ['secrets/**', 'prisma/schema.prisma'],
+    });
+    const watcher = new RepoWatcher({ rootDir: repo, configManager, keepDiscarded: false });
+    watcher.createCheckpoint();
+    const onProtected = vi.fn();
+    watcher.on('protected-file', onProtected);
+
+    writeFiles(repo, { 'secrets/key.pem': 'tampered\n', 'prisma/schema.prisma': 'model B {}\n' });
+    watcher.handleFileSystemEvent('change', 'secrets/key.pem');
+    watcher.handleFileSystemEvent('change', path.join(repo, 'prisma/schema.prisma'));
+    watcher.handleFileSystemEvent('change', 'src/secrets/not-protected.ts');
+
+    expect(onProtected).toHaveBeenCalledTimes(2);
+    expect(read(repo, 'secrets/key.pem')).toBe('original key\n');
+    expect(read(repo, 'prisma/schema.prisma')).toBe('model A {}\n');
+  });
+});
+
 describe('RepoWatcher rollback: bookkeeping', () => {
   it('records the trigger before the rollback it caused', () => {
     const repo = makeTmpDir();

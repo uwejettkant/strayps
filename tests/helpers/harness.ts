@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { type GuardConfig, GuardConfigManager } from '../../src/core/guard-config.js';
+import { GuardConfigManager, type GuardConfigOverrides } from '../../src/core/guard-config.js';
 import { ProcessMonitor, type RawProcessInfo } from '../../src/core/process-monitor.js';
 import { WatchdogSession } from '../../src/core/session.js';
 import { RepoWatcher, type RepoWatcherOptions } from '../../src/core/watcher.js';
@@ -71,7 +71,7 @@ export interface Harness {
 export interface HarnessOptions {
   dir?: string;
   files?: Record<string, string | Buffer>;
-  config?: Partial<GuardConfig>;
+  config?: GuardConfigOverrides;
   procs?: RawProcessInfo[];
   watcher?: Partial<RepoWatcherOptions>;
   killGraceMs?: number;

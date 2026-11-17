@@ -28,7 +28,8 @@ It is a safety tool. People install it so that less goes wrong. Every change is 
    - *Server*: binds to loopback; answers only when addressed as this machine (Host allowlist); every state-changing request needs the dashboard token and the same origin.
    - *Untrusted text*: file names, command lines, working directories and reasons come from the processes being watched. In the dashboard they go through `esc()`, in the terminal through `sanitize()`. No inline event handlers, no generated JavaScript.
    - *Asking first*: every destructive action a person triggers (revert, kill, clean, panic) asks for confirmation. Automatic rollbacks are the product's job and are announced, not asked.
-   - *Demo mode* reads nothing and writes nothing.
+   - *Demo mode* changes nothing: it writes no file (not even `.agentguard.json`) and reaches no real process. The only file it reads is `.agentguard.json`.
+   - *Config reloads*: an `.agentguard.json` that is not valid changes nothing in a running watchdog. Every applied reload is logged as a warning, because the agent being watched can write the file too. Edits to the file are never treated as agent edits and never reverted.
 4. **One path for state and actions.** Front ends read `WatchdogSession.getSnapshot()` and act through session methods. A new action goes into the session first, then into the API route, the terminal command and the dashboard, with a test at session level and one per front end.
 5. **One source per fact.** The version lives in `package.json` (`getVersion()`). Numbers in the README (tests, bundle size) are copied from command output, never estimated.
 6. **Git and publishing.** Work on `feature/<topic>` or `fix/<topic>`, Conventional Commits, one commit per finished block. No push, no tag, no `npm publish`, no GitHub release without the maintainer's explicit go-ahead.
@@ -77,18 +78,18 @@ scripts/scenarios/package-check.sh     # build, pack, install the tarball, impor
 
 | Module | Responsibility |
 | :--- | :--- |
-| `src/core/guard-config.ts` | `.agentguard.json`, defaults, validation with warnings, glob matching, mode policies (`strict`, `balanced`, `yolo`). `parseMode` is strict (user input), `normalizeMode` lenient. |
+| `src/core/guard-config.ts` | `.agentguard.json`, defaults, validation with warnings, glob matching, mode policies (`strict`, `balanced`, `yolo`). `reload` applies a changed file only when all of it is valid; `switchMode` writes only the `mode` key; `writeConfigValue` changes one key for `agent-leash config`; `getSources` says where each value comes from. `parseMode` is strict (user input), `normalizeMode` lenient. |
 | `src/core/loop-detector.ts` | Sliding 60-second window per file; trips when `maxEditsPerFilePerMinute` is exceeded. |
 | `src/core/watcher.ts` | File events, session checkpoint (memory snapshot plus a git ref for large tracked files), rollback and panic rollback, kept copies of replaced versions, recognition of its own writes by content, `dryRun` for the demo. |
 | `src/core/process-monitor.ts` | Process list, working directories (`/proc` on Linux, `lsof` elsewhere), classification (`ACTIVE`, `IDLE`, `STANDBY`, `STALE`, `FROZEN`), `inWatchedRepo` via the process tree, `host` (what a session is attached to), graceful termination. |
-| `src/core/session.ts` | The only place where the three meet. Snapshot, actions (`setMode`, `rollbackFile`, `killProcess`, `killStale`, `panic`), event log, coalesced updates. |
+| `src/core/session.ts` | The only place where the three meet. Snapshot, actions (`setMode`, `rollbackFile`, `killProcess`, `killStale`, `panic`), event log, coalesced updates, live config (`watchConfigFile` polls `.agentguard.json`, `reloadConfig` applies it to monitor and circuit breaker). |
 | `src/server.ts` | Hono app: request guards (Host, origin, token), routes, SSE, page delivery with nonce and CSP, `listenWatchdogServer` (loopback, port fallback). |
 | `src/ui/commands.ts` | Command language shared by both terminal front ends: parse, run (destructive commands return a confirmation step), tab completion. |
 | `src/ui/terminal.ts` | `renderFrame` (pure: state in, lines out) and `TerminalUI` (raw-mode input, alternate screen, restore on exit). |
 | `src/ui/plain.ts` | Line output for pipes, logs, background jobs and `--no-tui`. |
 | `src/ui/format.ts` | `sanitize`, truncation, colors (honors `NO_COLOR`), shared tables. |
 | `src/ui/public/index.html` | The dashboard: one file, no build step. Placeholders `__LEASH_TOKEN__`, `__LEASH_VERSION__`, `__LEASH_NONCE__` are filled by the server. |
-| `src/program.ts` | The CLI: argument validation, wiring, choice between full-screen and plain output, shutdown. |
+| `src/program.ts` | The CLI: commands (`watch`, `status`, `init`, `config show/set/unset`), argument validation, wiring, choice between full-screen and plain output, shutdown. |
 | `src/cli.ts` / `src/index.ts` | Binary entry / library entry. Importing the library never starts anything. |
 
 How the CLI picks its output: full-screen view when stdin and stdout are a terminal and the process is in the foreground; plain lines otherwise (pipe, file, background job, `--no-tui`). In plain mode commands are read from stdin; the end of stdin does not stop the watchdog.
@@ -99,6 +100,7 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 - English for code, comments, commit messages and documentation in this repository.
 - Comments say why, not what. A safety rule in code names the failure it prevents.
 - A new event type is added to `WatchEventType`; front ends color by `severity`, so they need no change.
+- A new setting goes into `GuardLimits` (or `GuardConfig`), `CONFIG_KEY_INFO` and the settings table in the README in the same change; `agent-leash config` lists it from there.
 - Paths inside the product are relative to the repository root with forward slashes. A backslash is a separator only on Windows (`toPosixPath`).
 - No new runtime dependency without a reason that fits in one sentence. Runtime dependencies today: `commander`, `chokidar`, `hono`, `@hono/node-server`, `ps-list`.
 - User-facing wording is plain and literal: say what will happen to which file or process.

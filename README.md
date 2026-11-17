@@ -48,16 +48,17 @@ No account, no API keys, no config file required. Run directly in any repository
 # 1. Protect your current repository: live view in this terminal, dashboard on http://localhost:4321
 npx agent-leash
 
-# 2. Or try the simulation first (a rogue agent and stale processes; reads and writes nothing)
+# 2. Or try the simulation first (a rogue agent and stale processes; changes no file and no process)
 npx agent-leash --demo
 ```
 
 Stop it by typing `exit` (or `q`, or Ctrl+C).
 
-Want to customize thresholds per repo? Generate an optional `.agentguard.json`:
+Want other limits or more protected files in this repository? See and change the settings from the terminal (details in [Configuration](#configuration)):
 
 ```bash
-npx agent-leash init
+npx agent-leash config                      # every setting, its value and where it comes from
+npx agent-leash config set maxFilesWarn 25  # change one value; a running agent-leash applies it at once
 ```
 
 ---
@@ -69,7 +70,7 @@ Started in a terminal, `agent-leash` shows a full-screen live view of the same s
 | Command | What it does |
 | :--- | :--- |
 | `exit`, `quit`, `q` | Stop the watchdog (Ctrl+C and Ctrl+D work too) |
-| `mode <strict\|balanced\|yolo>` | Switch the guard mode |
+| `mode <strict\|balanced\|yolo>` | Switch the guard mode (saved to `.agentguard.json` if the repository has one) |
 | `revert <file>` | Roll one modified file back to the session checkpoint (Tab completes file names) |
 | `kill <pid>` | Terminate one process from the list: SIGTERM first, SIGKILL if it does not exit |
 | `clean` | Terminate everything classified as stale or frozen |
@@ -135,20 +136,58 @@ flowchart LR
 
 ---
 
-## Protection Modes & `.agentguard.json`
+## Choosing a Mode
 
-Switch modes live in the Web Dashboard (`http://localhost:4321`) or via CLI (`npx agent-leash watch --mode yolo`):
+The mode decides how file volume and protected files are judged. The circuit breaker (more than 5 edits to one file within 60 seconds) and the process monitor work the same in every mode.
 
-| Mode | File Volume Limits | Protected Globs (`.env*`, `docker-compose*.yml`) | 60s Loop Circuit Breaker | Best For |
-| :--- | :--- | :--- | :--- | :--- |
-| **`strict`** | Hard stop at **15 files** | `.env*` warn-only; infra configs auto-reverted | **Active** | Surgical bugfixes & hotfixes |
-| **`balanced`** *(default)* | Warns at **15**, hard stop at **40** | `.env*` warn-only; infra configs auto-reverted | **Active** | Daily feature work |
-| **`yolo`** *(refactoring)* | **Unlimited** | `.env*` warn-only; other patterns off | **Active** | Large-scale renames & migrations |
+| Mode | Modified files | Protected files | Use it when |
+| :--- | :--- | :--- | :--- |
+| **`strict`** | Hard-stop alarm at **15** | Every pattern | An agent should make a small, targeted change: a bugfix, a hotfix, work in a sensitive repository, or a run you do not follow closely |
+| **`balanced`** *(default)* | Warning at **15**, hard-stop alarm at **40** | Every pattern | Everyday work with an agent you keep an eye on |
+| **`yolo`** | No limit | Only `.env*` and `.git` patterns; every other pattern is off, including your own | You expect the agent to touch many files on purpose (renames, migrations, formatter runs, dependency upgrades) and you are watching |
 
-Reaching a file limit raises an alarm in the terminal view, the log and the dashboard. It does not stop the agent by itself; `panic` does. A broken or implausible `.agentguard.json` is reported at startup and the affected values fall back to the defaults.
+What this means in practice:
+
+- **Protected files** are reverted as soon as they change, and the replaced version is kept. `.env*` files only raise a warning, because agent-leash never reads their contents. With `--no-auto-rollback` nothing is reverted in any mode; you get the alert only.
+- **A hard stop is an alarm, not a brake.** Reaching a file limit raises an alarm in the terminal view, the log and the dashboard. It does not stop the agent; `panic` does, after asking.
+- The numbers above are the defaults. Every one of them can be changed, see [Configuration](#configuration).
+
+Choose the mode for one run with `--mode`, or switch it while running with `mode <name>` in the terminal view or the buttons in the dashboard.
+
+---
+
+## Configuration
+
+agent-leash works without any configuration. To change a value for one repository, put an `.agentguard.json` in its root. Commit it if your team should share the settings, or add it to `.gitignore` if they are yours alone.
+
+```bash
+npx agent-leash config                       # every setting: value, where it comes from, what it does
+npx agent-leash config set maxFilesWarn 25   # change one value (creates the file if needed)
+npx agent-leash config set protectedFiles '.env*, docker-compose*.yml, secrets/**'
+npx agent-leash config unset maxFilesWarn    # back to the default
+npx agent-leash init                         # or write a file with every default, to edit by hand
+```
+
+`config set` and `config unset` change one key and leave the rest of the file as it is; `-C <dir>` points them at another repository. Keys work with or without the `limits.` prefix.
+
+| Setting | Default | What it does |
+| :--- | :--- | :--- |
+| `mode` | `balanced` | `strict`, `balanced` or `yolo`, see [Choosing a Mode](#choosing-a-mode) |
+| `limits.maxFilesWarn` | `15` | Files modified in this session before a warning (in `strict`: the hard-stop alarm) |
+| `limits.maxFilesHardStop` | `40` | Files modified in this session before the hard-stop alarm |
+| `limits.maxEditsPerFilePerMinute` | `5` | Edits to one file within 60 seconds before the circuit breaker reverts it |
+| `limits.mcpSilenceTimeoutSec` | `45` | Seconds without CPU or file activity before a process counts as frozen |
+| `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale |
+| `protectedFiles` | `.env*`, `docker-compose*.yml`, `.git/**` | Globs relative to the repository root. Your list replaces the default one, so keep `.env*` in it if you want those warnings |
+
+**Changes apply while agent-leash runs.** A saved change is picked up within about a second, whether it comes from `config set` or from your editor, and the activity log says what changed, for example `.agentguard.json reloaded: limits.maxFilesWarn 15 → 25`. Reloads are logged as warnings, so they also show with `--quiet`: the agent you are watching can write this file as easily as you can. An edit that is not valid (broken JSON, a limit below 1) is not applied at all; the previous settings stay and the log says why. At startup, an invalid value falls back to its default with a warning. Edits to `.agentguard.json` itself are never counted as agent edits and never reverted.
+
+**Which mode wins.** `--mode` sets the mode for one run and leaves the file alone. A mode switch in the terminal view or the dashboard is saved to `.agentguard.json` if the repository has one, and only the `mode` key changes. Without a file, the switch lasts for this session. A mode you write into the file while agent-leash runs takes over again. In short: the most recent choice wins. The demo never writes the file.
+
+**One repository per instance, every process in view.** File guarding is per repository: each watched repository has its own checkpoint and its own settings. There is no global configuration file. The process monitor is machine-wide: every instance lists the agent and MCP processes of the whole machine, and `limits.staleSessionHours` decides when a session in another repository counts as stale. To guard several repositories, start one agent-leash in each; if the default dashboard port is taken, the next free one is used.
 
 <details>
-<summary><strong>Default <code>.agentguard.json</code> schema</strong> (click to expand)</summary>
+<summary><strong>Every setting in one file</strong> (the values <code>agent-leash init</code> writes)</summary>
 
 ```json
 {
@@ -158,7 +197,8 @@ Reaching a file limit raises an alarm in the terminal view, the log and the dash
     "maxFilesWarn": 15,
     "maxFilesHardStop": 40,
     "maxEditsPerFilePerMinute": 5,
-    "mcpSilenceTimeoutSec": 45
+    "mcpSilenceTimeoutSec": 45,
+    "staleSessionHours": 6
   }
 }
 ```
@@ -206,7 +246,7 @@ console.log(dashboard.url);
 - Only processes from the monitored list can be terminated, and only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
 - File names and command lines are treated as untrusted text in the dashboard and in the terminal.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
-- Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The dashboard page loads Tailwind from its CDN; with `--no-dashboard` no network request is made at all.
+- Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The watched agent can also edit `.agentguard.json`; a running agent-leash applies the edit and logs it as a warning. The dashboard page loads Tailwind from its CDN; with `--no-dashboard` no network request is made at all.
 
 ## Platform Support
 
@@ -250,7 +290,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 144 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 169 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

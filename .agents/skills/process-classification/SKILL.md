@@ -15,7 +15,7 @@ A wrong label here ends with a user clicking "Clean up" and losing a session the
 | :--- | :--- | :--- |
 | 1 | dev server pattern, not in another repo | `ACTIVE`, not offered for cleanup |
 | 2 | working directory in another repo, older than `staleSessionHours` (6 h) | `STALE`, safe to kill |
-| 3 | MCP process, no resolvable working directory, not part of the watched session, older than 6 h, CPU below 0.5 % | `STALE`, safe to kill |
+| 3 | MCP process, no resolvable working directory, not part of the watched session, older than `staleSessionHours`, CPU below 0.5 % | `STALE`, safe to kill |
 | 4 | parent is PID 1, not an agent, 0 % CPU, older than the silence timeout | `FROZEN`, safe to kill |
 | 5 | MCP process, 0 % CPU, parent alive | `STANDBY` |
 | 6 | agent that belongs to the watched repository | `ACTIVE` / `IDLE`, never stale or frozen |
@@ -24,6 +24,8 @@ A wrong label here ends with a user clicking "Clean up" and losing a session the
 "Belongs to the watched repository" (`inWatchedRepo`) means: its own working directory is inside the repository, **or** one of its ancestors in the process tree is such a process. MCP servers often run in `/` or in their install directory; only the tree tells whose they are.
 
 `host` names the application a process tree hangs off (VS Code, Claude Desktop, a terminal …). It is shown to the user and does not change the classification today.
+
+Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `limits.mcpSilenceTimeoutSec` (default 45) in `.agentguard.json`, applied to a running monitor by `setStaleSessionHours` / `setSilenceTimeoutSec` when the file changes. A lower value makes more processes look safe to kill, so a rule uses the configured value (`staleSessionSec`, `mcpSilenceTimeoutSec`), never the default as a literal.
 
 ## 2. Incidents (each has a regression test in `tests/process-control.test.ts`)
 

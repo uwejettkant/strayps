@@ -399,6 +399,17 @@ export class ProcessMonitor extends EventEmitter {
     return this.mcpSilenceTimeoutSec;
   }
 
+  /** Age after which a session in another repository counts as stale. */
+  public setStaleSessionHours(hours: number): void {
+    if (hours > 0) {
+      this.staleSessionSec = hours * 3600;
+    }
+  }
+
+  public getStaleSessionHours(): number {
+    return this.staleSessionSec / 3600;
+  }
+
   public setAgentActive(active: boolean): void {
     this.agentActive = active;
   }
@@ -596,7 +607,7 @@ export class ProcessMonitor extends EventEmitter {
         safety = 'safe-to-kill';
         reason = `Old session in ${displayCwd} (${formattedUptime})${hostNote} — safe to kill`;
       } else if (!belongsToWatchedRepo && !rawCwd && isStaleByAge && cpu < 0.5 && category === 'mcp') {
-        // Detached MCP process without a repository cwd that has been sitting around for >6h
+        // Detached MCP process without a repository cwd, older than staleSessionHours
         status = 'STALE';
         safety = 'safe-to-kill';
         reason = `Stale detached MCP process (${formattedUptime} old)${hostNote} — safe to kill`;

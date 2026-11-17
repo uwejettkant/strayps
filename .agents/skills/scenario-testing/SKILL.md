@@ -61,6 +61,8 @@ python3 scripts/scenarios/pty-drive.py --cols 120 --rows 30 --cwd "$SANDBOX" -- 
 
 While it waits, edit files in `$SANDBOX` from a second shell: one normal edit, `.env`, `docker-compose.yml`, six quick edits of one file. Expected: the edit appears; `.env` warns and stays changed; `docker-compose.yml` is reverted; the sixth edit trips the breaker and the file is back at its committed content. The exit summary names the directory with the kept copies; look into it.
 
+Live configuration, same setup. From the second shell: `node dist/cli.js config set maxFilesWarn 30 -C "$SANDBOX"`, then save broken JSON into `$SANDBOX/.agentguard.json`, then a valid file with fewer `protectedFiles`; in the view type `mode strict`. Expected: a warning line `.agentguard.json reloaded: limits.maxFilesWarn … → 30` and the header shows `warn 30`; the broken save is reported once and changes nothing; the shorter list is reported as `no longer protected: …`; after `mode strict` the file has `"mode": "strict"` and still every value written by hand, and no second reload line follows. `node dist/cli.js config "$SANDBOX"` lists each value with `(file)` or `(default)`. With `--demo` instead, `mode yolo` must leave the file byte for byte unchanged.
+
 ## 4. Plain output
 
 No terminal means plain lines. Check with a pipe:

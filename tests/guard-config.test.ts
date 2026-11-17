@@ -39,14 +39,26 @@ describe('.agentguard.json', () => {
     const manager = managerWith({
       mode: 'strict',
       protectedFiles: ['secrets/**', 'prisma/schema.prisma'],
-      limits: { maxFilesWarn: 5, maxFilesHardStop: 9, maxEditsPerFilePerMinute: 3, mcpSilenceTimeoutSec: 120 },
+      limits: {
+        maxFilesWarn: 5,
+        maxFilesHardStop: 9,
+        maxEditsPerFilePerMinute: 3,
+        mcpSilenceTimeoutSec: 120,
+        staleSessionHours: 24,
+      },
     });
     expect(manager.getWarnings()).toEqual([]);
     expect(manager.hasConfigFile()).toBe(true);
     expect(manager.getConfig()).toEqual({
       mode: 'strict',
       protectedFiles: ['secrets/**', 'prisma/schema.prisma'],
-      limits: { maxFilesWarn: 5, maxFilesHardStop: 9, maxEditsPerFilePerMinute: 3, mcpSilenceTimeoutSec: 120 },
+      limits: {
+        maxFilesWarn: 5,
+        maxFilesHardStop: 9,
+        maxEditsPerFilePerMinute: 3,
+        mcpSilenceTimeoutSec: 120,
+        staleSessionHours: 24,
+      },
     });
   });
 

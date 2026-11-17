@@ -19,6 +19,7 @@ export type WatchEventType =
   | 'checkpoint-created'
   | 'watch-error'
   | 'mode-change'
+  | 'config-reload'
   | 'process-alert'
   | 'process-recovered'
   | 'process-killed';

@@ -6,15 +6,28 @@
  */
 export {
   CONFIG_FILENAME,
+  CONFIG_KEY_INFO,
+  CONFIG_KEYS,
+  type ConfigKey,
+  type ConfigReloadResult,
+  type ConfigSource,
   DEFAULT_GUARD_CONFIG,
   type GuardConfig,
   GuardConfigManager,
+  type GuardConfigManagerOptions,
+  type GuardConfigOverrides,
   type GuardLimits,
   type GuardMode,
   globToRegExp,
   matchesGlobPattern,
   normalizeMode,
+  type ParsedConfigValue,
+  parseConfigValue,
   parseMode,
+  type PersistModeResult,
+  resolveConfigKey,
+  type WriteConfigValueResult,
+  writeConfigValue,
 } from './core/guard-config.js';
 export {
   type LoopAlert,
