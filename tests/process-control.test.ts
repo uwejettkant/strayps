@@ -1,0 +1,338 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  parseLsofCwdOutput,
+  ProcessMonitor,
+  type RawProcessInfo,
+  resolveProcessCwds,
+} from '../src/core/process-monitor.js';
+import { takeBlockedKills } from './helpers/kill-guard.js';
+
+const REPO = '/work/current-repo';
+const OTHER = '/work/other-repo';
+
+interface Setup {
+  monitor: ProcessMonitor;
+  kills: Array<{ pid: number; signal: NodeJS.Signals | undefined }>;
+  procs: RawProcessInfo[];
+  alive: Set<number>;
+}
+
+function setup(procs: RawProcessInfo[], options: { killGraceMs?: number; selfPid?: number } = {}): Setup {
+  const kills: Setup['kills'] = [];
+  const alive = new Set(procs.map((p) => p.pid));
+  const table = [...procs];
+  const monitor = new ProcessMonitor({
+    rootDir: REPO,
+    selfPid: options.selfPid ?? 999_999,
+    killGraceMs: options.killGraceMs ?? 3000,
+    processLister: async () => table.filter((p) => alive.has(p.pid)),
+    processKiller: (pid, signal) => {
+      kills.push({ pid, signal });
+      return alive.has(pid);
+    },
+    processAlive: (pid) => alive.has(pid),
+  });
+  return { monitor, kills, procs: table, alive };
+}
+
+const agent = (pid: number, cwd: string, extra: Partial<RawProcessInfo> = {}): RawProcessInfo => ({
+  pid,
+  name: 'claude',
+  cmd: 'claude --model claude-sonnet-5-5',
+  cwd,
+  cpu: 0,
+  rssKb: 150_000,
+  etime: '10:00',
+  ...extra,
+});
+
+const mcp = (pid: number, ppid: number, extra: Partial<RawProcessInfo> = {}): RawProcessInfo => ({
+  pid,
+  ppid,
+  name: 'node',
+  cmd: 'node /x/node_modules/.bin/some-mcp-server',
+  cpu: 0,
+  rssKb: 30_000,
+  etime: '10:00',
+  ...extra,
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('ProcessMonitor classification (production rules)', () => {
+  it('treats an idle MCP server with a living parent as STANDBY, however long it waits', async () => {
+    const { monitor } = setup([agent(100, REPO, { cpu: 3 }), mcp(101, 100, { etime: '09:12:00' })]);
+
+    const t0 = 1_000_000;
+    monitor.recordFileActivity(t0);
+    await monitor.scan(t0);
+    const later = await monitor.scan(t0 + 10 * 60_000);
+
+    const child = later.find((p) => p.pid === 101)!;
+    expect(child.status).toBe('STANDBY');
+    expect(child.safety).toBe('standby-mcp');
+    expect(monitor.getFrozenProcesses()).toHaveLength(0);
+  });
+
+  it('keeps tool processes of the watched session out of STALE, whatever their own working directory is', async () => {
+    // Second half of the "22,042 seconds" incident: the session's MCP server was flagged too.
+    // MCP servers often run in "/" (unresolvable) or in their own install directory.
+    const { monitor } = setup([
+      agent(100, REPO, { cpu: 3, etime: '06:07:22' }),
+      mcp(101, 100, { etime: '06:07:20' }),
+      mcp(102, 100, { etime: '06:07:20', cwd: '/opt/tools/some-mcp' }),
+    ]);
+
+    const list = await monitor.scan(1_000);
+    for (const pid of [101, 102]) {
+      const child = list.find((p) => p.pid === pid)!;
+      expect(child.status).toBe('STANDBY');
+      expect(child.inWatchedRepo).toBe(true);
+    }
+    expect(monitor.getFrozenProcesses()).toHaveLength(0);
+  });
+
+  it('never marks the agent session of the watched repo as stale or frozen, across scans and beyond 6 hours', async () => {
+    // Regression for the "22,042 seconds" incident: an idle moment after six hours of work
+    const { monitor } = setup([agent(62536, REPO, { ppid: 62163, etime: '06:07:22', cpu: 0 })]);
+    const onFrozen = vi.fn();
+    monitor.on('process-frozen', onFrozen);
+
+    const t0 = 2_000_000;
+    monitor.recordFileActivity(t0);
+    await monitor.scan(t0);
+    await monitor.scan(t0 + 46_000);
+    const list = await monitor.scan(t0 + 30 * 60_000);
+
+    expect(list[0].status).toBe('IDLE');
+    expect(list[0].safety).toBe('active-repo');
+    expect(list[0].inWatchedRepo).toBe(true);
+    expect(onFrozen).not.toHaveBeenCalled();
+  });
+
+  it('flags an old session in another repository as STALE and names what it is attached to', async () => {
+    const { monitor } = setup([
+      { pid: 500, ppid: 1, name: 'Code', cmd: '/Applications/Visual Studio Code.app/Contents/MacOS/Code' },
+      { pid: 501, ppid: 500, name: 'Code Helper (Plugin)', cmd: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)' },
+      agent(502, OTHER, { ppid: 501, etime: '02-15:40:05' }),
+      mcp(503, 502, { cwd: OTHER, etime: '02-15:40:01' }),
+    ]);
+
+    const list = await monitor.scan(1_000);
+    const session = list.find((p) => p.pid === 502)!;
+    expect(session.status).toBe('STALE');
+    expect(session.safety).toBe('safe-to-kill');
+    expect(session.host).toBe('VS Code');
+    expect(session.reason).toContain('attached to VS Code');
+    expect(session.inWatchedRepo).toBe(false);
+    // the editor itself is not an agent process
+    expect(list.map((p) => p.pid).sort()).toEqual([502, 503]);
+  });
+
+  it('marks tool processes started by an agent of the watched repo as belonging to it', async () => {
+    const { monitor } = setup([
+      agent(100, REPO, { cpu: 2 }),
+      { pid: 110, ppid: 100, name: 'npm', cmd: 'npm exec some-mcp-server' },
+      mcp(111, 110, { cwd: '/' }),
+      agent(200, OTHER, { cpu: 2 }),
+      mcp(201, 200, { cwd: OTHER }),
+    ]);
+
+    const list = await monitor.scan(1_000);
+    const byPid = new Map(list.map((p) => [p.pid, p]));
+    expect(byPid.get(100)?.inWatchedRepo).toBe(true);
+    expect(byPid.get(111)?.inWatchedRepo).toBe(true);
+    expect(byPid.get(200)?.inWatchedRepo).toBe(false);
+    expect(byPid.get(201)?.inWatchedRepo).toBe(false);
+    // the npm wrapper with a running child is not listed separately
+    expect(byPid.has(110)).toBe(false);
+  });
+
+  it('does not list the wrappers that launched the watchdog itself', async () => {
+    const { monitor } = setup(
+      [
+        { pid: 10, ppid: 1, name: 'zsh', cmd: '-zsh' },
+        { pid: 20, ppid: 10, name: 'node', cmd: `node ${REPO}/node_modules/.bin/tsx src/cli.ts watch` },
+        { pid: 30, ppid: 20, name: 'node', cmd: 'node src/cli.ts watch' },
+        { pid: 40, ppid: 1, name: 'node', cmd: 'node ./node_modules/.bin/tsx watch server.ts', cwd: REPO },
+      ],
+      { selfPid: 30 },
+    );
+
+    const list = await monitor.scan(1_000);
+    expect(list.map((p) => p.pid)).toEqual([40]);
+  });
+
+  it('keeps the previous list and reports when the process scan itself fails', async () => {
+    let fail = false;
+    const monitor = new ProcessMonitor({
+      rootDir: REPO,
+      selfPid: 999_999,
+      processLister: async () => {
+        if (fail) throw new Error('ps: command not found');
+        return [agent(100, REPO, { cpu: 1 })];
+      },
+    });
+    const onError = vi.fn();
+    monitor.on('scan-error', onError);
+
+    await monitor.scan(1_000);
+    fail = true;
+    const list = await monitor.scan(2_000);
+
+    expect(list.map((p) => p.pid)).toEqual([100]);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs one scan at a time when calls overlap', async () => {
+    let calls = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const monitor = new ProcessMonitor({
+      rootDir: REPO,
+      selfPid: 999_999,
+      processLister: async () => {
+        calls += 1;
+        await gate;
+        return [agent(100, REPO)];
+      },
+    });
+
+    const first = monitor.scan(1_000);
+    const second = monitor.scan(1_001);
+    release();
+    await Promise.all([first, second]);
+    expect(calls).toBe(1);
+  });
+
+  // Known gaps: the behavior is not decided yet (AGENTS.md, section 6)
+  it.todo('does not call an other-repo session stale while it is demonstrably in use');
+  it.todo('does not flag an idle dev server (tsx watch, nodemon, ...) as frozen after 45 seconds');
+  it.todo('measures CPU activity from CPU time deltas instead of ps %cpu (lifetime average on Linux)');
+});
+
+describe('ProcessMonitor termination', () => {
+  it('only terminates processes from its own list, never an arbitrary PID', async () => {
+    const { monitor, kills } = setup([agent(100, REPO)]);
+    await monitor.scan(1_000);
+
+    expect(monitor.killProcess(4242)).toBe(false);
+    expect(monitor.killProcess(1)).toBe(false);
+    expect(monitor.killProcess(process.pid)).toBe(false);
+    expect(kills).toEqual([]);
+  });
+
+  it('asks nicely first: SIGTERM, and no SIGKILL if the process exits in time', async () => {
+    vi.useFakeTimers();
+    const { monitor, kills, alive } = setup([agent(100, REPO)]);
+    await monitor.scan(1_000);
+    const onKilled = vi.fn();
+    monitor.on('process-killed', onKilled);
+
+    expect(monitor.killProcess(100)).toBe(true);
+    expect(kills).toEqual([{ pid: 100, signal: 'SIGTERM' }]);
+    expect(monitor.getProcesses()).toHaveLength(0);
+
+    alive.delete(100); // it exits cleanly
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(kills).toHaveLength(1);
+    expect(onKilled).toHaveBeenCalledTimes(1);
+    expect(onKilled.mock.calls[0][0]).toMatchObject({ pid: 100, signal: 'SIGTERM' });
+  });
+
+  it('escalates to SIGKILL when SIGTERM is ignored, and hides the process meanwhile', async () => {
+    vi.useFakeTimers();
+    const { monitor, kills } = setup([agent(100, REPO)]);
+    await monitor.scan(1_000);
+    const onKilled = vi.fn();
+    monitor.on('process-killed', onKilled);
+
+    monitor.killProcess(100);
+    // still running, but not offered for a second kill during the grace period
+    expect(await monitor.scan(2_000)).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(kills).toEqual([
+      { pid: 100, signal: 'SIGTERM' },
+      { pid: 100, signal: 'SIGKILL' },
+    ]);
+    expect(onKilled).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pid: 100, signal: 'SIGKILL', escalated: true }),
+    );
+  });
+
+  it('settles pending terminations when the monitor stops', async () => {
+    vi.useFakeTimers();
+    const { monitor, kills } = setup([agent(100, REPO)]);
+    await monitor.scan(1_000);
+
+    monitor.killProcess(100);
+    monitor.stop();
+    expect(kills.map((k) => k.signal)).toEqual(['SIGTERM', 'SIGKILL']);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(kills).toHaveLength(2);
+  });
+
+  it('limits a repo-scoped kill to the watched repository and its tool processes', async () => {
+    const { monitor, kills } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      mcp(101, 100, { cwd: '/' }),
+      agent(200, OTHER, { cpu: 1 }),
+      mcp(201, 200, { cwd: OTHER }),
+    ]);
+    await monitor.scan(1_000);
+
+    const killed = monitor.killInWatchedRepo('SIGKILL');
+    expect(killed.sort()).toEqual([100, 101]);
+    expect(kills.every((k) => k.signal === 'SIGKILL')).toBe(true);
+    expect(kills.map((k) => k.pid).sort()).toEqual([100, 101]);
+  });
+
+  it('the default killer cannot reach a real process from inside the test suite', async () => {
+    const monitor = new ProcessMonitor({
+      rootDir: REPO,
+      selfPid: 999_999,
+      processLister: async () => [agent(process.ppid, REPO)],
+      // no processKiller: this is the real one
+    });
+    await monitor.scan(1_000);
+
+    expect(monitor.killProcess(process.ppid)).toBe(false);
+    expect(takeBlockedKills()).toEqual([{ pid: process.ppid, signal: 'SIGTERM' }]);
+    monitor.stop();
+  });
+});
+
+describe('working directory resolution', () => {
+  it('parses lsof field output and skips the root directory', () => {
+    const map = parseLsofCwdOutput('p100\nfcwd\nn/work/repo\np200\nfcwd\nn/\np300\nfcwd\nn/work/with space\n');
+    expect(Array.from(map.entries())).toEqual([
+      [100, '/work/repo'],
+      [300, '/work/with space'],
+    ]);
+  });
+
+  it('reads /proc/<pid>/cwd on Linux without spawning lsof', async () => {
+    const asked: string[] = [];
+    const map = await resolveProcessCwds(
+      [100, 200, 300],
+      (target) => {
+        asked.push(target);
+        if (target === '/proc/200/cwd') throw new Error('EACCES');
+        return target === '/proc/100/cwd' ? '/work/repo' : '/';
+      },
+      'linux',
+    );
+    expect(asked).toEqual(['/proc/100/cwd', '/proc/200/cwd', '/proc/300/cwd']);
+    expect(Array.from(map.entries())).toEqual([[100, '/work/repo']]);
+  });
+
+  it('returns an empty map for an empty PID list', async () => {
+    expect((await resolveProcessCwds([])).size).toBe(0);
+  });
+});

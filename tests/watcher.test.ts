@@ -153,7 +153,7 @@ describe('GuardConfigManager & RepoWatcher', () => {
       processLister: async () => [],
     });
 
-    const { app } = createWatchdogApp({
+    const { app, token } = createWatchdogApp({
       rootDir: tmpDir,
       configManager,
       watcher,
@@ -168,24 +168,27 @@ describe('GuardConfigManager & RepoWatcher', () => {
 
     const statusRes = await app.request('/api/status');
     expect(statusRes.status).toBe(200);
-    const statusJson = await statusRes.json();
+    const statusJson = (await statusRes.json()) as { modifiedFiles: string[] };
     expect(statusJson.modifiedFiles).toContain('a.ts');
     expect(statusJson.modifiedFiles).toContain('new-agent-file.ts');
 
     // Switch mode via API
     const modeRes = await app.request('/api/mode', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-leash-token': token },
       body: JSON.stringify({ mode: 'strict' }),
     });
     expect(modeRes.status).toBe(200);
-    const modeJson = await modeRes.json();
+    const modeJson = (await modeRes.json()) as { mode: string };
     expect(modeJson.mode).toBe('strict');
 
     // Execute PANIC ROLLBACK & KILL ALL via API
-    const panicRes = await app.request('/api/panic', { method: 'POST' });
+    const panicRes = await app.request('/api/panic', {
+      method: 'POST',
+      headers: { 'x-leash-token': token },
+    });
     expect(panicRes.status).toBe(200);
-    const panicJson = await panicRes.json();
+    const panicJson = (await panicRes.json()) as { ok: boolean };
     expect(panicJson.ok).toBe(true);
     expect(fs.readFileSync(fileA, 'utf-8')).toBe('const a = 1;\n');
     expect(fs.existsSync(fileB)).toBe(false);

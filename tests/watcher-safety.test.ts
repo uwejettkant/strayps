@@ -1,0 +1,408 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { GuardConfigManager } from '../src/core/guard-config.js';
+import { RepoWatcher } from '../src/core/watcher.js';
+import {
+  cleanupTmpDirs,
+  commitAll,
+  exists,
+  git,
+  initGitRepo,
+  makeTmpDir,
+  read,
+  writeFiles,
+} from './helpers/harness.js';
+
+const isPosix = process.platform !== 'win32';
+
+afterEach(() => {
+  cleanupTmpDirs();
+  vi.useRealTimers();
+});
+
+function watcherFor(dir: string, options: Partial<ConstructorParameters<typeof RepoWatcher>[0]> = {}) {
+  const watcher = new RepoWatcher({ rootDir: dir, ...options });
+  watcher.createCheckpoint();
+  return watcher;
+}
+
+describe('RepoWatcher rollback: what it may touch', () => {
+  it('refuses relative and absolute paths outside the repository and leaves those files alone', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'victim.txt': 'precious\n' });
+    writeFiles(repo, { 'src/a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+
+    const relative = path.relative(repo, path.join(outside, 'victim.txt'));
+    expect(relative.startsWith('..')).toBe(true);
+
+    expect(watcher.rollbackFile(relative)).toBe(false);
+    expect(watcher.rollbackFile(path.join(outside, 'victim.txt'))).toBe(false);
+    expect(watcher.rollbackFile('../'.repeat(12) + 'etc/hosts')).toBe(false);
+    expect(watcher.rollbackFile('')).toBe(false);
+    expect(watcher.rollbackFile('src/a.ts\0.txt')).toBe(false);
+
+    expect(read(outside, 'victim.txt')).toBe('precious\n');
+    const refusals = watcher.getRecentEvents().filter((e) => e.type === 'rollback-failed');
+    expect(refusals.length).toBeGreaterThanOrEqual(3);
+    expect(refusals[0].severity).toBe('warn');
+  });
+
+  it('refuses ignored paths such as .git and node_modules, even though they are inside the repository', () => {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    writeFiles(repo, { 'a.ts': 'a\n', 'node_modules/pkg/index.js': 'module.exports = 1;\n' });
+    commitAll(repo);
+    const watcher = watcherFor(repo);
+
+    expect(watcher.rollbackFile('.git/config')).toBe(false);
+    expect(watcher.rollbackFile('.git/HEAD')).toBe(false);
+    expect(watcher.rollbackFile('node_modules/pkg/index.js')).toBe(false);
+
+    expect(exists(repo, '.git/config')).toBe(true);
+    expect(exists(repo, '.git/HEAD')).toBe(true);
+    expect(exists(repo, 'node_modules/pkg/index.js')).toBe(true);
+  });
+
+  it.skipIf(!isPosix)('refuses a path that leaves the repository through a symlinked directory', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'victim.txt': 'precious\n' });
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    fs.symlinkSync(outside, path.join(repo, 'link'));
+    const watcher = watcherFor(repo);
+
+    expect(watcher.rollbackFile('link/victim.txt')).toBe(false);
+    expect(read(outside, 'victim.txt')).toBe('precious\n');
+  });
+
+  it('never deletes a file that existed at session start just because it holds no copy of it', () => {
+    const repo = makeTmpDir();
+    const big = Buffer.alloc(5 * 1024 * 1024 + 10, 1);
+    writeFiles(repo, { 'data/big.bin': big, 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+    // too large for the in-memory snapshot
+    expect(watcher.getCheckpoint()?.snapshottedFiles).toBe(1);
+
+    fs.appendFileSync(path.join(repo, 'data/big.bin'), 'x');
+    watcher.handleFileSystemEvent('change', 'data/big.bin');
+
+    expect(watcher.rollbackFile('data/big.bin')).toBe(false);
+    expect(exists(repo, 'data/big.bin')).toBe(true);
+    expect(fs.statSync(path.join(repo, 'data/big.bin')).size).toBe(big.length + 1);
+
+    const result = watcher.panicRollbackAll();
+    expect(result.skippedFiles).toContain('data/big.bin');
+    expect(exists(repo, 'data/big.bin')).toBe(true);
+  });
+
+  it('restores a large tracked file from the git checkpoint without touching the index', () => {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    const big = Buffer.alloc(5 * 1024 * 1024 + 10, 7);
+    writeFiles(repo, { 'assets/big.bin': big, 'a.ts': 'a\n' });
+    commitAll(repo);
+    const watcher = watcherFor(repo);
+    expect(watcher.getCheckpoint()?.type).toBe('git-head');
+
+    fs.writeFileSync(path.join(repo, 'assets/big.bin'), 'overwritten by agent');
+    watcher.handleFileSystemEvent('change', 'assets/big.bin');
+
+    expect(watcher.rollbackFile('assets/big.bin')).toBe(true);
+    expect(fs.readFileSync(path.join(repo, 'assets/big.bin')).equals(big)).toBe(true);
+    // nothing staged: the index still matches HEAD
+    expect(execGitStatus(repo)).toBe('');
+  });
+
+  it.skipIf(!isPosix)('does not remove a symlink that existed at session start', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'shared/config.json': '{"v":1}\n' });
+    fs.symlinkSync('shared/config.json', path.join(repo, 'config.json'));
+    const watcher = watcherFor(repo);
+
+    watcher.handleFileSystemEvent('change', 'config.json');
+    expect(watcher.rollbackFile('config.json')).toBe(false);
+    expect(fs.lstatSync(path.join(repo, 'config.json')).isSymbolicLink()).toBe(true);
+  });
+
+  it('removes a file created during the session and keeps a private copy of it', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+
+    writeFiles(repo, { 'src/rogue.ts': 'export const rogue = true;\n' });
+    watcher.handleFileSystemEvent('add', 'src/rogue.ts');
+    expect(watcher.getModifiedFiles()).toContain('src/rogue.ts');
+
+    expect(watcher.rollbackFile('src/rogue.ts')).toBe(true);
+    expect(exists(repo, 'src/rogue.ts')).toBe(false);
+    expect(watcher.getModifiedFiles()).not.toContain('src/rogue.ts');
+
+    const discardDir = watcher.getDiscardDir();
+    expect(discardDir).toBeTruthy();
+    const kept = path.join(discardDir!, '00001', 'src', 'rogue.ts');
+    expect(fs.readFileSync(kept, 'utf-8')).toBe('export const rogue = true;\n');
+    if (isPosix) {
+      expect(fs.statSync(discardDir!).mode & 0o077).toBe(0);
+    }
+    fs.rmSync(discardDir!, { recursive: true, force: true });
+  });
+
+  it('keeps the replaced version when it rolls a modified file back, and reports where', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'src/app.ts': 'original\n' });
+    const watcher = watcherFor(repo);
+
+    writeFiles(repo, { 'src/app.ts': 'three hours of agent work\n' });
+    watcher.handleFileSystemEvent('change', 'src/app.ts');
+    expect(watcher.rollbackFile('src/app.ts')).toBe(true);
+
+    expect(read(repo, 'src/app.ts')).toBe('original\n');
+    const rollback = watcher.getRecentEvents().find((e) => e.type === 'rollback');
+    const keptPath = rollback?.message.match(/replaced version kept: (.+)\)$/)?.[1];
+    expect(keptPath).toBeTruthy();
+    expect(fs.readFileSync(keptPath!, 'utf-8')).toBe('three hours of agent work\n');
+    fs.rmSync(watcher.getDiscardDir()!, { recursive: true, force: true });
+  });
+
+  it('can be told not to keep replaced versions', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'original\n' });
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    writeFiles(repo, { 'a.ts': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'a.ts');
+
+    expect(watcher.rollbackFile('a.ts')).toBe(true);
+    expect(watcher.getDiscardDir()).toBeNull();
+  });
+
+  it('never reads, restores or copies .env files, not even on panic', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { '.env': 'SECRET=1\n', 'config/.env.production': 'SECRET=2\n', 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+
+    writeFiles(repo, { '.env': 'SECRET=changed\n', 'a.ts': 'changed\n' });
+    watcher.handleFileSystemEvent('change', '.env');
+    watcher.handleFileSystemEvent('change', 'a.ts');
+
+    expect(watcher.rollbackFile('.env')).toBe(false);
+    const result = watcher.panicRollbackAll();
+    expect(result.restoredFiles).toEqual(['a.ts']);
+    expect(read(repo, '.env')).toBe('SECRET=changed\n');
+
+    const discardDir = watcher.getDiscardDir()!;
+    const keptFiles = fs.readdirSync(discardDir, { recursive: true }).map(String);
+    expect(keptFiles.some((f) => f.includes('.env'))).toBe(false);
+    fs.rmSync(discardDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(!isPosix)('handles file names that contain backslashes, quotes and markup', () => {
+    const repo = makeTmpDir();
+    const odd = `src/it's "odd" <b>back\\slash</b>.ts`;
+    writeFiles(repo, { [odd]: 'original\n' });
+    const watcher = watcherFor(repo);
+
+    writeFiles(repo, { [odd]: 'changed\n' });
+    watcher.handleFileSystemEvent('change', path.join(repo, odd));
+    expect(watcher.getModifiedFiles()).toEqual([odd]);
+
+    expect(watcher.rollbackFile(odd)).toBe(true);
+    expect(read(repo, odd)).toBe('original\n');
+    fs.rmSync(watcher.getDiscardDir()!, { recursive: true, force: true });
+  });
+});
+
+describe('RepoWatcher rollback: bookkeeping', () => {
+  it('records the trigger before the rollback it caused', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'original\n' });
+    const configManager = new GuardConfigManager(repo, {
+      limits: { maxFilesWarn: 15, maxFilesHardStop: 40, maxEditsPerFilePerMinute: 2, mcpSilenceTimeoutSec: 45 },
+    });
+    const watcher = watcherFor(repo, { configManager, keepDiscarded: false });
+
+    for (let i = 1; i <= 3; i++) {
+      writeFiles(repo, { 'a.ts': `edit ${i}\n` });
+      watcher.handleFileSystemEvent('change', 'a.ts');
+    }
+
+    // newest first
+    const types = watcher.getRecentEvents(2).map((e) => e.type);
+    expect(types).toEqual(['rollback', 'loop-detected']);
+    expect(read(repo, 'a.ts')).toBe('original\n');
+  });
+
+  it('treats the file system echo of its own rollback as its own, but not a new foreign edit', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'docker-compose.yml': 'version: "3.8"\n' });
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    const onProtected = vi.fn();
+    watcher.on('protected-file', onProtected);
+
+    writeFiles(repo, { 'docker-compose.yml': 'tampered\n' });
+    watcher.handleFileSystemEvent('change', 'docker-compose.yml');
+    expect(onProtected).toHaveBeenCalledTimes(1);
+    expect(read(repo, 'docker-compose.yml')).toBe('version: "3.8"\n');
+
+    // chokidar reports our own write, possibly late and more than once
+    watcher.handleFileSystemEvent('change', 'docker-compose.yml');
+    watcher.handleFileSystemEvent('change', 'docker-compose.yml');
+    expect(onProtected).toHaveBeenCalledTimes(1);
+
+    // the agent tampers again right away: that is not an echo
+    writeFiles(repo, { 'docker-compose.yml': 'tampered again\n' });
+    watcher.handleFileSystemEvent('change', 'docker-compose.yml');
+    expect(onProtected).toHaveBeenCalledTimes(2);
+    expect(read(repo, 'docker-compose.yml')).toBe('version: "3.8"\n');
+  });
+
+  it('stops counting a file as modified once it is back at the checkpoint and re-arms the limits', () => {
+    const repo = makeTmpDir();
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 4; i++) files[`f${i}.ts`] = 'original\n';
+    writeFiles(repo, files);
+    const configManager = new GuardConfigManager(repo, {
+      limits: { maxFilesWarn: 2, maxFilesHardStop: 3, maxEditsPerFilePerMinute: 5, mcpSilenceTimeoutSec: 45 },
+    });
+    const watcher = watcherFor(repo, { configManager, keepDiscarded: false });
+    const onHardStop = vi.fn();
+    watcher.on('limit-hard-stop', onHardStop);
+
+    for (let i = 0; i < 3; i++) {
+      writeFiles(repo, { [`f${i}.ts`]: 'changed\n' });
+      watcher.handleFileSystemEvent('change', `f${i}.ts`);
+    }
+    expect(onHardStop).toHaveBeenCalledTimes(1);
+    expect(watcher.getLimitState()).toBe('hard-stop');
+
+    expect(watcher.rollbackFile('f0.ts')).toBe(true);
+    expect(watcher.rollbackFile('f1.ts')).toBe(true);
+    expect(watcher.getModifiedFiles()).toEqual(['f2.ts']);
+    expect(watcher.getLimitState()).toBe('ok');
+
+    // crossing the limit a second time raises the alarm a second time
+    for (const name of ['f0.ts', 'f1.ts']) {
+      writeFiles(repo, { [name]: 'changed again\n' });
+      watcher.handleFileSystemEvent('change', name);
+    }
+    expect(onHardStop).toHaveBeenCalledTimes(2);
+  });
+
+  it('panic restores changed files, removes new ones and reports what it could not restore', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'a\n', 'b.ts': 'b\n', 'untouched.ts': 'same\n' });
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    const untouchedMtime = fs.statSync(path.join(repo, 'untouched.ts')).mtimeMs;
+
+    writeFiles(repo, { 'a.ts': 'changed\n', 'new.ts': 'new\n' });
+    fs.rmSync(path.join(repo, 'b.ts'));
+    watcher.handleFileSystemEvent('change', 'a.ts');
+    watcher.handleFileSystemEvent('add', 'new.ts');
+    watcher.handleFileSystemEvent('unlink', 'b.ts');
+
+    const result = watcher.panicRollbackAll();
+    expect(result.restoredFiles.sort()).toEqual(['a.ts', 'b.ts', 'new.ts']);
+    expect(result.skippedFiles).toEqual([]);
+    expect(read(repo, 'a.ts')).toBe('a\n');
+    expect(read(repo, 'b.ts')).toBe('b\n');
+    expect(exists(repo, 'new.ts')).toBe(false);
+    expect(fs.statSync(path.join(repo, 'untouched.ts')).mtimeMs).toBe(untouchedMtime);
+    expect(watcher.getModifiedFiles()).toEqual([]);
+  });
+});
+
+describe('RepoWatcher dry run (demo mode)', () => {
+  it('reads nothing, writes nothing and starts no file watcher', async () => {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    writeFiles(repo, { 'src/auth/session.ts': 'real committed work\n' });
+    commitAll(repo);
+    const objectsBefore = countGitObjects(repo);
+
+    const watcher = new RepoWatcher({ rootDir: repo, dryRun: true });
+    const checkpoint = await watcher.start();
+    expect(checkpoint).toMatchObject({ ref: 'demo', snapshottedFiles: 0 });
+    // `git stash create` would have written objects
+    expect(countGitObjects(repo)).toBe(objectsBefore);
+
+    writeFiles(repo, { 'src/auth/session.ts': 'uncommitted work during the demo\n' });
+    for (let i = 0; i < 7; i++) watcher.handleFileSystemEvent('change', 'src/auth/session.ts');
+    watcher.handleFileSystemEvent('add', 'src/new.ts');
+
+    expect(watcher.rollbackFile('src/auth/session.ts')).toBe(true);
+    const panic = watcher.panicRollbackAll();
+    expect(panic.count).toBeGreaterThan(0);
+
+    expect(read(repo, 'src/auth/session.ts')).toBe('uncommitted work during the demo\n');
+    expect(watcher.getDiscardDir()).toBeNull();
+    const messages = watcher.getRecentEvents().map((e) => e.message).join('\n');
+    expect(messages).toContain('rollback simulated');
+    expect(messages).toContain('no files touched');
+    await watcher.stop();
+  });
+});
+
+describe('RepoWatcher health', () => {
+  it('reports once when the watched directory disappears', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+    const onError = vi.fn();
+    watcher.on('watch-error', onError);
+
+    watcher.checkHealth();
+    expect(onError).not.toHaveBeenCalled();
+
+    fs.rmSync(repo, { recursive: true, force: true });
+    watcher.checkHealth();
+    watcher.checkHealth();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].severity).toBe('critical');
+  });
+
+  it('falls back to a memory snapshot in a git repository without commits', () => {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    expect(watcher.getCheckpoint()?.type).toBe('memory-snapshot');
+
+    writeFiles(repo, { 'a.ts': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'a.ts');
+    expect(watcher.rollbackFile('a.ts')).toBe(true);
+    expect(read(repo, 'a.ts')).toBe('a\n');
+  });
+
+  it('survives a late file watcher error instead of crashing the process', async () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = new RepoWatcher({ rootDir: repo });
+    await watcher.start();
+    const onError = vi.fn();
+    watcher.on('watch-error', onError);
+    try {
+      const internal = (watcher as unknown as { watcher: { emit: (name: string, err: Error) => void } }).watcher;
+      expect(() => internal.emit('error', new Error('EMFILE: too many open files'))).not.toThrow();
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0][0].message).toContain('EMFILE');
+    } finally {
+      await watcher.stop();
+    }
+  });
+
+  // Known gaps: the behavior is not decided yet (AGENTS.md, section 6)
+  it.todo('ignores files matched by .gitignore (build output, caches, local databases)');
+  it.todo('rolls back to the last good version instead of the session start');
+  it.todo('does something on a hard stop besides reporting it');
+});
+
+function execGitStatus(repo: string): string {
+  // staged or unstaged differences against HEAD, porcelain format
+  return git(repo, 'status', '--porcelain');
+}
+
+function countGitObjects(repo: string): number {
+  return Number(git(repo, 'count-objects').split(' ')[0]);
+}

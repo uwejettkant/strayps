@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -40,6 +41,10 @@ export interface MonitoredProcess {
   status: ProcessHealthStatus;
   safety: ProcessKillSafety;
   reason: string;
+  /** True if the process runs inside the watched repository or descends from a process that does. */
+  inWatchedRepo: boolean;
+  /** Application the process tree hangs off (VS Code, Claude Desktop, a terminal, ...), if recognizable. */
+  host?: string;
 }
 
 export interface ProcessMonitorOptions {
@@ -51,6 +56,26 @@ export interface ProcessMonitorOptions {
   selfPid?: number;
   processLister?: () => Promise<RawProcessInfo[]>;
   processKiller?: (pid: number, signal?: NodeJS.Signals) => boolean;
+  /**
+   * Resolves working directories for PIDs. Defaults to `/proc` (Linux) or `lsof` (macOS) with the
+   * built-in lister, and to "unknown" when a custom `processLister` is supplied.
+   */
+  cwdResolver?: (pids: number[]) => Promise<Map<number, string>>;
+  /**
+   * Liveness check used to escalate from SIGTERM to SIGKILL. Defaults to `process.kill(pid, 0)` with
+   * the built-in killer, and to "already gone" when a custom `processKiller` is supplied.
+   */
+  processAlive?: (pid: number) => boolean;
+  /** Time a process gets to exit after SIGTERM before SIGKILL is sent (default 3000 ms, 0 disables). */
+  killGraceMs?: number;
+}
+
+export interface ProcessKilledEvent {
+  pid: number;
+  process?: MonitoredProcess;
+  signal: NodeJS.Signals;
+  /** True when SIGKILL followed an ignored SIGTERM. */
+  escalated?: boolean;
 }
 
 const TARGET_KEYWORDS = [
@@ -77,6 +102,23 @@ const IGNORED_SYSTEM_PATTERNS = [
   'com.apple.webkit.',
   '.xpc/',
   'plugin-container.app',
+];
+
+/** Applications a process tree can hang off. First match on the nearest ancestor wins. */
+const HOST_PATTERNS: Array<[RegExp, string]> = [
+  [/visual studio code|code helper|\/code\.app\/|code - insiders|vscode-server|vscodium/i, 'VS Code'],
+  [/\/cursor\.app\/|cursor helper/i, 'Cursor'],
+  [/windsurf/i, 'Windsurf'],
+  [/antigravity/i, 'Antigravity'],
+  [/\/applications\/claude\.app\//i, 'Claude Desktop'],
+  [/\/zed\.app\//i, 'Zed'],
+  [/jetbrains|intellij|webstorm|pycharm|goland|phpstorm|rubymine/i, 'JetBrains IDE'],
+  [/(^|[\s/])tmux(\s|:|$)/i, 'tmux'],
+  [/(^|[\s/])sshd(\s|:|$)/i, 'SSH session'],
+  [
+    /iterm|\/terminal\.app\/|\/warp\.app\/|ghostty|kitty|alacritty|wezterm|\/hyper\.app\/|konsole|gnome-terminal|xterm/i,
+    'terminal',
+  ],
 ];
 
 /**
@@ -127,11 +169,47 @@ export function parseElapsedTime(etime?: string): { elapsedSec: number; formatte
 }
 
 /**
- * Resolves the working directory (`cwd`) for a list of PIDs on macOS/Linux using `lsof`.
+ * Parses `lsof -a -d cwd -p <pids> -Fn` output (`p<pid>` / `n<path>` records).
  */
-async function resolveProcessCwds(pids: number[]): Promise<Map<number, string>> {
+export function parseLsofCwdOutput(stdout: string): Map<number, string> {
+  const cwdMap = new Map<number, string>();
+  let currentPid: number | null = null;
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('p')) {
+      currentPid = Number(line.slice(1));
+    } else if (line.startsWith('n') && currentPid !== null) {
+      const rawPath = line.slice(1).trim();
+      if (rawPath && rawPath !== '/') {
+        cwdMap.set(currentPid, rawPath);
+      }
+    }
+  }
+  return cwdMap;
+}
+
+/**
+ * Resolves the working directory (`cwd`) for a list of PIDs: `/proc/<pid>/cwd` on Linux,
+ * `lsof` elsewhere. Unresolvable PIDs are simply missing from the result.
+ */
+export async function resolveProcessCwds(
+  pids: number[],
+  readLink: (target: string) => string = fs.readlinkSync,
+  platform: NodeJS.Platform = process.platform,
+): Promise<Map<number, string>> {
   const cwdMap = new Map<number, string>();
   if (pids.length === 0) return cwdMap;
+
+  if (platform === 'linux') {
+    for (const pid of pids) {
+      try {
+        const cwd = readLink(`/proc/${pid}/cwd`);
+        if (cwd && cwd !== '/') cwdMap.set(pid, cwd);
+      } catch {
+        // Process gone or owned by another user
+      }
+    }
+    if (cwdMap.size > 0) return cwdMap;
+  }
 
   try {
     const { stdout } = await execFileAsync(
@@ -139,19 +217,14 @@ async function resolveProcessCwds(pids: number[]): Promise<Map<number, string>> 
       ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fn'],
       { timeout: 1500 },
     );
-    let currentPid: number | null = null;
-    for (const line of stdout.split('\n')) {
-      if (line.startsWith('p')) {
-        currentPid = Number(line.slice(1));
-      } else if (line.startsWith('n') && currentPid !== null) {
-        const rawPath = line.slice(1).trim();
-        if (rawPath && rawPath !== '/') {
-          cwdMap.set(currentPid, rawPath);
-        }
-      }
+    return parseLsofCwdOutput(stdout);
+  } catch (err) {
+    // lsof exits non-zero when some PIDs vanished but still prints the rest
+    const partial = (err as { stdout?: unknown }).stdout;
+    if (typeof partial === 'string' && partial.length > 0) {
+      return parseLsofCwdOutput(partial);
     }
-  } catch {
-    // Ignore lsof errors on unsupported platforms or permission boundaries
+    // lsof missing, permission boundary, or timeout
   }
   return cwdMap;
 }
@@ -186,10 +259,11 @@ function formatReadableCmd(rawName: string, rawCmd: string): string {
  */
 export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   try {
-    const { stdout } = await execFileAsync('ps', [
-      '-Ao',
-      'pid,ppid,rss,pcpu,pmem,etime,comm,args',
-    ]);
+    const { stdout } = await execFileAsync(
+      'ps',
+      ['-Ao', 'pid,ppid,rss,pcpu,pmem,etime,comm,args'],
+      { maxBuffer: 16 * 1024 * 1024 },
+    );
     const lines = stdout.trim().split('\n').slice(1);
     const results: RawProcessInfo[] = [];
 
@@ -229,12 +303,22 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   }
 }
 
-export function defaultProcessKiller(pid: number, signal: NodeJS.Signals = 'SIGKILL'): boolean {
+export function defaultProcessKiller(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
   try {
     process.kill(pid, signal);
     return true;
   } catch {
     return false;
+  }
+}
+
+export function defaultProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the process exists but belongs to someone else
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
@@ -245,26 +329,42 @@ export class ProcessMonitor extends EventEmitter {
   private staleSessionSec: number;
   private agentActive: boolean;
   private selfPid: number;
-  private isCustomLister: boolean;
+  private killGraceMs: number;
   private processLister: () => Promise<RawProcessInfo[]>;
   private processKiller: (pid: number, signal?: NodeJS.Signals) => boolean;
+  private processAlive: (pid: number) => boolean;
+  private cwdResolver: (pids: number[]) => Promise<Map<number, string>>;
 
   private timer: NodeJS.Timeout | null = null;
   private tracked: Map<number, MonitoredProcess> = new Map();
   private alertedPids: Set<number> = new Set();
   private lastFileActivityAt: number = Date.now();
+  private scanInFlight: Promise<MonitoredProcess[]> | null = null;
+  /** PIDs that received SIGTERM and are inside their grace period. */
+  private terminating: Map<number, { timer: NodeJS.Timeout; process: MonitoredProcess }> = new Map();
 
   constructor(options: ProcessMonitorOptions = {}) {
     super();
-    this.rootDir = path.resolve(options.rootDir ?? process.cwd());
+    const resolvedRoot = path.resolve(options.rootDir ?? process.cwd());
+    try {
+      // Match the watcher, which also works on the real path (e.g. /tmp -> /private/tmp on macOS)
+      this.rootDir = fs.realpathSync(resolvedRoot);
+    } catch {
+      this.rootDir = resolvedRoot;
+    }
     this.pollIntervalMs = options.pollIntervalMs ?? 2000;
     this.mcpSilenceTimeoutSec = options.mcpSilenceTimeoutSec ?? 45;
     this.staleSessionSec = (options.staleSessionHours ?? 6) * 3600;
     this.agentActive = options.agentActive ?? true;
     this.selfPid = options.selfPid ?? process.pid;
-    this.isCustomLister = Boolean(options.processLister);
+    this.killGraceMs = options.killGraceMs ?? 3000;
     this.processLister = options.processLister ?? defaultProcessLister;
     this.processKiller = options.processKiller ?? defaultProcessKiller;
+    this.processAlive =
+      options.processAlive ?? (options.processKiller ? () => false : defaultProcessAlive);
+    this.cwdResolver =
+      options.cwdResolver ??
+      (options.processLister ? async () => new Map<number, string>() : resolveProcessCwds);
   }
 
   public start(): void {
@@ -275,10 +375,17 @@ export class ProcessMonitor extends EventEmitter {
     }, this.pollIntervalMs);
   }
 
+  /**
+   * Stops polling. Processes still inside their SIGTERM grace period are checked one last time,
+   * so that quitting right after a kill does not leave a process behind that ignores SIGTERM.
+   */
   public stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    for (const pid of Array.from(this.terminating.keys())) {
+      this.escalateKill(pid);
     }
   }
 
@@ -319,26 +426,52 @@ export class ProcessMonitor extends EventEmitter {
   /**
    * Performs a single scan of running processes and updates inactivity timers,
    * real RAM usage (MB), uptime, and kill-safety classification.
+   * Overlapping calls share the scan that is already running.
    */
-  public async scan(now: number = Date.now()): Promise<MonitoredProcess[]> {
+  public scan(now: number = Date.now()): Promise<MonitoredProcess[]> {
+    if (this.scanInFlight) {
+      return this.scanInFlight;
+    }
+    this.scanInFlight = this.performScan(now)
+      .catch((err: unknown) => {
+        this.emit('scan-error', err);
+        return this.getProcesses();
+      })
+      .finally(() => {
+        this.scanInFlight = null;
+      });
+    return this.scanInFlight;
+  }
+
+  private async performScan(now: number): Promise<MonitoredProcess[]> {
     const rawList = await this.processLister();
     const seenPids = new Set<number>();
 
     // Map all live PIDs, parent-child links, and parent PIDs that have children
     const allLivePids = new Set<number>();
+    const rawByPid = new Map<number, RawProcessInfo>();
     const parentByPid = new Map<number, number>();
     const parentPidsWithChildren = new Set<number>();
     for (const r of rawList) {
       allLivePids.add(r.pid);
+      rawByPid.set(r.pid, r);
       if (r.ppid) {
         parentByPid.set(r.pid, r.ppid);
         parentPidsWithChildren.add(r.ppid);
       }
     }
 
+    // The chain of processes that launched this watchdog (npm, tsx, npx wrappers, the shell).
+    const selfAncestors = new Set<number>();
+    for (let cur = parentByPid.get(this.selfPid), depth = 0; cur && cur > 1 && depth < 32; depth++) {
+      selfAncestors.add(cur);
+      cur = parentByPid.get(cur);
+    }
+
     const candidates: Array<{ raw: RawProcessInfo; category: ProcessCategory }> = [];
     for (const raw of rawList) {
       if (raw.pid === this.selfPid) continue;
+      if (this.terminating.has(raw.pid)) continue;
       const cmdLower = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
       // Skip `npm exec` wrapper parents when their actual node child process is running
       if (cmdLower.includes('npm exec ') && parentPidsWithChildren.has(raw.pid)) {
@@ -346,13 +479,50 @@ export class ProcessMonitor extends EventEmitter {
       }
       const category = this.classifyProcess(raw);
       if (!category) continue;
+      // Wrappers that started the watchdog itself are not agent work; killing them would kill us.
+      if (selfAncestors.has(raw.pid) && category !== 'agent') continue;
       candidates.push({ raw, category });
     }
 
-    const cwdMap = this.isCustomLister
-      ? new Map<number, string>()
-      : await resolveProcessCwds(candidates.map((c) => c.raw.pid));
+    const cwdMap = await this.cwdResolver(candidates.map((c) => c.raw.pid));
     const homeDir = os.homedir();
+
+    const isInsideRoot = (cwd: string | undefined): boolean => {
+      if (typeof cwd !== 'string' || cwd.length === 0) return false;
+      const resolved = path.resolve(cwd);
+      return resolved === this.rootDir || resolved.startsWith(this.rootDir + path.sep);
+    };
+
+    // PIDs whose own working directory lies in the watched repository
+    const repoPids = new Set<number>();
+    for (const { raw } of candidates) {
+      if (isInsideRoot(raw.cwd ?? cwdMap.get(raw.pid))) repoPids.add(raw.pid);
+    }
+
+    const hasRepoAncestor = (pid: number): boolean => {
+      let cur = parentByPid.get(pid);
+      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
+        if (repoPids.has(cur)) return true;
+        cur = parentByPid.get(cur);
+      }
+      return false;
+    };
+
+    const detectHost = (raw: RawProcessInfo): string | undefined => {
+      if (!raw.ppid) return undefined;
+      if (raw.ppid === 1) return 'detached';
+      let cur: number | undefined = raw.ppid;
+      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
+        const ancestor = rawByPid.get(cur);
+        if (!ancestor) return undefined;
+        const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
+        for (const [pattern, label] of HOST_PATTERNS) {
+          if (pattern.test(text)) return label;
+        }
+        cur = ancestor.ppid;
+      }
+      return undefined;
+    };
 
     for (const { raw, category } of candidates) {
       seenPids.add(raw.pid);
@@ -383,14 +553,16 @@ export class ProcessMonitor extends EventEmitter {
           : rawCwd
         : undefined;
 
-      const isInWatchedRepo =
-        typeof rawCwd === 'string' &&
-        rawCwd.length > 0 &&
-        (path.resolve(rawCwd) === this.rootDir ||
-          path.resolve(rawCwd).startsWith(this.rootDir + path.sep));
+      const isInWatchedRepo = isInsideRoot(rawCwd);
+      // A tool process started by an agent of the watched repo belongs to that session,
+      // wherever its own working directory is (many MCP servers run in "/" or their install dir).
+      const belongsToWatchedRepo = isInWatchedRepo || hasRepoAncestor(raw.pid);
 
       const isOtherRepo =
-        typeof rawCwd === 'string' && rawCwd.length > 0 && !isInWatchedRepo;
+        typeof rawCwd === 'string' && rawCwd.length > 0 && !belongsToWatchedRepo;
+
+      const host = detectHost(raw);
+      const hostNote = host && host !== 'detached' ? `, attached to ${host}` : '';
 
       const isStaleByAge = elapsedSec >= this.staleSessionSec;
       const isOrphaned = raw.ppid === 1 && category !== 'agent';
@@ -422,34 +594,25 @@ export class ProcessMonitor extends EventEmitter {
         // Process belongs to a DIFFERENT repository and has exceeded the stale age threshold
         status = 'STALE';
         safety = 'safe-to-kill';
-        reason = `Old session in ${displayCwd} (${formattedUptime}) — safe to kill`;
-      } else if (!isInWatchedRepo && !rawCwd && isStaleByAge && cpu < 0.5 && category === 'mcp') {
+        reason = `Old session in ${displayCwd} (${formattedUptime})${hostNote} — safe to kill`;
+      } else if (!belongsToWatchedRepo && !rawCwd && isStaleByAge && cpu < 0.5 && category === 'mcp') {
         // Detached MCP process without a repository cwd that has been sitting around for >6h
         status = 'STALE';
         safety = 'safe-to-kill';
-        reason = `Stale detached MCP process (${formattedUptime} old) — safe to kill`;
+        reason = `Stale detached MCP process (${formattedUptime} old)${hostNote} — safe to kill`;
       } else if (isOrphaned && !hasCpuActivity && elapsedSec >= this.mcpSilenceTimeoutSec) {
         status = 'FROZEN';
         safety = 'safe-to-kill';
         reason = `Orphaned process (PPID=1, ${formattedUptime}) — safe to kill`;
-      } else if (
-        category === 'mcp' &&
-        !hasCpuActivity &&
-        hasLiveParentChain &&
-        !this.isCustomLister
-      ) {
-        // Real-world MCP child server whose parent agent session is alive in the current repo:
-        // 0% CPU is normal standby behavior waiting for stdin tool requests, regardless of session age!
+      } else if (category === 'mcp' && !hasCpuActivity && hasLiveParentChain) {
+        // MCP child server whose parent is alive: 0% CPU is normal standby behavior
+        // while it waits for stdin tool requests, regardless of session age.
         status = 'STANDBY';
         safety = 'standby-mcp';
         reason = `Standby MCP child (PPID ${raw.ppid} alive, age ${formattedUptime}) — waiting for tool call`;
-      } else if (
-        isInWatchedRepo &&
-        category === 'agent' &&
-        !this.isCustomLister
-      ) {
-        // Active agent session in the currently watched repository is NEVER marked stale just because
-        // the developer has been working in the repo for >6 hours!
+      } else if (belongsToWatchedRepo && category === 'agent') {
+        // An agent session in the currently watched repository is NEVER marked stale or frozen
+        // just because the developer has been working in the repo for hours or is thinking.
         status = hasCpuActivity ? 'ACTIVE' : 'IDLE';
         safety = 'active-repo';
         reason = `Agent session in current repository (open for ${formattedUptime})`;
@@ -479,6 +642,8 @@ export class ProcessMonitor extends EventEmitter {
         status,
         safety,
         reason,
+        inWatchedRepo: belongsToWatchedRepo,
+        host,
       };
 
       this.tracked.set(raw.pid, monitored);
@@ -524,30 +689,82 @@ export class ProcessMonitor extends EventEmitter {
     return this.getProcesses().filter((p) => p.status === 'FROZEN' || p.status === 'STALE');
   }
 
-  public killProcess(pid: number, signal: NodeJS.Signals = 'SIGKILL'): boolean {
-    if (pid === this.selfPid) return false;
-    const killed = this.processKiller(pid, signal);
-    if (killed) {
-      const proc = this.tracked.get(pid);
-      this.tracked.delete(pid);
-      this.alertedPids.delete(pid);
-      this.emit('process-killed', { pid, process: proc });
-    }
-    return killed;
+  public isTracked(pid: number): boolean {
+    return this.tracked.has(pid);
   }
 
+  /**
+   * Terminates one monitored process: SIGTERM first, SIGKILL if it is still alive after the
+   * grace period. Only PIDs from the current process list can be terminated — this is never
+   * a general-purpose kill for arbitrary PIDs.
+   */
+  public killProcess(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    if (pid === this.selfPid) return false;
+    const proc = this.tracked.get(pid);
+    if (!proc) return false;
+
+    const sent = this.processKiller(pid, signal);
+    if (!sent) return false;
+
+    this.tracked.delete(pid);
+    this.alertedPids.delete(pid);
+    this.emit('process-killed', { pid, process: proc, signal } satisfies ProcessKilledEvent);
+
+    if (signal !== 'SIGKILL' && this.killGraceMs > 0) {
+      const timer = setTimeout(() => this.escalateKill(pid), this.killGraceMs);
+      timer.unref();
+      this.terminating.set(pid, { timer, process: proc });
+    }
+    return true;
+  }
+
+  private escalateKill(pid: number): void {
+    const pending = this.terminating.get(pid);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.terminating.delete(pid);
+    if (!this.processAlive(pid)) return;
+    if (this.processKiller(pid, 'SIGKILL')) {
+      this.emit('process-killed', {
+        pid,
+        process: pending.process,
+        signal: 'SIGKILL',
+        escalated: true,
+      } satisfies ProcessKilledEvent);
+    }
+  }
+
+  /**
+   * Terminates monitored processes machine-wide: everything tracked, or only what is
+   * classified as safe to kill (stale / frozen).
+   */
   public killAllMonitored(onlySafeToKill: boolean = false): number[] {
+    return this.killWhere(
+      (proc) =>
+        !onlySafeToKill ||
+        proc.status === 'FROZEN' ||
+        proc.status === 'STALE' ||
+        proc.safety === 'safe-to-kill',
+    );
+  }
+
+  /**
+   * Terminates the agent and tool processes that belong to the watched repository
+   * (working directory inside it, or started by a process that is). Sessions in other
+   * repositories are left alone.
+   */
+  public killInWatchedRepo(signal: NodeJS.Signals = 'SIGTERM'): number[] {
+    return this.killWhere((proc) => proc.inWatchedRepo, signal);
+  }
+
+  private killWhere(
+    predicate: (proc: MonitoredProcess) => boolean,
+    signal: NodeJS.Signals = 'SIGTERM',
+  ): number[] {
     const killedPids: number[] = [];
     for (const proc of Array.from(this.tracked.values())) {
-      if (
-        onlySafeToKill &&
-        proc.status !== 'FROZEN' &&
-        proc.status !== 'STALE' &&
-        proc.safety !== 'safe-to-kill'
-      ) {
-        continue;
-      }
-      if (this.killProcess(proc.pid)) {
+      if (!predicate(proc)) continue;
+      if (this.killProcess(proc.pid, signal)) {
         killedPids.push(proc.pid);
       }
     }

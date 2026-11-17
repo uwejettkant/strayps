@@ -43,6 +43,18 @@ export function normalizeMode(rawMode: unknown): GuardMode {
 }
 
 /**
+ * Strict variant of `normalizeMode` for user input (CLI flags, API calls):
+ * returns null instead of silently falling back to the default.
+ */
+export function parseMode(rawMode: unknown): GuardMode | null {
+  if (typeof rawMode !== 'string') return null;
+  const lower = rawMode.trim().toLowerCase();
+  if (lower === 'strict' || lower === 'balanced' || lower === 'yolo') return lower;
+  if (lower === 'refactoring') return 'yolo';
+  return null;
+}
+
+/**
  * Converts a simple glob pattern (e.g. ".env*", "docker-compose*.yml", ".git/**")
  * into a RegExp that matches normalized POSIX-style relative paths.
  */
@@ -109,6 +121,7 @@ export function matchesGlobPattern(filePath: string, pattern: string, rootDir?: 
 export class GuardConfigManager {
   private rootDir: string;
   private config: GuardConfig;
+  private warnings: string[] = [];
 
   constructor(rootDir: string = process.cwd(), initialConfig?: Partial<GuardConfig>) {
     this.rootDir = path.resolve(rootDir);
@@ -127,34 +140,101 @@ export class GuardConfigManager {
     };
   }
 
+  /** Problems found in `.agentguard.json` during the last load; affected values fell back to defaults. */
+  public getWarnings(): string[] {
+    return [...this.warnings];
+  }
+
+  public hasConfigFile(): boolean {
+    return fs.existsSync(this.configFilePath);
+  }
+
   public loadFromDiskOrDefaults(overrides?: Partial<GuardConfig>): GuardConfig {
     let diskConfig: Partial<GuardConfig> = {};
     const filePath = this.configFilePath;
+    const warnings: string[] = [];
 
     if (fs.existsSync(filePath)) {
       try {
         const raw = fs.readFileSync(filePath, 'utf-8');
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        diskConfig = {
-          mode: parsed.mode ? normalizeMode(parsed.mode) : undefined,
-          protectedFiles: Array.isArray(parsed.protectedFiles)
-            ? parsed.protectedFiles.filter((p): p is string => typeof p === 'string')
-            : undefined,
-          limits:
-            parsed.limits && typeof parsed.limits === 'object'
-              ? (parsed.limits as GuardLimits)
-              : undefined,
-        };
-      } catch {
-        // Fall back to defaults if .agentguard.json is malformed
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('top level must be a JSON object');
+        }
+        const record = parsed as Record<string, unknown>;
+
+        let mode: GuardMode | undefined;
+        if (record.mode !== undefined) {
+          const parsedMode = parseMode(record.mode);
+          if (parsedMode) {
+            mode = parsedMode;
+          } else {
+            warnings.push(
+              `mode ${JSON.stringify(record.mode)} is not one of strict | balanced | yolo, using "${DEFAULT_GUARD_CONFIG.mode}"`,
+            );
+          }
+        }
+
+        let protectedFiles: string[] | undefined;
+        if (record.protectedFiles !== undefined) {
+          if (Array.isArray(record.protectedFiles)) {
+            protectedFiles = record.protectedFiles.filter(
+              (p): p is string => typeof p === 'string' && p.trim().length > 0,
+            );
+            if (protectedFiles.length !== record.protectedFiles.length) {
+              warnings.push('protectedFiles contains entries that are not glob strings, they were ignored');
+            }
+          } else {
+            warnings.push('protectedFiles must be an array of glob strings, using the defaults');
+          }
+        }
+
+        let limits: GuardLimits | undefined;
+        if (record.limits !== undefined) {
+          if (record.limits && typeof record.limits === 'object' && !Array.isArray(record.limits)) {
+            limits = record.limits as GuardLimits;
+          } else {
+            warnings.push('limits must be an object, using the defaults');
+          }
+        }
+
+        diskConfig = { mode, protectedFiles, limits };
+      } catch (err) {
+        warnings.push(
+          `file is not valid JSON (${err instanceof Error ? err.message : String(err)}), using the defaults`,
+        );
       }
     }
 
-    const mergedLimits: GuardLimits = {
+    const mergedLimits: Record<string, unknown> = {
       ...DEFAULT_GUARD_CONFIG.limits,
       ...(diskConfig.limits ?? {}),
       ...(overrides?.limits ?? {}),
     };
+
+    const limit = (key: keyof GuardLimits): number => {
+      const fallback = DEFAULT_GUARD_CONFIG.limits[key];
+      const value = mergedLimits[key];
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
+        return Math.floor(value);
+      }
+      if (value !== undefined) {
+        warnings.push(`limits.${key} must be a number >= 1 (got ${JSON.stringify(value)}), using ${fallback}`);
+      }
+      return fallback;
+    };
+
+    const limits: GuardLimits = {
+      maxFilesWarn: limit('maxFilesWarn'),
+      maxFilesHardStop: limit('maxFilesHardStop'),
+      maxEditsPerFilePerMinute: limit('maxEditsPerFilePerMinute'),
+      mcpSilenceTimeoutSec: limit('mcpSilenceTimeoutSec'),
+    };
+    if (limits.maxFilesWarn > limits.maxFilesHardStop) {
+      warnings.push(
+        `limits.maxFilesWarn (${limits.maxFilesWarn}) is above limits.maxFilesHardStop (${limits.maxFilesHardStop}), the warning will never show`,
+      );
+    }
 
     const merged: GuardConfig = {
       mode: overrides?.mode
@@ -166,20 +246,11 @@ export class GuardConfigManager {
         overrides?.protectedFiles ??
         diskConfig.protectedFiles ??
         [...DEFAULT_GUARD_CONFIG.protectedFiles],
-      limits: {
-        maxFilesWarn: Number(mergedLimits.maxFilesWarn) || DEFAULT_GUARD_CONFIG.limits.maxFilesWarn,
-        maxFilesHardStop:
-          Number(mergedLimits.maxFilesHardStop) || DEFAULT_GUARD_CONFIG.limits.maxFilesHardStop,
-        maxEditsPerFilePerMinute:
-          Number(mergedLimits.maxEditsPerFilePerMinute) ||
-          DEFAULT_GUARD_CONFIG.limits.maxEditsPerFilePerMinute,
-        mcpSilenceTimeoutSec:
-          Number(mergedLimits.mcpSilenceTimeoutSec) ||
-          DEFAULT_GUARD_CONFIG.limits.mcpSilenceTimeoutSec,
-      },
+      limits,
     };
 
     this.config = merged;
+    this.warnings = warnings;
     return this.getConfig();
   }
 
