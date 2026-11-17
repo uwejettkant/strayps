@@ -36,6 +36,8 @@ export {
   type LoopDetectorOptions,
 } from './core/loop-detector.js';
 export {
+  type AgentDetection,
+  BUILT_IN_AGENT_NAMES,
   defaultProcessKiller,
   defaultProcessLister,
   type MonitoredProcess,
@@ -43,9 +45,9 @@ export {
   type ProcessCategory,
   type ProcessHealthStatus,
   type ProcessKilledEvent,
-  type ProcessKillSafety,
   ProcessMonitor,
   type ProcessMonitorOptions,
+  programNames,
   type RawProcessInfo,
 } from './core/process-monitor.js';
 export {

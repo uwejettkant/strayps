@@ -197,7 +197,7 @@ describe('GuardConfigManager & RepoWatcher', () => {
     const uiRes = await app.request('/');
     expect(uiRes.status).toBe(200);
     const html = await uiRes.text();
-    expect(html).toContain('PANIC ROLLBACK &amp; KILL ALL');
+    expect(html).toContain('PANIC: STOP AGENTS &amp; ROLL BACK');
     expect(html).toContain('id="panic-dialog"');
     expect(html).toContain('name="color-scheme" content="light dark"');
   });

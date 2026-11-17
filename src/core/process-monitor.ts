@@ -9,7 +9,11 @@ const execFileAsync = promisify(execFile);
 
 export type ProcessHealthStatus = 'ACTIVE' | 'IDLE' | 'STANDBY' | 'STALE' | 'FROZEN';
 export type ProcessCategory = 'agent' | 'mcp' | 'playwright' | 'chromium' | 'node';
-export type ProcessKillSafety = 'safe-to-kill' | 'standby-mcp' | 'active-repo';
+/**
+ * How a process was recognized as a coding agent: by a built-in program name, by a name from the
+ * `agents` setting, or because it started an MCP server (whatever the agent is called).
+ */
+export type AgentDetection = 'name' | 'setting' | 'mcp-client';
 
 export interface RawProcessInfo {
   pid: number;
@@ -38,13 +42,25 @@ export interface MonitoredProcess {
   firstSeenAt: number;
   lastActiveAt: number;
   silenceSec: number;
+  /**
+   * What the process looks like right now. STALE and FROZEN are observations, not a verdict:
+   * nothing is labeled safe to kill, and nothing is terminated because of its status.
+   */
   status: ProcessHealthStatus;
-  safety: ProcessKillSafety;
   reason: string;
   /** True if the process runs inside the watched repository or descends from a process that does. */
   inWatchedRepo: boolean;
+  /**
+   * `panic` stops this process: a coding agent of the watched repository, or a process one of them
+   * started. Dev servers, editors and other sessions are never panic targets.
+   */
+  panicTarget: boolean;
   /** Application the process tree hangs off (VS Code, Claude Desktop, a terminal, ...), if recognizable. */
   host?: string;
+  /** Only for agents: how the process was recognized as one. */
+  detectedBy?: AgentDetection;
+  /** The nearest monitored agent this process was started by, directly or through launchers. */
+  agentPid?: number;
 }
 
 export interface ProcessMonitorOptions {
@@ -68,6 +84,8 @@ export interface ProcessMonitorOptions {
   processAlive?: (pid: number) => boolean;
   /** Time a process gets to exit after SIGTERM before SIGKILL is sent (default 3000 ms, 0 disables). */
   killGraceMs?: number;
+  /** More program names to treat as coding agents (the `agents` setting); matched exactly. */
+  agentNames?: string[];
 }
 
 export interface ProcessKilledEvent {
@@ -78,10 +96,69 @@ export interface ProcessKilledEvent {
   escalated?: boolean;
 }
 
+/**
+ * Agents recognized by the name of their program alone. Deliberately short, and it does not grow
+ * with every new product: an agent that starts an MCP server is found through that server, and
+ * users name any other agent in the `agents` setting.
+ */
+export const BUILT_IN_AGENT_NAMES: readonly string[] = ['claude', 'codex', 'aider'];
+
+/** Programs that only start another program. Never the agent itself, whatever they launch. */
+const LAUNCHER_NAMES = new Set([
+  'sh', 'bash', 'zsh', 'dash', 'fish', 'ksh', 'env', 'nohup', 'timeout',
+  'npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'bunx', 'corepack', 'uv', 'uvx', 'pipx',
+]);
+
+/** Programs that run a script: the script's name is the program's real name. */
+const INTERPRETER = /^(node|nodejs|bun|deno|ruby|tsx|ts-node|python(\d+(\.\d+)*)?)$/;
+const OPTIONS_WITH_VALUE = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader']);
+const INLINE_CODE_OPTIONS = new Set(['-e', '--eval', '-p', '--print', '-c']);
+
+/** Lower-case file name of a path; a login shell shows up as "-zsh". */
+function baseName(value: string): string {
+  const base = value.replace(/\\/g, '/').split('/').pop() ?? '';
+  return base.replace(/^-/, '').toLowerCase();
+}
+
+function stripScriptExtension(name: string): string {
+  return name.replace(/\.(m?js|cjs|ts|py)$/, '');
+}
+
+/**
+ * The names a process runs as: its executable and, when that is an interpreter (node, python, ...),
+ * the script or module it runs. Used to match agent names exactly instead of by substring, which
+ * catches unrelated programs ("codex-mcp-server", "aider-stats.js").
+ */
+export function programNames(raw: Pick<RawProcessInfo, 'name' | 'cmd'>): string[] {
+  const names = new Set<string>();
+  const executable = baseName(raw.name);
+  if (executable) names.add(stripScriptExtension(executable));
+
+  const args = (raw.cmd ?? '').trim().split(/\s+/).filter(Boolean);
+  const first = args.length > 0 ? baseName(args[0]) : '';
+  if (first) names.add(stripScriptExtension(first));
+
+  if (INTERPRETER.test(first) || INTERPRETER.test(executable)) {
+    for (let i = 1; i < args.length; i++) {
+      const arg = args[i];
+      if (INLINE_CODE_OPTIONS.has(arg)) break;
+      if (arg === '-m') {
+        if (args[i + 1]) names.add(baseName(args[i + 1]));
+        break;
+      }
+      if (OPTIONS_WITH_VALUE.has(arg)) {
+        i += 1;
+        continue;
+      }
+      if (arg.startsWith('-')) continue;
+      names.add(stripScriptExtension(baseName(arg)));
+      break;
+    }
+  }
+  return Array.from(names);
+}
+
 const TARGET_KEYWORDS = [
-  'claude',
-  'codex',
-  'aider',
   'mcp',
   'modelcontextprotocol',
   'playwright',
@@ -334,6 +411,7 @@ export class ProcessMonitor extends EventEmitter {
   private processKiller: (pid: number, signal?: NodeJS.Signals) => boolean;
   private processAlive: (pid: number) => boolean;
   private cwdResolver: (pids: number[]) => Promise<Map<number, string>>;
+  private agentNames: Set<string> = new Set();
 
   private timer: NodeJS.Timeout | null = null;
   private tracked: Map<number, MonitoredProcess> = new Map();
@@ -365,6 +443,7 @@ export class ProcessMonitor extends EventEmitter {
     this.cwdResolver =
       options.cwdResolver ??
       (options.processLister ? async () => new Map<number, string>() : resolveProcessCwds);
+    this.setAgentNames(options.agentNames ?? []);
   }
 
   public start(): void {
@@ -410,6 +489,15 @@ export class ProcessMonitor extends EventEmitter {
     return this.staleSessionSec / 3600;
   }
 
+  /** Program names from the `agents` setting; replaces the previous list. */
+  public setAgentNames(names: readonly string[]): void {
+    this.agentNames = new Set(names.map((name) => name.trim().toLowerCase()).filter(Boolean));
+  }
+
+  public getAgentNames(): string[] {
+    return Array.from(this.agentNames);
+  }
+
   public setAgentActive(active: boolean): void {
     this.agentActive = active;
   }
@@ -436,7 +524,7 @@ export class ProcessMonitor extends EventEmitter {
 
   /**
    * Performs a single scan of running processes and updates inactivity timers,
-   * real RAM usage (MB), uptime, and kill-safety classification.
+   * real RAM usage (MB), uptime, classification and panic targets.
    * Overlapping calls share the scan that is already running.
    */
   public scan(now: number = Date.now()): Promise<MonitoredProcess[]> {
@@ -479,7 +567,12 @@ export class ProcessMonitor extends EventEmitter {
       cur = parentByPid.get(cur);
     }
 
-    const candidates: Array<{ raw: RawProcessInfo; category: ProcessCategory }> = [];
+    interface Candidate {
+      raw: RawProcessInfo;
+      category: ProcessCategory;
+      detectedBy?: AgentDetection;
+    }
+    const candidates: Candidate[] = [];
     for (const raw of rawList) {
       if (raw.pid === this.selfPid) continue;
       if (this.terminating.has(raw.pid)) continue;
@@ -488,12 +581,46 @@ export class ProcessMonitor extends EventEmitter {
       if (cmdLower.includes('npm exec ') && parentPidsWithChildren.has(raw.pid)) {
         continue;
       }
-      const category = this.classifyProcess(raw);
-      if (!category) continue;
+      const classified = this.classifyProcess(raw);
+      if (!classified) continue;
       // Wrappers that started the watchdog itself are not agent work; killing them would kill us.
-      if (selfAncestors.has(raw.pid) && category !== 'agent') continue;
-      candidates.push({ raw, category });
+      if (selfAncestors.has(raw.pid) && classified.category !== 'agent') continue;
+      candidates.push({ raw, ...classified });
     }
+
+    // Every MCP server is started by a client. A client that is not an editor, a desktop app or a
+    // terminal is a coding agent, whatever it is called, so no list of agent products is needed.
+    const candidateByPid = new Map(candidates.map((c) => [c.raw.pid, c]));
+    for (const server of candidates.filter((c) => c.category === 'mcp')) {
+      const clientPid = this.findMcpClient(
+        server.raw,
+        rawByPid,
+        (pid) => candidateByPid.get(pid)?.category,
+      );
+      if (clientPid === undefined || clientPid === this.selfPid || this.terminating.has(clientPid)) {
+        continue;
+      }
+      const known = candidateByPid.get(clientPid);
+      if (known) {
+        if (known.category !== 'agent') {
+          known.category = 'agent';
+          known.detectedBy = 'mcp-client';
+        }
+        continue;
+      }
+      const client: Candidate = { raw: rawByPid.get(clientPid)!, category: 'agent', detectedBy: 'mcp-client' };
+      candidates.push(client);
+      candidateByPid.set(clientPid, client);
+    }
+
+    const nearestAgent = (pid: number): number | undefined => {
+      let cur = parentByPid.get(pid);
+      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
+        if (candidateByPid.get(cur)?.category === 'agent') return cur;
+        cur = parentByPid.get(cur);
+      }
+      return undefined;
+    };
 
     const cwdMap = await this.cwdResolver(candidates.map((c) => c.raw.pid));
     const homeDir = os.homedir();
@@ -518,6 +645,7 @@ export class ProcessMonitor extends EventEmitter {
       }
       return false;
     };
+    const belongsToRepo = (pid: number): boolean => repoPids.has(pid) || hasRepoAncestor(pid);
 
     const detectHost = (raw: RawProcessInfo): string | undefined => {
       if (!raw.ppid) return undefined;
@@ -535,7 +663,7 @@ export class ProcessMonitor extends EventEmitter {
       return undefined;
     };
 
-    for (const { raw, category } of candidates) {
+    for (const { raw, category, detectedBy } of candidates) {
       seenPids.add(raw.pid);
       const cpu = Number(raw.cpu ?? 0);
       const memory = Number(raw.memory ?? 0);
@@ -593,47 +721,51 @@ export class ProcessMonitor extends EventEmitter {
             allLivePids.has(parentByPid.get(raw.ppid)!)),
       );
 
+      // STALE and FROZEN describe what is observed. They are never presented as "safe to kill":
+      // age and silence alone have been wrong about sessions that were still in use.
       let status: ProcessHealthStatus = hasCpuActivity ? 'ACTIVE' : 'IDLE';
-      let safety: ProcessKillSafety = 'active-repo';
       let reason = 'Active in current repository';
 
       if (!isOtherRepo && isDevServer) {
         status = 'ACTIVE';
-        safety = 'active-repo';
         reason = `Running dev server in current repository (${formattedUptime})`;
       } else if (isOtherRepo && isStaleByAge) {
         // Process belongs to a DIFFERENT repository and has exceeded the stale age threshold
         status = 'STALE';
-        safety = 'safe-to-kill';
-        reason = `Old session in ${displayCwd} (${formattedUptime})${hostNote} — safe to kill`;
+        reason = `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}`;
       } else if (!belongsToWatchedRepo && !rawCwd && isStaleByAge && cpu < 0.5 && category === 'mcp') {
         // Detached MCP process without a repository cwd, older than staleSessionHours
         status = 'STALE';
-        safety = 'safe-to-kill';
-        reason = `Stale detached MCP process (${formattedUptime} old)${hostNote} — safe to kill`;
+        reason = `MCP process without a working directory, running for ${formattedUptime}${hostNote}`;
       } else if (isOrphaned && !hasCpuActivity && elapsedSec >= this.mcpSilenceTimeoutSec) {
         status = 'FROZEN';
-        safety = 'safe-to-kill';
-        reason = `Orphaned process (PPID=1, ${formattedUptime}) — safe to kill`;
+        reason = `Orphaned: its parent is gone (PPID 1), running for ${formattedUptime}`;
       } else if (category === 'mcp' && !hasCpuActivity && hasLiveParentChain) {
         // MCP child server whose parent is alive: 0% CPU is normal standby behavior
         // while it waits for stdin tool requests, regardless of session age.
         status = 'STANDBY';
-        safety = 'standby-mcp';
         reason = `Standby MCP child (PPID ${raw.ppid} alive, age ${formattedUptime}) — waiting for tool call`;
       } else if (belongsToWatchedRepo && category === 'agent') {
         // An agent session in the currently watched repository is NEVER marked stale or frozen
         // just because the developer has been working in the repo for hours or is thinking.
         status = hasCpuActivity ? 'ACTIVE' : 'IDLE';
-        safety = 'active-repo';
         reason = `Agent session in current repository (open for ${formattedUptime})`;
       } else if (this.agentActive && silenceSec >= this.mcpSilenceTimeoutSec && !isDevServer) {
         status = 'FROZEN';
-        safety = 'safe-to-kill';
-        reason = `No CPU or file activity for ${silenceSec}s — safe to kill`;
+        reason = `No CPU or file activity for ${silenceSec}s`;
       } else if (category === 'mcp' && !hasCpuActivity) {
         reason = 'Idle MCP process waiting for requests';
       }
+      if (detectedBy === 'mcp-client') {
+        reason += ' · recognized as an agent by the MCP server it started';
+      }
+
+      // Panic stops the agents of this repository and what they started, nothing else:
+      // not a dev server from the user's terminal, not an editor, not another session.
+      const agentPid = nearestAgent(raw.pid);
+      const panicTarget =
+        belongsToWatchedRepo &&
+        (category === 'agent' || (agentPid !== undefined && belongsToRepo(agentPid)));
 
       const monitored: MonitoredProcess = {
         pid: raw.pid,
@@ -651,10 +783,12 @@ export class ProcessMonitor extends EventEmitter {
         lastActiveAt,
         silenceSec,
         status,
-        safety,
         reason,
         inWatchedRepo: belongsToWatchedRepo,
+        panicTarget,
         host,
+        ...(category === 'agent' ? { detectedBy: detectedBy ?? 'name' } : {}),
+        agentPid,
       };
 
       this.tracked.set(raw.pid, monitored);
@@ -745,27 +879,17 @@ export class ProcessMonitor extends EventEmitter {
     }
   }
 
-  /**
-   * Terminates monitored processes machine-wide: everything tracked, or only what is
-   * classified as safe to kill (stale / frozen).
-   */
-  public killAllMonitored(onlySafeToKill: boolean = false): number[] {
-    return this.killWhere(
-      (proc) =>
-        !onlySafeToKill ||
-        proc.status === 'FROZEN' ||
-        proc.status === 'STALE' ||
-        proc.safety === 'safe-to-kill',
-    );
+  /** What `panic` would stop right now: the agents of the watched repository and what they started. */
+  public getPanicTargets(): MonitoredProcess[] {
+    return this.getProcesses().filter((proc) => proc.panicTarget);
   }
 
   /**
-   * Terminates the agent and tool processes that belong to the watched repository
-   * (working directory inside it, or started by a process that is). Sessions in other
-   * repositories are left alone.
+   * Terminates the panic targets: the coding agents of the watched repository and the processes
+   * they started. Dev servers, editors and sessions in other repositories are left alone.
    */
-  public killInWatchedRepo(signal: NodeJS.Signals = 'SIGTERM'): number[] {
-    return this.killWhere((proc) => proc.inWatchedRepo, signal);
+  public killPanicTargets(signal: NodeJS.Signals = 'SIGTERM'): number[] {
+    return this.killWhere((proc) => proc.panicTarget, signal);
   }
 
   private killWhere(
@@ -782,37 +906,33 @@ export class ProcessMonitor extends EventEmitter {
     return killedPids;
   }
 
-  private classifyProcess(raw: RawProcessInfo): ProcessCategory | null {
+  private classifyProcess(
+    raw: RawProcessInfo,
+  ): { category: ProcessCategory; detectedBy?: AgentDetection } | null {
     const haystack = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
 
     if (IGNORED_SYSTEM_PATTERNS.some((pat) => haystack.includes(pat))) {
       return null;
     }
 
+    const detectedBy = this.agentByName(raw, haystack);
+    if (detectedBy) {
+      return { category: 'agent', detectedBy };
+    }
+
     if (!TARGET_KEYWORDS.some((kw) => haystack.includes(kw))) {
       return null;
     }
 
-    if (
-      raw.name === 'claude' ||
-      haystack.includes('claude-code') ||
-      haystack.includes('/native-binary/claude') ||
-      haystack.includes('/claude.app/contents/macos/claude') ||
-      haystack.includes('codex') ||
-      haystack.includes('aider')
-    ) {
-      return 'agent';
-    }
-
     if (haystack.includes('mcp') || haystack.includes('modelcontextprotocol')) {
-      return 'mcp';
+      return { category: 'mcp' };
     }
 
     if (haystack.includes('playwright')) {
-      return 'playwright';
+      return { category: 'playwright' };
     }
     if (haystack.includes('chromium') || haystack.includes('headless_shell')) {
-      return 'chromium';
+      return { category: 'chromium' };
     }
 
     const normalizedRoot = this.rootDir.toLowerCase();
@@ -824,9 +944,51 @@ export class ProcessMonitor extends EventEmitter {
         !raw.cmd ||
         raw.cmd === raw.name)
     ) {
-      return 'node';
+      return { category: 'node' };
     }
 
     return null;
+  }
+
+  /** An agent recognized by its program name: a built-in name, or one from the `agents` setting. */
+  private agentByName(raw: RawProcessInfo, haystack: string): AgentDetection | null {
+    // Claude Code also runs as `node …/claude-code/cli.js` from npm or an editor extension
+    if (
+      haystack.includes('/claude-code/') ||
+      haystack.includes('anthropic.claude-code') ||
+      haystack.includes('/native-binary/claude')
+    ) {
+      return 'name';
+    }
+    const names = programNames(raw);
+    if (names.some((name) => BUILT_IN_AGENT_NAMES.includes(name))) return 'name';
+    if (names.some((name) => this.agentNames.has(name))) return 'setting';
+    return null;
+  }
+
+  /**
+   * The client that started an MCP server: its first ancestor that is not a launcher (shell, npm,
+   * npx, uvx, ...) and not another MCP process. Undefined when that ancestor is an editor, a
+   * desktop app or a terminal (never treated as an agent) or when the chain ends.
+   */
+  private findMcpClient(
+    server: RawProcessInfo,
+    rawByPid: Map<number, RawProcessInfo>,
+    categoryOf: (pid: number) => ProcessCategory | undefined,
+  ): number | undefined {
+    let cur = server.ppid;
+    for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
+      const ancestor = rawByPid.get(cur);
+      if (!ancestor) return undefined;
+      const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
+      if (HOST_PATTERNS.some(([pattern]) => pattern.test(text))) return undefined;
+      if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.toLowerCase().includes(pattern))) {
+        return undefined;
+      }
+      const launcher = programNames(ancestor).some((name) => LAUNCHER_NAMES.has(name));
+      if (!launcher && categoryOf(cur) !== 'mcp') return cur;
+      cur = ancestor.ppid;
+    }
+    return undefined;
   }
 }

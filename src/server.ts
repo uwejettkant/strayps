@@ -204,11 +204,8 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     return c.json({ ok: true, pid, status: getStatusSnapshot() });
   });
 
-  // Kill all frozen/zombie processes
-  app.post('/api/kill-frozen', (c) => {
-    const killedPids = session.killStale();
-    return c.json({ ok: true, killedPids, status: getStatusSnapshot() });
-  });
+  // There is deliberately no bulk "kill everything stale" route: the stale/frozen verdict has been
+  // wrong about sessions that were still in use. Processes are terminated one PID at a time.
 
   // Rollback a single file
   app.post('/api/rollback-file', async (c) => {
@@ -220,7 +217,7 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     return c.json({ ok: restored, filePath: body.filePath, status: getStatusSnapshot() });
   });
 
-  // PANIC ROLLBACK & KILL ALL (processes of the watched repository)
+  // PANIC: stop the agents of the watched repository (and what they started), roll back all files
   app.post('/api/panic', (c) => {
     const result = session.panic();
     return c.json({

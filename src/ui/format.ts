@@ -124,31 +124,32 @@ export function statusStyle(palette: Palette, proc: MonitoredProcess): Style {
   return palette.dim;
 }
 
-export function isReclaimable(proc: MonitoredProcess): boolean {
-  return proc.status === 'FROZEN' || proc.status === 'STALE' || proc.safety === 'safe-to-kill';
+/** Worth a look: old, orphaned or silent. An observation, never a reason to kill on its own. */
+export function isStaleOrFrozen(proc: MonitoredProcess): boolean {
+  return proc.status === 'FROZEN' || proc.status === 'STALE';
 }
 
-/** Short kill-safety label. Unlike the raw `safety` value it says where the process lives. */
-export function safetyLabel(proc: MonitoredProcess): string {
-  if (isReclaimable(proc)) return 'SAFE TO KILL';
-  if (proc.safety === 'standby-mcp') return 'STANDBY';
-  return proc.inWatchedRepo ? 'IN REPO' : 'ELSEWHERE';
+/** Where a process belongs: the watched repository, somewhere else, or nowhere (orphaned). */
+export function whereLabel(proc: MonitoredProcess): string {
+  if (proc.inWatchedRepo) return 'THIS REPO';
+  if (proc.host === 'detached') return 'DETACHED';
+  return 'ELSEWHERE';
 }
 
 export interface ProcessTotals {
   count: number;
   totalMb: number;
-  reclaimableCount: number;
-  reclaimableMb: number;
+  staleCount: number;
+  staleMb: number;
 }
 
 export function processTotals(processes: MonitoredProcess[]): ProcessTotals {
-  const reclaimable = processes.filter(isReclaimable);
+  const stale = processes.filter(isStaleOrFrozen);
   return {
     count: processes.length,
     totalMb: processes.reduce((sum, p) => sum + p.memoryMb, 0),
-    reclaimableCount: reclaimable.length,
-    reclaimableMb: reclaimable.reduce((sum, p) => sum + p.memoryMb, 0),
+    staleCount: stale.length,
+    staleMb: stale.reduce((sum, p) => sum + p.memoryMb, 0),
   };
 }
 
@@ -170,7 +171,7 @@ export function formatProcessTable(
     return ['  No agent or MCP processes found.'];
   }
   const lines: string[] = [];
-  const header = `  ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('SAFETY', 13)} ${padStart('RAM', 9)} ${padStart('AGE', 8)}  COMMAND · CWD`;
+  const header = `  ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('WHERE', 13)} ${padStart('RAM', 9)} ${padStart('AGE', 8)}  COMMAND · CWD`;
   lines.push(palette.dim(header));
   lines.push(palette.dim(`  ${'─'.repeat(Math.max(20, Math.min(width, 120) - 2))}`));
   for (const proc of processes) {
@@ -182,7 +183,7 @@ export function formatProcessTable(
     const used = fixed.length + 8 + 1 + 13 + 1 + tail.length;
     const rest = truncate(`${sanitize(proc.cmd)}${where}${host}`, Math.max(10, width - used));
     lines.push(
-      `${fixed}${style(padEnd(proc.status, 8))} ${(isReclaimable(proc) ? palette.warn : palette.dim)(padEnd(safetyLabel(proc), 13))} ${tail}${rest}`,
+      `${fixed}${style(padEnd(proc.status, 8))} ${palette.dim(padEnd(whereLabel(proc), 13))} ${tail}${rest}`,
     );
   }
   return lines;
@@ -209,7 +210,7 @@ export function formatStatusReport(
     `  Mode:        ${config.mode.toUpperCase()}`,
     `  Files:       ${snapshot.modifiedFiles.length} modified (${limits})${snapshot.limitState === 'hard-stop' ? palette.danger('  HARD STOP limit reached') : ''}`,
     `  Breaker:     ${breaker} (max ${config.limits.maxEditsPerFilePerMinute} edits/file/min)`,
-    `  Processes:   ${totals.count} monitored (${totals.totalMb.toFixed(1)} MB) · ${totals.reclaimableCount} stale/frozen (${totals.reclaimableMb.toFixed(1)} MB reclaimable)`,
+    `  Processes:   ${totals.count} monitored (${totals.totalMb.toFixed(1)} MB) · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(1)} MB)`,
     '',
     ...formatProcessTable(snapshot.processes, palette, width),
   ];

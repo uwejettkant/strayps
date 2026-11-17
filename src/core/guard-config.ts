@@ -19,6 +19,8 @@ export interface GuardLimits {
 export interface GuardConfig {
   mode: GuardMode;
   protectedFiles: string[];
+  /** Program names to treat as coding agents, on top of the built-in names and MCP clients. */
+  agents: string[];
   limits: GuardLimits;
 }
 
@@ -26,6 +28,7 @@ export interface GuardConfig {
 export interface GuardConfigOverrides {
   mode?: GuardMode;
   protectedFiles?: string[];
+  agents?: string[];
   limits?: Partial<GuardLimits>;
 }
 
@@ -39,6 +42,7 @@ export const CONFIG_FILENAME = '.agentguard.json';
 export const DEFAULT_GUARD_CONFIG: GuardConfig = {
   mode: 'balanced',
   protectedFiles: ['.env*', 'docker-compose*.yml', '.git/**'],
+  agents: [],
   limits: {
     maxFilesWarn: 15,
     maxFilesHardStop: 40,
@@ -56,13 +60,19 @@ const LIMIT_KEYS: ReadonlyArray<keyof GuardLimits> = [
   'staleSessionHours',
 ];
 
-export type ConfigKey = 'mode' | 'protectedFiles' | `limits.${keyof GuardLimits}`;
+export type ConfigKey = 'mode' | 'protectedFiles' | 'agents' | `limits.${keyof GuardLimits}`;
 
 export const CONFIG_KEYS: ConfigKey[] = [
   'mode',
   ...LIMIT_KEYS.map((key) => `limits.${key}` as ConfigKey),
   'protectedFiles',
+  'agents',
 ];
+
+/** A program name as `ps` shows it: no path, no spaces. */
+function isProgramName(value: unknown): value is string {
+  return typeof value === 'string' && /^[^\s/\\]+$/.test(value.trim());
+}
 
 /** What each setting does. Shown by `agent-leash config`; the README table mirrors it. */
 export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
@@ -73,6 +83,8 @@ export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
   'limits.mcpSilenceTimeoutSec': 'seconds without CPU or file activity before a process counts as frozen',
   'limits.staleSessionHours': 'hours after which a session in another repository counts as stale',
   protectedFiles: 'globs; .env* only warns, every other match is reverted at once',
+  agents:
+    'more program names to treat as coding agents (exact name, e.g. vibe); agents that start MCP servers are found without this',
 };
 
 /** Where an effective value comes from. */
@@ -198,8 +210,9 @@ interface FileRead {
   invalidReason?: string;
   mode?: GuardMode;
   protectedFiles?: string[];
+  agents?: string[];
   limits: Partial<GuardLimits>;
-  /** Invalid values; they are left out of `mode` / `protectedFiles` / `limits`. */
+  /** Invalid values; they are left out of `mode` / `protectedFiles` / `agents` / `limits`. */
   errors: ValueError[];
   /** Things that are valid but probably not what was meant (unknown keys). */
   notices: string[];
@@ -232,8 +245,26 @@ function readConfigFile(filePath: string): FileRead {
   result.state = 'ok';
 
   for (const key of Object.keys(record)) {
-    if (key !== 'mode' && key !== 'protectedFiles' && key !== 'limits') {
+    if (key !== 'mode' && key !== 'protectedFiles' && key !== 'agents' && key !== 'limits') {
       result.notices.push(`"${key}" is not a known setting and is ignored`);
+    }
+  }
+
+  if (record.agents !== undefined) {
+    if (Array.isArray(record.agents)) {
+      const names = record.agents.filter(isProgramName).map((name) => name.trim());
+      if (names.length !== record.agents.length) {
+        result.errors.push({
+          message: 'agents contains entries that are not program names (a name like "vibe", no path, no spaces)',
+          startupSuffix: ', they were ignored',
+        });
+      }
+      result.agents = names;
+    } else {
+      result.errors.push({
+        message: 'agents must be an array of program names',
+        startupSuffix: ', using none',
+      });
     }
   }
 
@@ -309,6 +340,10 @@ function describeChanges(before: GuardConfig, after: GuardConfig): string[] {
   const added = after.protectedFiles.filter((glob) => !before.protectedFiles.includes(glob));
   if (removed.length > 0) changes.push(`no longer protected: ${removed.join(', ')}`);
   if (added.length > 0) changes.push(`now protected: ${added.join(', ')}`);
+  const agentsRemoved = before.agents.filter((name) => !after.agents.includes(name));
+  const agentsAdded = after.agents.filter((name) => !before.agents.includes(name));
+  if (agentsRemoved.length > 0) changes.push(`no longer treated as agents: ${agentsRemoved.join(', ')}`);
+  if (agentsAdded.length > 0) changes.push(`now treated as agents: ${agentsAdded.join(', ')}`);
   return changes;
 }
 
@@ -347,6 +382,7 @@ export class GuardConfigManager {
     return {
       mode: this.config.mode,
       protectedFiles: [...this.config.protectedFiles],
+      agents: [...this.config.agents],
       limits: { ...this.config.limits },
     };
   }
@@ -472,6 +508,7 @@ export class GuardConfigManager {
       this.config = {
         mode: normalizeMode(customConfig.mode),
         protectedFiles: [...customConfig.protectedFiles],
+        agents: [...(customConfig.agents ?? [])],
         limits: { ...customConfig.limits },
       };
     }
@@ -568,8 +605,20 @@ export class GuardConfigManager {
       sources.protectedFiles = 'default';
     }
 
+    let agents: string[];
+    if (this.overrides.agents) {
+      agents = [...this.overrides.agents];
+      sources.agents = 'override';
+    } else if (file.agents) {
+      agents = [...file.agents];
+      sources.agents = 'file';
+    } else {
+      agents = [...DEFAULT_GUARD_CONFIG.agents];
+      sources.agents = 'default';
+    }
+
     this.sources = sources;
-    return { config: { mode, protectedFiles, limits }, notices };
+    return { config: { mode, protectedFiles, agents, limits }, notices };
   }
 }
 
@@ -606,6 +655,19 @@ export function parseConfigValue(key: ConfigKey, raw: string): ParsedConfigValue
     return globs.length > 0
       ? { ok: true, value: globs }
       : { ok: false, error: 'expected one or more globs, separated by commas' };
+  }
+  if (key === 'agents') {
+    const names = text
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean);
+    if (names.length === 0) {
+      return { ok: false, error: 'expected one or more program names, separated by commas' };
+    }
+    const invalid = names.find((name) => !isProgramName(name));
+    return invalid
+      ? { ok: false, error: `"${invalid}" is not a program name (no path, no spaces), e.g. vibe` }
+      : { ok: true, value: names };
   }
   if (!/^\d+$/.test(text) || Number(text) < 1) {
     return { ok: false, error: `${key} must be a whole number >= 1 (got "${raw}")` };

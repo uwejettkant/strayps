@@ -3,18 +3,17 @@ import { completeInput, HELP_LINES, parseCommand, runCommand } from './commands.
 import {
   createPalette,
   formatClock,
-  isReclaimable,
   padEnd,
   padStart,
   type Palette,
   processTotals,
-  safetyLabel,
   sanitize,
   severityStyle,
   statusStyle,
   type Style,
   tildify,
   truncateStart,
+  whereLabel,
 } from './format.js';
 
 // --- Frame rendering (pure) -------------------------------------------------------------------
@@ -123,11 +122,8 @@ function metricCells(view: FrameView): Seg[][] {
   const procs: Seg[] = [
     seg(' PROCESSES  ', p.dim),
     seg(`${totals.count} monitored`, p.strong),
-    totals.reclaimableCount > 0
-      ? seg(
-          `  ${totals.reclaimableCount} stale/frozen · ${totals.reclaimableMb.toFixed(0)} MB reclaimable`,
-          p.warn,
-        )
+    totals.staleCount > 0
+      ? seg(`  ${totals.staleCount} stale/frozen · ${totals.staleMb.toFixed(0)} MB`, p.warn)
       : seg(`  none stale · ${totals.totalMb.toFixed(0)} MB total`, p.dim),
   ];
 
@@ -156,8 +152,8 @@ function compactMetrics(view: FrameView): Seg[] {
       ? seg(`breaker TRIPPED (${snapshot.trippedFiles.length})`, p.danger)
       : seg('breaker armed', p.ok),
     seg(` · ${totals.count} procs`),
-    totals.reclaimableCount > 0
-      ? seg(` (${totals.reclaimableCount} stale, ${totals.reclaimableMb.toFixed(0)} MB)`, p.warn)
+    totals.staleCount > 0
+      ? seg(` (${totals.staleCount} stale, ${totals.staleMb.toFixed(0)} MB)`, p.warn)
       : seg(''),
   ];
 }
@@ -187,7 +183,7 @@ function processRows(view: FrameView, count: number): Seg[][] {
 
   const header: Seg[] = [
     seg(
-      ` ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('SAFETY', 13)} ${padStart('RAM', 9)} ${padStart('AGE', 8)} ${padStart('CPU', 6)}  COMMAND · CWD`,
+      ` ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('WHERE', 13)} ${padStart('RAM', 9)} ${padStart('AGE', 8)} ${padStart('CPU', 6)}  COMMAND · CWD`,
       p.dim,
     ),
   ];
@@ -197,7 +193,7 @@ function processRows(view: FrameView, count: number): Seg[][] {
     return [
       seg(` ${padEnd(String(proc.pid), 7)} `, p.strong),
       seg(padEnd(proc.status, 8), statusStyle(p, proc)),
-      seg(` ${padEnd(safetyLabel(proc), 13)}`, isReclaimable(proc) ? p.warn : p.dim),
+      seg(` ${padEnd(whereLabel(proc), 13)}`, p.dim),
       seg(
         ` ${padStart(`${proc.memoryMb.toFixed(1)} MB`, 9)} ${padStart(sanitize(proc.uptime), 8)} ${padStart(`${proc.cpu.toFixed(1)}%`, 6)}  `,
       ),
@@ -233,7 +229,7 @@ function processOverlayRows(view: FrameView, available: number): Seg[][] {
     [
       seg(' ALL PROCESSES', p.strong),
       seg(
-        `  ${totals.count} monitored · ${totals.totalMb.toFixed(0)} MB · ${totals.reclaimableCount} stale/frozen (${totals.reclaimableMb.toFixed(0)} MB)`,
+        `  ${totals.count} monitored · ${totals.totalMb.toFixed(0)} MB · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(0)} MB)`,
         p.dim,
       ),
     ],
@@ -257,7 +253,7 @@ function helpRows(view: FrameView): Seg[][] {
   ]);
   rows.push([seg('')]);
   rows.push([
-    seg(' Destructive commands (revert, kill, clean, panic) always ask before they act.', p.dim),
+    seg(' Destructive commands (revert, kill, panic) always ask before they act.', p.dim),
   ]);
   rows.push([seg(' Press any key to return.', p.dim)]);
   return rows;

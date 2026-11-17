@@ -194,7 +194,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     expect(mcps).toHaveLength(2);
   });
 
-  it('parses POSIX elapsed uptime and classifies multi-day processes from other repos as STALE & safe-to-kill with exact RAM in MB', async () => {
+  it('parses POSIX elapsed uptime and reports multi-day processes from other repos as STALE with exact RAM in MB', async () => {
     expect(parseElapsedTime('13-19:48:03')).toEqual({
       elapsedSec: 13 * 86400 + 19 * 3600 + 48 * 60 + 3,
       formattedUptime: '13d 19h',
@@ -240,7 +240,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     expect(list).toHaveLength(1);
     expect(list[0].pid).toBe(11905);
     expect(list[0].status).toBe('STALE');
-    expect(list[0].safety).toBe('safe-to-kill');
+    expect(list[0].panicTarget).toBe(false);
     expect(list[0].memoryMb).toBe(67.7);
     expect(list[0].uptime).toBe('13d 19h');
   });
@@ -270,6 +270,6 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     const list = await monitor.scan(10_000);
     expect(list).toHaveLength(1);
     expect(list[0].status).not.toBe('STALE');
-    expect(list[0].safety).toBe('active-repo');
+    expect(list[0].panicTarget).toBe(true);
   });
 });

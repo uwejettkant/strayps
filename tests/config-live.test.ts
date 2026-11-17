@@ -213,6 +213,24 @@ describe('changing single values (agent-leash config set / unset)', () => {
       value: ['.env*', 'secrets/**', 'infra/*.tf'],
     });
     expect(parseConfigValue('protectedFiles', ' , ')).toMatchObject({ ok: false });
+    expect(parseConfigValue('agents', 'vibe, opencode')).toEqual({ ok: true, value: ['vibe', 'opencode'] });
+    for (const bad of ['', ' , ', 'my agent', '/usr/local/bin/vibe']) {
+      expect(parseConfigValue('agents', bad), bad).toMatchObject({ ok: false });
+    }
+  });
+
+  it('reads agent names from the file and refuses anything that is not a program name', () => {
+    const dir = makeTmpDir();
+    writeJson(dir, { agents: ['vibe', 'my agent', 42, '/bin/opencode'] });
+    const manager = new GuardConfigManager(dir);
+    expect(manager.getConfig().agents).toEqual(['vibe']);
+    expect(manager.getWarnings()).toEqual([
+      'agents contains entries that are not program names (a name like "vibe", no path, no spaces), they were ignored',
+    ]);
+
+    writeJson(dir, { agents: 'vibe' });
+    expect(manager.reload()).toMatchObject({ applied: false, warnings: ['agents must be an array of program names'] });
+    expect(manager.getConfig().agents).toEqual(['vibe']);
   });
 
   it('creates a minimal file, changes one key at a time and keeps the rest', () => {
@@ -261,6 +279,7 @@ describe('a running session', () => {
 
     const result = h.session.reloadConfig();
     expect(result.applied).toBe(true);
+    expect(h.monitor.getAgentNames()).toEqual([]);
     expect(h.monitor.getSilenceTimeoutSec()).toBe(90);
     expect(h.monitor.getStaleSessionHours()).toBe(12);
     expect(h.watcher.loopDetector.getMaxEditsPerFilePerMinute()).toBe(3);
@@ -271,6 +290,10 @@ describe('a running session', () => {
     expect(event.severity).toBe('warn');
     expect(event.message).toContain('.agentguard.json reloaded:');
     expect(event.message).toContain('limits.maxEditsPerFilePerMinute 5 → 3');
+
+    writeJson(h.dir, { agents: ['vibe'] });
+    expect(h.session.reloadConfig().changes).toContain('now treated as agents: vibe');
+    expect(h.monitor.getAgentNames()).toEqual(['vibe']);
   });
 
   it('reports a file it cannot apply once, and keeps going with the previous settings', () => {

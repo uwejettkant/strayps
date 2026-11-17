@@ -129,7 +129,7 @@
             agent-leash <span class="text-[#5BE49B] font-normal text-lg">v__LEASH_VERSION__</span>
           </h1>
           <p class="text-xs sm:text-sm text-[#8FA197] mt-1">
-            Real-time AI Coding Agent &amp; MCP Watchdog · File Guard · Thrashing Circuit Breaker · Zombie Killer
+            Real-time AI Coding Agent &amp; MCP Watchdog · File Guard · Thrashing Circuit Breaker · Process Monitor
           </p>
         </div>
 
@@ -165,7 +165,7 @@
             class="px-4 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 text-white font-semibold text-xs sm:text-sm tracking-wide uppercase shadow-lg shadow-red-950/60 border border-red-400/40 transition flex items-center gap-2 cursor-pointer"
           >
             <span class="w-2 h-2 rounded-full bg-white animate-ping"></span>
-            PANIC ROLLBACK &amp; KILL ALL
+            PANIC: STOP AGENTS &amp; ROLL BACK
           </button>
         </div>
       </div>
@@ -200,7 +200,7 @@
           <span id="metric-procs" class="text-xl font-semibold text-[#F2F7F4]">0</span>
           <span id="metric-frozen" class="text-xs text-[#8FA197]">0 frozen</span>
         </div>
-        <div id="metric-silence-limit" class="text-xs text-[#8FA197] mt-1">zombie threshold: 45s silence</div>
+        <div id="metric-silence-limit" class="text-xs text-[#8FA197] mt-1">frozen after 45s silence</div>
       </div>
     </section>
 
@@ -234,15 +234,8 @@
             <h2 id="proc-heading" class="text-sm font-semibold text-[#F2F7F4]">
               <span class="text-[#5BE49B]">$</span> watch -n 2 ps aux | grep mcp
             </h2>
-            <p class="text-xs text-[#8FA197]">CPU/RAM heartbeat &amp; 1-click zombie process killer</p>
+            <p class="text-xs text-[#8FA197]">CPU/RAM heartbeat of agents and MCP servers</p>
           </div>
-          <button
-            type="button"
-            id="kill-frozen-btn"
-            class="hidden text-xs px-2.5 py-1 rounded bg-red-600/90 hover:bg-red-500 text-white font-medium cursor-pointer"
-          >
-            Kill All Frozen
-          </button>
         </div>
 
         <div id="process-list" class="divide-y divide-[#16201B] max-h-[460px] overflow-y-auto p-2 space-y-1">
@@ -263,7 +256,7 @@
     </footer>
   </div>
 
-  <!-- Native Modal Confirmation Dialog for PANIC ROLLBACK & KILL ALL -->
+  <!-- Native modal confirmation dialog for every destructive action (revert, kill, panic) -->
   <dialog
     id="panic-dialog"
     aria-labelledby="panic-dialog-title"
@@ -272,7 +265,7 @@
   >
     <h2 id="panic-dialog-title" class="text-lg font-semibold text-[#F2F7F4] flex items-center gap-2">
       <span class="w-2.5 h-2.5 rounded-full bg-red-500 inline-block"></span>
-      <span id="panic-dialog-heading">Confirm Panic Rollback &amp; Kill All</span>
+      <span id="panic-dialog-heading">Confirm Panic</span>
     </h2>
     <p id="panic-dialog-body" class="text-xs text-[#C9D6CE] mt-2 leading-relaxed">
       This will immediately revert all modified files in the working tree back to the session checkpoint and send SIGKILL to the agent &amp; MCP processes of this repository. Sessions in other repositories are not touched.
@@ -292,7 +285,7 @@
         id="panic-dialog-confirm"
         class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-xs font-semibold text-white uppercase tracking-wide cursor-pointer"
       >
-        Execute Panic Rollback
+        Execute Panic
       </button>
     </form>
   </dialog>
@@ -414,16 +407,8 @@
       }
     }
 
-    async function killStale() {
-      const data = await post('/api/kill-frozen');
-      if (data) {
-        renderStatus(data.status);
-        setToast('terminated ' + data.killedPids.length + ' stale/frozen processes', true);
-      }
-    }
-
     async function triggerPanic() {
-      setToast('executing PANIC ROLLBACK & KILL ALL...', true);
+      setToast('executing PANIC...', true);
       const data = await post('/api/panic');
       if (data) {
         renderStatus(data.status);
@@ -436,11 +421,24 @@
 
     if (panicOpenBtn) {
       panicOpenBtn.addEventListener('click', () => {
+        const targets = ((lastStatus && lastStatus.processes) || []).filter((p) => p.panicTarget);
+        const files = ((lastStatus && lastStatus.modifiedFiles) || []).length;
+        const listed = targets
+          .slice(0, 5)
+          .map((p) => 'PID ' + p.pid + ' ' + p.cmd)
+          .join(', ');
+        const stop =
+          targets.length > 0
+            ? 'Sends SIGKILL to ' + targets.length + ' process' + (targets.length === 1 ? '' : 'es') +
+              ' of this repository’s agents: ' + listed + (targets.length > 5 ? ', …' : '') + '. '
+            : 'No agent of this repository is running, so no process is stopped. ';
         confirmAction({
-          heading: 'Confirm Panic Rollback & Kill All',
+          heading: 'Confirm Panic',
           body:
-            'This will immediately revert all modified files in the working tree back to the session checkpoint and send SIGKILL to the agent & MCP processes of this repository. Sessions in other repositories are not touched.',
-          confirmLabel: 'Execute Panic Rollback',
+            stop +
+            'Reverts ' + files + ' modified file' + (files === 1 ? '' : 's') + ' to the session checkpoint. ' +
+            'Dev servers, editors and sessions in other repositories are not touched.',
+          confirmLabel: 'Execute Panic',
           run: triggerPanic,
         });
       });
@@ -454,29 +452,8 @@
     });
 
     let lastStatus = null;
-    const isReclaimable = (p) => p.status === 'FROZEN' || p.status === 'STALE' || p.safety === 'safe-to-kill';
-
-    const killFrozenBtn = document.getElementById('kill-frozen-btn');
-    if (killFrozenBtn) {
-      killFrozenBtn.addEventListener('click', () => {
-        const targets = ((lastStatus && lastStatus.processes) || []).filter(isReclaimable);
-        if (targets.length === 0) return;
-        const mb = targets.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
-        const attached = targets.filter((p) => p.host && p.host !== 'detached');
-        confirmAction({
-          heading: 'Terminate ' + targets.length + ' stale / frozen processes?',
-          body:
-            'Frees about ' + mb.toFixed(0) + ' MB. Each process gets SIGTERM first and SIGKILL only if it does not exit.' +
-            (attached.length > 0
-              ? ' ' + attached.length + ' of them still belong to an open application (' +
-                Array.from(new Set(attached.map((p) => p.host))).join(', ') +
-                '), which will report that its session ended.'
-              : ''),
-          confirmLabel: 'Terminate ' + targets.length,
-          run: killStale,
-        });
-      });
-    }
+    // An observation (old, orphaned, silent), never a verdict that a process may be killed
+    const isStaleOrFrozen = (p) => p.status === 'FROZEN' || p.status === 'STALE';
 
     // One listener for all buttons inside the rendered lists. Values travel in data attributes,
     // never inside generated JavaScript.
@@ -484,25 +461,30 @@
       const target = e.target instanceof Element ? e.target.closest('[data-action]') : null;
       if (!target) return;
       const action = target.getAttribute('data-action');
+      // Every destructive action asks first, whatever the process or file looks like
       if (action === 'revert') {
         const filePath = target.getAttribute('data-path');
-        if (filePath) rollbackFile(filePath);
+        if (!filePath) return;
+        confirmAction({
+          heading: 'Roll back ' + filePath + '?',
+          body:
+            'Restores ' + filePath + ' to the session checkpoint. The version it replaces is kept in a private temp directory (shown in the activity log).',
+          confirmLabel: 'Roll back',
+          run: () => rollbackFile(filePath),
+        });
       } else if (action === 'kill') {
         const pid = Number(target.getAttribute('data-pid'));
         const proc = ((lastStatus && lastStatus.processes) || []).find((p) => p.pid === pid);
         if (!proc) return;
-        if (isReclaimable(proc)) {
-          killProcess(pid);
-        } else {
-          confirmAction({
-            heading: 'Terminate PID ' + pid + '?',
-            body:
-              proc.cmd + ' is not classified as stale. ' + (proc.reason || '') +
-              ' Terminating it ends work that may still be in use.',
-            confirmLabel: 'Terminate PID ' + pid,
-            run: () => killProcess(pid),
-          });
-        }
+        confirmAction({
+          heading: 'Terminate PID ' + pid + '?',
+          body:
+            proc.cmd + (proc.cwd ? ' in ' + proc.cwd : '') + '. ' + (proc.reason || '') +
+            (proc.category === 'agent' ? ' Its agent session ends.' : '') +
+            ' It gets SIGTERM first and SIGKILL only if it does not exit.',
+          confirmLabel: 'Terminate PID ' + pid,
+          run: () => killProcess(pid),
+        });
       }
     });
 
@@ -556,26 +538,20 @@
         'max ' + cfg.limits.maxEditsPerFilePerMinute + ' edits/file/min';
 
       const procs = state.processes || [];
-      const reclaimable = procs.filter(isReclaimable);
-      const reclaimableMb = reclaimable.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
+      const stale = procs.filter(isStaleOrFrozen);
+      const staleMb = stale.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
       const totalMb = procs.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
 
       document.getElementById('metric-procs').textContent = String(procs.length);
       const frozenEl = document.getElementById('metric-frozen');
       frozenEl.textContent =
-        reclaimable.length > 0
-          ? reclaimable.length + ' stale/frozen (' + reclaimableMb.toFixed(0) + ' MB)'
+        stale.length > 0
+          ? stale.length + ' stale/frozen (' + staleMb.toFixed(0) + ' MB)'
           : '0 stale · ' + totalMb.toFixed(0) + ' MB total';
-      frozenEl.className = reclaimable.length > 0 ? 'text-xs text-amber-400 font-semibold' : 'text-xs text-[#8FA197]';
+      frozenEl.className = stale.length > 0 ? 'text-xs text-amber-400 font-semibold' : 'text-xs text-[#8FA197]';
       document.getElementById('metric-silence-limit').textContent =
-        reclaimable.length > 0
-          ? 'reclaimable RAM: ' + reclaimableMb.toFixed(1) + ' MB (safe to kill)'
-          : 'zombie threshold: ' + cfg.limits.mcpSilenceTimeoutSec + 's silence';
-
-      if (killFrozenBtn) {
-        killFrozenBtn.textContent = 'Clean Up ' + reclaimable.length + ' (' + reclaimableMb.toFixed(0) + ' MB)';
-        killFrozenBtn.classList.toggle('hidden', reclaimable.length === 0);
-      }
+        'frozen after ' + cfg.limits.mcpSilenceTimeoutSec + 's silence · stale after ' +
+        (cfg.limits.staleSessionHours || 6) + 'h in another repo';
 
       renderEvents(state.events || []);
       renderProcesses(procs);
@@ -631,7 +607,7 @@
 
       container.innerHTML = procs
         .map((proc) => {
-          const isSafeToKill = isReclaimable(proc);
+          const flagged = isStaleOrFrozen(proc);
           const statusBadge =
             proc.status === 'FROZEN'
               ? 'bg-red-950 text-red-300 border-red-500/50 animate-pulse'
@@ -643,13 +619,14 @@
               ? 'bg-[#0B0F0D] text-[#B4C3BA] border-[#2E4237]'
               : 'bg-[#0B0F0D] text-[#8FA197] border-[#1F2C25]';
 
-          const safetyPill = isSafeToKill
-            ? '<span class="px-1.5 py-0.2 rounded bg-red-950/80 text-red-300 border border-red-500/40 text-[10px] font-semibold">SAFE TO KILL</span>'
-            : proc.safety === 'standby-mcp'
-            ? '<span class="px-1.5 py-0.2 rounded bg-[#16201B] text-[#8FA197] border border-[#1F2C25] text-[10px]">STANDBY CHILD</span>'
-            : proc.inWatchedRepo === false
-            ? '<span class="px-1.5 py-0.2 rounded bg-[#0B0F0D] text-[#B4C3BA] border border-[#2E4237] text-[10px]">OTHER SESSION</span>'
-            : '<span class="px-1.5 py-0.2 rounded bg-[#16201B] text-[#5BE49B] border border-[#2E4237] text-[10px]">ACTIVE IN REPO</span>';
+          const wherePill = proc.inWatchedRepo
+            ? '<span class="px-1.5 py-0.2 rounded bg-[#16201B] text-[#5BE49B] border border-[#2E4237] text-[10px]">THIS REPO</span>'
+            : proc.host === 'detached'
+            ? '<span class="px-1.5 py-0.2 rounded bg-[#0B0F0D] text-[#B4C3BA] border border-[#2E4237] text-[10px]">DETACHED</span>'
+            : '<span class="px-1.5 py-0.2 rounded bg-[#0B0F0D] text-[#B4C3BA] border border-[#2E4237] text-[10px]">ELSEWHERE</span>';
+          const panicPill = proc.panicTarget
+            ? '<span class="px-1.5 py-0.2 rounded bg-red-950/60 text-red-300 border border-red-500/40 text-[10px]" title="Panic stops this process">PANIC TARGET</span>'
+            : '';
 
           const hostPill =
             proc.host && proc.host !== 'detached'
@@ -657,11 +634,11 @@
               : '';
 
           const cwdLine = proc.cwd
-            ? `<div class="text-[11px] ${isSafeToKill ? 'text-amber-300' : 'text-[#5BE49B]'} truncate max-w-md" title="${esc(proc.cwd)}">cwd: ${esc(proc.cwd)}</div>`
+            ? `<div class="text-[11px] ${flagged ? 'text-amber-300' : 'text-[#5BE49B]'} truncate max-w-md" title="${esc(proc.cwd)}">cwd: ${esc(proc.cwd)}</div>`
             : '';
 
           const reasonLine = proc.reason
-            ? `<div class="text-[11px] ${isSafeToKill ? 'text-red-300' : 'text-[#8FA197]'} truncate max-w-md" title="${esc(proc.reason)}">${esc(proc.reason)}</div>`
+            ? `<div class="text-[11px] ${flagged ? 'text-amber-300' : 'text-[#8FA197]'} truncate max-w-md" title="${esc(proc.reason)}">${esc(proc.reason)}</div>`
             : '';
 
           const mbDisplay =
@@ -670,12 +647,13 @@
           const pid = Number(proc.pid) || 0;
 
           return `
-            <div class="px-3 py-2.5 rounded-lg ${isSafeToKill ? 'bg-red-950/20 border border-red-500/30' : 'hover:bg-[#0B0F0D]'} flex items-center justify-between gap-3 text-xs">
+            <div class="px-3 py-2.5 rounded-lg ${flagged ? 'bg-amber-950/10 border border-amber-500/20' : 'hover:bg-[#0B0F0D]'} flex items-center justify-between gap-3 text-xs">
               <div class="min-w-0 space-y-0.5">
                 <div class="flex flex-wrap items-center gap-1.5">
                   <span class="font-semibold text-[#F2F7F4]">PID ${pid}</span>
                   <span class="px-1.5 py-0.2 rounded border text-[10px] uppercase ${statusBadge}">${esc(proc.status)}</span>
-                  ${safetyPill}
+                  ${wherePill}
+                  ${panicPill}
                   ${hostPill}
                   <span class="text-[#8FA197]">[${esc(proc.category)}]</span>
                 </div>
@@ -690,10 +668,10 @@
                 type="button"
                 data-action="kill"
                 data-pid="${pid}"
-                class="shrink-0 px-2.5 py-1.5 rounded ${isSafeToKill ? 'bg-red-600 hover:bg-red-500 text-white font-semibold' : 'border border-[#2E4237] text-[#B4C3BA] hover:border-red-400 hover:text-red-300'} cursor-pointer"
-                title="${isSafeToKill ? 'Classified as stale or frozen' : 'Active or standby process in current session'}"
+                class="shrink-0 px-2.5 py-1.5 rounded border border-[#2E4237] text-[#B4C3BA] hover:border-red-400 hover:text-red-300 cursor-pointer"
+                title="Terminate this process (asks first)"
               >
-                ${isSafeToKill ? 'Kill Stale' : 'Kill PID'}
+                Kill PID
               </button>
             </div>
           `;

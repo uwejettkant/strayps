@@ -39,6 +39,7 @@ describe('.agentguard.json', () => {
     const manager = managerWith({
       mode: 'strict',
       protectedFiles: ['secrets/**', 'prisma/schema.prisma'],
+      agents: ['vibe', 'opencode'],
       limits: {
         maxFilesWarn: 5,
         maxFilesHardStop: 9,
@@ -52,6 +53,7 @@ describe('.agentguard.json', () => {
     expect(manager.getConfig()).toEqual({
       mode: 'strict',
       protectedFiles: ['secrets/**', 'prisma/schema.prisma'],
+      agents: ['vibe', 'opencode'],
       limits: {
         maxFilesWarn: 5,
         maxFilesHardStop: 9,

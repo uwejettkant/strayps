@@ -175,7 +175,6 @@ describe('dashboard page', () => {
           {
             pid: 4711,
             status: `STALE"><img src=x onerror=alert(1)>`,
-            safety: 'safe-to-kill',
             category: `<i>mcp</i>`,
             cmd: `node ${HOSTILE}`,
             cwd: `/tmp/${HOSTILE}`,
@@ -186,7 +185,7 @@ describe('dashboard page', () => {
             cpu: 0,
             inWatchedRepo: false,
           },
-          { pid: `1); alert(1); (`, status: 'ACTIVE', safety: 'active-repo', category: 'agent', cmd: 'claude', memoryMb: 1, cpu: 0, inWatchedRepo: true },
+          { pid: `1); alert(1); (`, status: 'ACTIVE', category: 'agent', cmd: 'claude', memoryMb: 1, cpu: 0, inWatchedRepo: true },
         ],
       }),
     );
@@ -205,15 +204,82 @@ describe('dashboard page', () => {
     }
   });
 
-  it('labels a process by where it really runs', () => {
+  it('labels a process by where it really runs, and never as safe to kill', () => {
     const { api, getElementById } = loadDashboard();
-    const proc = { status: 'ACTIVE', safety: 'active-repo', category: 'agent', cmd: 'claude', memoryMb: 1, cpu: 1 };
+    const proc = { status: 'ACTIVE', category: 'agent', cmd: 'claude', memoryMb: 1, cpu: 1 };
     api.renderStatus(
-      stateWith({ processes: [{ ...proc, pid: 1, inWatchedRepo: true }, { ...proc, pid: 2, inWatchedRepo: false }] }),
+      stateWith({
+        processes: [
+          { ...proc, pid: 1, inWatchedRepo: true, panicTarget: true },
+          { ...proc, pid: 2, inWatchedRepo: false, status: 'STALE' },
+          { ...proc, pid: 3, inWatchedRepo: false, host: 'detached', status: 'FROZEN', category: 'mcp' },
+        ],
+      }),
     );
     const markup = getElementById('process-list').innerHTML;
-    expect(markup.match(/ACTIVE IN REPO/g)).toHaveLength(1);
-    expect(markup.match(/OTHER SESSION/g)).toHaveLength(1);
+    expect(markup.match(/THIS REPO/g)).toHaveLength(1);
+    expect(markup.match(/ELSEWHERE/g)).toHaveLength(1);
+    expect(markup.match(/DETACHED/g)).toHaveLength(1);
+    expect(markup.match(/PANIC TARGET/g)).toHaveLength(1);
+    expect(markup).not.toMatch(/safe to kill|kill stale/i);
+    expect(getElementById('metric-silence-limit').textContent).not.toMatch(/safe to kill|reclaimable/i);
+  });
+
+  it('asks before a revert and before a kill, whatever the file or process looks like', async () => {
+    const { api, getElementById, requests, documentListeners } = loadDashboard();
+    api.renderStatus(
+      stateWith({
+        modifiedFiles: ['src/a.ts'],
+        processes: [{ pid: 4711, status: 'FROZEN', category: 'mcp', cmd: 'node x-mcp', memoryMb: 1, cpu: 0, inWatchedRepo: false }],
+      }),
+    );
+    const ElementClass = (api as unknown as { Element: new () => object }).Element;
+    const click = (attributes: Record<string, string>) => {
+      const button = { getAttribute: (name: string) => attributes[name] ?? null };
+      const target = Object.assign(new ElementClass(), { closest: () => button });
+      for (const listener of documentListeners.click ?? []) listener({ target });
+    };
+    const dialog = getElementById('panic-dialog');
+    const answer = async (choice: string) => {
+      dialog.returnValue = choice;
+      dialog.open = false;
+      for (const listener of dialog.listeners.close ?? []) await listener({});
+    };
+
+    click({ 'data-action': 'revert', 'data-path': 'src/a.ts' });
+    expect(dialog.open).toBe(true);
+    expect(getElementById('panic-dialog-heading').textContent).toBe('Roll back src/a.ts?');
+    await answer('cancel');
+    click({ 'data-action': 'kill', 'data-pid': '4711' });
+    expect(dialog.open).toBe(true);
+    expect(getElementById('panic-dialog-heading').textContent).toBe('Terminate PID 4711?');
+    await answer('cancel');
+    expect(requests.filter((r) => r.init?.method === 'POST')).toEqual([]);
+
+    click({ 'data-action': 'revert', 'data-path': 'src/a.ts' });
+    await answer('confirm');
+    expect(requests.filter((r) => r.init?.method === 'POST').map((r) => r.url)).toEqual(['/api/rollback-file']);
+  });
+
+  it('names the processes panic stops before it is confirmed', () => {
+    const { api, getElementById } = loadDashboard();
+    api.renderStatus(
+      stateWith({
+        modifiedFiles: ['a.ts', 'b.ts'],
+        processes: [
+          { pid: 100, status: 'ACTIVE', category: 'agent', cmd: 'claude-code (opus)', memoryMb: 1, cpu: 1, inWatchedRepo: true, panicTarget: true },
+          { pid: 300, status: 'ACTIVE', category: 'node', cmd: 'node tsx watch server.ts', memoryMb: 1, cpu: 1, inWatchedRepo: true, panicTarget: false },
+        ],
+      }),
+    );
+    const openPanic = getElementById('panic-open-btn').listeners.click?.[0];
+    expect(openPanic).toBeTypeOf('function');
+    openPanic!({});
+    const body = getElementById('panic-dialog-body').textContent;
+    expect(body).toContain('Sends SIGKILL to 1 process');
+    expect(body).toContain('PID 100 claude-code (opus)');
+    expect(body).not.toContain('PID 300');
+    expect(body).toContain('Reverts 2 modified files');
   });
 
   it('sends the token with every state-changing request', async () => {

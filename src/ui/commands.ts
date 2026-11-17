@@ -1,6 +1,7 @@
 import { type GuardMode, parseMode } from '../core/guard-config.js';
+import type { MonitoredProcess } from '../core/process-monitor.js';
 import type { WatchdogSession } from '../core/session.js';
-import { isReclaimable, processTotals, sanitize } from './format.js';
+import { sanitize } from './format.js';
 
 export type LeashCommand =
   | { kind: 'empty' }
@@ -10,7 +11,6 @@ export type LeashCommand =
   | { kind: 'mode'; mode: GuardMode }
   | { kind: 'revert'; target: string }
   | { kind: 'kill'; pid: number }
-  | { kind: 'clean' }
   | { kind: 'panic' }
   | { kind: 'invalid'; message: string };
 
@@ -27,18 +27,32 @@ export interface CommandResult {
   confirm?: { prompt: string; run: () => CommandResult };
 }
 
-export const COMMAND_NAMES = ['help', 'status', 'mode', 'revert', 'kill', 'clean', 'panic', 'exit'];
+export const COMMAND_NAMES = ['help', 'status', 'mode', 'revert', 'kill', 'panic', 'exit'];
 
 export const HELP_LINES: Array<[string, string]> = [
   ['exit, quit, q', 'stop the watchdog (Ctrl+C works too)'],
   ['mode <strict|balanced|yolo>', 'switch the guard mode'],
   ['revert <file>', 'roll one modified file back to the session checkpoint'],
   ['kill <pid>', 'terminate one monitored process (SIGTERM, then SIGKILL)'],
-  ['clean', 'terminate everything classified as stale or frozen'],
-  ['panic', 'kill the processes of this repo and roll back all files'],
+  ['panic', 'stop the agents of this repo and roll back all files'],
   ['status', 'list all monitored processes'],
   ['help, ?', 'show this list'],
 ];
+
+/** A short name for a process: the npm binary it runs, or the file name of its program. */
+function shortName(proc: MonitoredProcess): string {
+  const bin = proc.cmd.match(/\.bin\/(\S+)/);
+  if (bin) return bin[1];
+  const first = proc.cmd.trim().split(/\s+/)[0] ?? '';
+  return first.split('/').pop() || 'process';
+}
+
+/** "claude-code 48110, mcp-server-git 48244, … (+2 more)" for a confirmation prompt. */
+function describeProcesses(processes: MonitoredProcess[], shown: number = 3): string {
+  const names = processes.slice(0, shown).map((p) => `${sanitize(shortName(p))} ${p.pid}`);
+  const more = processes.length > shown ? `, … (+${processes.length - shown} more)` : '';
+  return `${names.join(', ')}${more}`;
+}
 
 const EXIT_WORDS = new Set(['exit', 'quit', 'q', ':q', 'stop', 'bye']);
 const MODE_WORDS = new Set(['strict', 'balanced', 'yolo', 'refactoring']);
@@ -55,7 +69,13 @@ export function parseCommand(line: string): LeashCommand {
   if (EXIT_WORDS.has(word)) return { kind: 'exit' };
   if (word === 'help' || word === 'h' || word === '?') return { kind: 'help' };
   if (word === 'status' || word === 's' || word === 'ps') return { kind: 'status' };
-  if (word === 'clean' || word === 'cleanup' || word === 'c') return { kind: 'clean' };
+  if (word === 'clean' || word === 'cleanup') {
+    // Bulk cleanup relied on a stale/frozen verdict that was wrong about sessions still in use
+    return {
+      kind: 'invalid',
+      message: 'There is no bulk cleanup: look at the list (status) and terminate one process with kill <pid>.',
+    };
+  }
   if (word === 'panic' || word === 'panic!') return { kind: 'panic' };
 
   if (MODE_WORDS.has(word) && !rest) {
@@ -169,12 +189,12 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
       const where = proc.cwd ? `, ${sanitize(proc.cwd)}` : '';
       const attached =
         proc.host && proc.host !== 'detached' ? ` It is attached to ${sanitize(proc.host)}.` : '';
-      const caution = isReclaimable(proc) ? '' : ' It is NOT classified as stale.';
+      const agentNote = proc.category === 'agent' ? ' Its agent session ends.' : '';
       return {
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `Terminate PID ${proc.pid} (${sanitize(proc.cmd)}${where}, ${proc.memoryMb.toFixed(0)} MB)?${caution}${attached}`,
+          prompt: `Terminate PID ${proc.pid} (${sanitize(proc.cmd)}${where}, ${proc.memoryMb.toFixed(0)} MB)?${agentNote}${attached}`,
           run: () => {
             const result = session.killProcess(proc.pid);
             return result.ok
@@ -185,43 +205,21 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
       };
     }
 
-    case 'clean': {
-      const stale = session.getStaleProcesses();
-      if (stale.length === 0) {
-        return { message: 'Nothing is classified as stale or frozen', level: 'info' };
-      }
-      const totals = processTotals(stale);
-      const hosts = Array.from(
-        new Set(stale.map((p) => p.host).filter((h): h is string => Boolean(h) && h !== 'detached')),
-      );
-      const attached =
-        hosts.length > 0
-          ? ` Some belong to an open ${hosts.map(sanitize).join(' / ')}, which will report an ended session.`
-          : '';
-      return {
-        message: '',
-        level: 'warn',
-        confirm: {
-          prompt: `Terminate ${stale.length} stale/frozen process${stale.length === 1 ? '' : 'es'} (${totals.totalMb.toFixed(0)} MB)?${attached}`,
-          run: () => {
-            const killed = session.killStale();
-            return {
-              message: `Sent SIGTERM to ${killed.length} process${killed.length === 1 ? '' : 'es'}`,
-              level: 'info',
-            };
-          },
-        },
-      };
-    }
-
     case 'panic': {
       const snapshot = session.getSnapshot();
-      const repoProcs = snapshot.processes.filter((p) => p.inWatchedRepo).length;
+      const targets = session.getPanicTargets();
+      const files = snapshot.modifiedFiles.length;
+      // Both counts first: a narrow terminal cuts the end of the line, and the list can take that
+      const fileText = `roll back ${files} modified file${files === 1 ? '' : 's'}`;
+      const stopText =
+        targets.length > 0
+          ? ` and stop ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents (${describeProcesses(targets)})`
+          : ' (no agent of this repo is running)';
       return {
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `PANIC: kill ${repoProcs} process${repoProcs === 1 ? '' : 'es'} of this repo and roll back ${snapshot.modifiedFiles.length} modified file${snapshot.modifiedFiles.length === 1 ? '' : 's'}?`,
+          prompt: `PANIC: ${fileText}${stopText}?`,
           run: () => {
             const result = session.panic();
             const skipped = result.skippedFiles.length

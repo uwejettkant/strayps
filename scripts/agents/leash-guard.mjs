@@ -26,7 +26,7 @@ const PACKAGE_RUNNERS = new Set(['npx', 'pnpx', 'bunx']);
 const SCRIPT_RUNNERS = new Set(['node', 'tsx', 'bun', 'ts-node']);
 const RUNNER_OPTIONS_WITH_VALUE = new Set(['--import', '--require', '-r', '--loader', '--experimental-loader']);
 const OPTIONS_WITH_VALUE = new Set(['-p', '--port', '-m', '--mode']);
-const OTHER_COMMANDS = new Set(['status', 'init', 'help']);
+const OTHER_COMMANDS = new Set(['status', 'init', 'config', 'help']);
 
 /** @param {string} token */
 const unquote = (token) => token.replace(/^(['"])([\s\S]*)\1$/, '$2');

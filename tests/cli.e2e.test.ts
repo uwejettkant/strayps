@@ -131,11 +131,11 @@ describe('agent-leash CLI', () => {
     await run.waitFor('rollback simulated');
 
     run.child.stdin.write('status\n');
-    await run.waitFor(/31877\s+STALE\s+SAFE TO KILL/);
-    run.child.stdin.write('clean\n');
+    await run.waitFor(/31877\s+STALE\s+ELSEWHERE/);
+    run.child.stdin.write('kill 31877\n');
     await run.waitFor('Type "yes" to confirm');
     run.child.stdin.write('yes\n');
-    await run.waitFor('Sent SIGTERM to 2 processes');
+    await run.waitFor('Sent SIGTERM to PID 31877');
     run.child.stdin.write('mode strict\n');
     await run.waitFor('Guard mode is now STRICT');
     run.child.stdin.write('quit\n');

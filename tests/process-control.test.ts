@@ -72,7 +72,7 @@ describe('ProcessMonitor classification (production rules)', () => {
 
     const child = later.find((p) => p.pid === 101)!;
     expect(child.status).toBe('STANDBY');
-    expect(child.safety).toBe('standby-mcp');
+    expect(child.agentPid).toBe(100);
     expect(monitor.getFrozenProcesses()).toHaveLength(0);
   });
 
@@ -107,8 +107,8 @@ describe('ProcessMonitor classification (production rules)', () => {
     const list = await monitor.scan(t0 + 30 * 60_000);
 
     expect(list[0].status).toBe('IDLE');
-    expect(list[0].safety).toBe('active-repo');
     expect(list[0].inWatchedRepo).toBe(true);
+    expect(list[0].panicTarget).toBe(true);
     expect(onFrozen).not.toHaveBeenCalled();
   });
 
@@ -123,10 +123,12 @@ describe('ProcessMonitor classification (production rules)', () => {
     const list = await monitor.scan(1_000);
     const session = list.find((p) => p.pid === 502)!;
     expect(session.status).toBe('STALE');
-    expect(session.safety).toBe('safe-to-kill');
     expect(session.host).toBe('VS Code');
-    expect(session.reason).toContain('attached to VS Code');
+    expect(session.reason).toBe('Session in /work/other-repo, running for 2d 15h, attached to VS Code');
+    // an observation, not a verdict: age alone has been wrong about sessions still in use
+    expect(session.reason).not.toMatch(/safe to kill/i);
     expect(session.inWatchedRepo).toBe(false);
+    expect(session.panicTarget).toBe(false);
     // the editor itself is not an agent process
     expect(list.map((p) => p.pid).sort()).toEqual([502, 503]);
   });
@@ -215,6 +217,100 @@ describe('ProcessMonitor classification (production rules)', () => {
   it.todo('measures CPU activity from CPU time deltas instead of ps %cpu (lifetime average on Linux)');
 });
 
+describe('ProcessMonitor agent detection (no list of products to keep up to date)', () => {
+  // A terminal tab as seen on macOS: the terminal app, a login shell in it
+  const terminalTab: RawProcessInfo[] = [
+    { pid: 70, ppid: 1, name: '/Applications/Warp.app/Contents/MacOS/stable', cmd: '/Applications/Warp.app/Contents/MacOS/stable' },
+    { pid: 71, ppid: 70, name: '-zsh', cmd: '-zsh' },
+  ];
+
+  it('finds an agent it has never heard of by the MCP server it starts', async () => {
+    // Shape observed on 17.11.2026 with the Antigravity CLI: agent -> npm exec wrapper -> MCP server
+    const { monitor } = setup([
+      ...terminalTab,
+      { pid: 80, ppid: 71, name: 'tool-agent', cmd: '/Users/dev/.local/bin/tool-agent', cwd: REPO, cpu: 0, rssKb: 90_000, etime: '33:08' },
+      { pid: 81, ppid: 80, name: 'npm', cmd: 'npm exec some-mcp-server@latest', cwd: REPO },
+      mcp(82, 81, { cwd: REPO }),
+    ]);
+
+    const t0 = 3_000_000;
+    monitor.recordFileActivity(t0);
+    await monitor.scan(t0);
+    const list = await monitor.scan(t0 + 30 * 60_000);
+    const agentProc = list.find((p) => p.pid === 80);
+    expect(agentProc).toMatchObject({ category: 'agent', detectedBy: 'mcp-client', inWatchedRepo: true });
+    expect(['ACTIVE', 'IDLE']).toContain(agentProc!.status);
+    expect(list.find((p) => p.pid === 82)).toMatchObject({ category: 'mcp', inWatchedRepo: true, agentPid: 80 });
+    // the terminal, the shell and the npm wrapper are not listed
+    expect(list.map((p) => p.pid).sort((a, b) => a - b)).toEqual([80, 82]);
+  });
+
+  it('never takes an editor, a desktop app or a terminal that starts MCP servers for an agent', async () => {
+    const { monitor } = setup([
+      { pid: 500, ppid: 1, name: '/Applications/Visual Studio Code.app/Contents/MacOS/Code', cmd: '/Applications/Visual Studio Code.app/Contents/MacOS/Code' },
+      { pid: 501, ppid: 500, name: 'Code Helper (Plugin)', cmd: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)', cwd: REPO },
+      mcp(502, 501, { cwd: REPO }),
+      { pid: 600, ppid: 1, name: '/Applications/Claude.app/Contents/MacOS/Claude', cmd: '/Applications/Claude.app/Contents/MacOS/Claude' },
+      mcp(601, 600),
+      ...terminalTab,
+      mcp(73, 71, { cwd: REPO }),
+    ]);
+
+    const list = await monitor.scan(1_000);
+    expect(list.filter((p) => p.category === 'agent')).toEqual([]);
+    expect(list.map((p) => p.pid).sort((a, b) => a - b)).toEqual([73, 502, 601]);
+    expect(list.find((p) => p.pid === 502)?.host).toBe('VS Code');
+  });
+
+  it('recognizes programs named in the agents setting, by their exact name', async () => {
+    const { monitor } = setup([
+      ...terminalTab,
+      { pid: 90, ppid: 71, name: 'vibe', cmd: 'vibe', cwd: REPO, cpu: 1, etime: '05:00' },
+      { pid: 91, ppid: 71, name: 'python3', cmd: 'python3 /home/dev/.local/bin/vibe --resume', cwd: REPO, cpu: 1, etime: '05:00' },
+      { pid: 92, ppid: 71, name: 'node', cmd: `node ${REPO}/tools/vibe-check.js`, cwd: REPO, cpu: 1, etime: '05:00' },
+    ]);
+
+    expect((await monitor.scan(1_000)).filter((p) => p.category === 'agent')).toEqual([]);
+
+    monitor.setAgentNames(['Vibe']);
+    const list = await monitor.scan(2_000);
+    const agents = list.filter((p) => p.category === 'agent');
+    expect(agents.map((p) => p.pid).sort((a, b) => a - b)).toEqual([90, 91]);
+    expect(agents.every((p) => p.detectedBy === 'setting')).toBe(true);
+    // vibe-check.js only contains the name
+    expect(list.find((p) => p.pid === 92)?.category).toBe('node');
+  });
+
+  it('does not take a program for an agent because its name merely contains one', async () => {
+    const { monitor } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 101, ppid: 100, name: 'node', cmd: 'node /x/node_modules/.bin/codex-mcp-server', cwd: REPO },
+      { pid: 102, ppid: 1, name: 'node', cmd: `node ${REPO}/scripts/aider-stats.js`, cwd: REPO },
+    ]);
+
+    const list = await monitor.scan(1_000);
+    expect(list.find((p) => p.pid === 101)?.category).toBe('mcp');
+    expect(list.find((p) => p.pid === 102)?.category).toBe('node');
+  });
+
+  it('still recognizes Claude Code, Codex and Aider by name, however they are started', async () => {
+    const { monitor } = setup([
+      agent(100, REPO),
+      { pid: 110, ppid: 71, name: 'codex', cmd: '/usr/local/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex', cwd: REPO },
+      { pid: 111, ppid: 71, name: 'node', cmd: 'node /usr/local/bin/codex --full-auto', cwd: REPO },
+      { pid: 112, ppid: 71, name: 'python3.12', cmd: '/opt/homebrew/bin/python3.12 /Users/dev/.local/bin/aider --model x', cwd: REPO },
+      { pid: 113, ppid: 71, name: 'python3', cmd: 'python3 -m aider', cwd: REPO },
+      { pid: 114, ppid: 71, name: 'node', cmd: 'node /Users/dev/.vscode/extensions/anthropic.claude-code-2.1.0/cli.js', cwd: REPO },
+      ...terminalTab,
+    ]);
+
+    const list = await monitor.scan(1_000);
+    const agents = list.filter((p) => p.category === 'agent');
+    expect(agents.map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 110, 111, 112, 113, 114]);
+    expect(agents.every((p) => p.detectedBy === 'name')).toBe(true);
+  });
+});
+
 describe('ProcessMonitor termination', () => {
   it('only terminates processes from its own list, never an arbitrary PID', async () => {
     const { monitor, kills } = setup([agent(100, REPO)]);
@@ -278,19 +374,26 @@ describe('ProcessMonitor termination', () => {
     expect(kills).toHaveLength(2);
   });
 
-  it('limits a repo-scoped kill to the watched repository and its tool processes', async () => {
+  it('limits panic to the agents of the watched repository and what they started', async () => {
     const { monitor, kills } = setup([
       agent(100, REPO, { cpu: 1 }),
       mcp(101, 100, { cwd: '/' }),
       agent(200, OTHER, { cpu: 1 }),
       mcp(201, 200, { cwd: OTHER }),
+      // the developer's own dev server, started from a terminal in the same repository
+      { pid: 10, ppid: 1, name: 'zsh', cmd: '-zsh' },
+      { pid: 300, ppid: 10, name: 'node', cmd: `node ${REPO}/node_modules/.bin/tsx watch server.ts`, cwd: REPO, cpu: 1 },
+      // an MCP server of the editor, which is not an agent and must not lose its tools
+      { pid: 500, ppid: 1, name: 'Code Helper (Plugin)', cmd: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)' },
+      mcp(501, 500, { cwd: REPO }),
     ]);
     await monitor.scan(1_000);
 
-    const killed = monitor.killInWatchedRepo('SIGKILL');
-    expect(killed.sort()).toEqual([100, 101]);
+    expect(monitor.getPanicTargets().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101]);
+    const killed = monitor.killPanicTargets('SIGKILL');
+    expect(killed.sort((a, b) => a - b)).toEqual([100, 101]);
     expect(kills.every((k) => k.signal === 'SIGKILL')).toBe(true);
-    expect(kills.map((k) => k.pid).sort()).toEqual([100, 101]);
+    expect(kills.map((k) => k.pid).sort((a, b) => a - b)).toEqual([100, 101]);
   });
 
   it('the default killer cannot reach a real process from inside the test suite', async () => {

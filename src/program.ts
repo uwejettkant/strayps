@@ -221,6 +221,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     rootDir,
     mcpSilenceTimeoutSec: cfg.limits.mcpSilenceTimeoutSec,
     staleSessionHours: cfg.limits.staleSessionHours,
+    agentNames: cfg.agents,
     pollIntervalMs: 2000,
     ...(demo
       ? {
@@ -389,11 +390,12 @@ async function runStatus(dir: string): Promise<void> {
   const rootDir = resolveTargetDir(dir);
   const configManager = new GuardConfigManager(rootDir, undefined, { readOnly: true });
   const watcher = new RepoWatcher({ rootDir, configManager, dryRun: true });
-  const limits = configManager.getConfig().limits;
+  const { limits, agents } = configManager.getConfig();
   const processMonitor = new ProcessMonitor({
     rootDir,
     mcpSilenceTimeoutSec: limits.mcpSilenceTimeoutSec,
     staleSessionHours: limits.staleSessionHours,
+    agentNames: agents,
   });
   const session = new WatchdogSession({ rootDir, configManager, watcher, processMonitor });
   await processMonitor.scan();
@@ -416,8 +418,10 @@ function displayValue(value: unknown): string {
 
 function effectiveValue(manager: GuardConfigManager, key: ConfigKey): string {
   const config = manager.getConfig();
+  const list = (values: string[]) => (values.length > 0 ? values.join(', ') : 'none');
   if (key === 'mode') return config.mode;
-  if (key === 'protectedFiles') return config.protectedFiles.join(', ');
+  if (key === 'protectedFiles') return list(config.protectedFiles);
+  if (key === 'agents') return list(config.agents);
   return String(config.limits[key.slice('limits.'.length) as keyof GuardLimits]);
 }
 

@@ -44,7 +44,6 @@ const withToken = (token: string, extra: Record<string, string> = {}) => ({
 describe('dashboard API: who may change things', () => {
   const mutations: Array<[string, string | undefined]> = [
     ['/api/panic', undefined],
-    ['/api/kill-frozen', undefined],
     ['/api/kill/100', undefined],
     ['/api/mode', json({ mode: 'yolo' })],
     ['/api/rollback-file', json({ filePath: 'a.ts' })],
@@ -144,6 +143,19 @@ describe('dashboard API: what the actions do', () => {
     const known = await app.request('/api/kill/100', { method: 'POST', headers: withToken(token) });
     expect(known.status).toBe(200);
     expect(h.kills).toEqual([{ pid: 100, signal: 'SIGTERM' }]);
+  });
+
+  it('has no route that terminates processes in bulk because of their status', async () => {
+    const h = createHarness({
+      procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: '/work/other-repo', etime: '03-00:00:00' }],
+    });
+    await h.monitor.scan();
+    expect(h.session.getSnapshot().processes[0].status).toBe('STALE');
+    const { app, token } = appFor(h);
+
+    const res = await app.request('/api/kill-frozen', { method: 'POST', headers: withToken(token) });
+    expect(res.status).toBe(404);
+    expect(h.kills).toEqual([]);
   });
 
   it('cannot be used to reach files outside the repository', async () => {

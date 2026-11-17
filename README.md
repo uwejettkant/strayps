@@ -29,13 +29,13 @@ npx agent-leash
 
 Rules inside `AGENTS.md` or `CLAUDE.md` are polite suggestions. They **cannot** stop an autonomous coding agent once it hallucinates inside a debugging loop or when a local MCP server silently deadlocks in the background.
 
-`agent-leash` is a small runtime circuit breaker that sits next to Claude Code, Cursor, Codex, or Antigravity and watches your file system and OS processes:
+`agent-leash` is a small runtime circuit breaker that sits next to any coding agent (Claude Code, Codex, Cursor, Antigravity, …) and watches your file system and OS processes:
 
 | Failure Mode in Autonomous Runs | Without `agent-leash` | With `agent-leash` |
 | :--- | :--- | :--- |
 | **Edit Thrashing** *(agent rewrites the same file 6× in 30s trying to fix a test)* | Burns tokens and leaves broken code across the working tree | **Circuit Breaker trips** on edit #6 and reverts the file; the version it replaces is kept |
 | **Secret / Infra Tampering** *(agent edits `.env.local` or `docker-compose.yml`)* | Secrets or container configs get modified silently | **Instant Alert & Infra Restore** (`.env*` warns immediately without reading/writing secrets; `docker-compose.yml` auto-reverts) |
-| **Forgotten Multi-Day Agent & MCP Sessions** *(old sessions from other repos stay alive for days)* | Hundreds of MB of RAM silently locked by stale `claude-code` & MCP trees | **Cross-Repo CWD & Uptime Analysis** flags `STALE` processes (`SAFE TO KILL`) and shows reclaimable RAM in MB |
+| **Forgotten Multi-Day Agent & MCP Sessions** *(old sessions from other repos stay alive for days)* | Hundreds of MB of RAM silently locked by stale agent & MCP trees | **Cross-Repo Process List** shows every agent and MCP process with directory, uptime and RAM, marks old ones `STALE`; you end them one PID at a time |
 | **Runaway Multi-File Refactor** *(agent modifies 40+ unintended files)* | Painful manual `git checkout` / untracked file cleanup | **Red Panic Button** restores tracked & untracked files to initial state |
 
 ---
@@ -73,12 +73,11 @@ Started in a terminal, `agent-leash` shows a full-screen live view of the same s
 | `mode <strict\|balanced\|yolo>` | Switch the guard mode (saved to `.agentguard.json` if the repository has one) |
 | `revert <file>` | Roll one modified file back to the session checkpoint (Tab completes file names) |
 | `kill <pid>` | Terminate one process from the list: SIGTERM first, SIGKILL if it does not exit |
-| `clean` | Terminate everything classified as stale or frozen |
-| `panic` | Kill the agent and MCP processes of this repository and roll back all files |
+| `panic` | Stop the coding agents of this repository and the processes they started, and roll back all files |
 | `status` | List all monitored processes |
 | `help` | Show the commands |
 
-`revert`, `kill`, `clean` and `panic` ask `[y/N]` before they act.
+`revert`, `kill` and `panic` ask `[y/N]` before they act; `panic` names the processes it will stop.
 
 Without a terminal (a pipe, a log file, a background job, or `--no-tui`) the same information is printed as one line per event, and the same commands are read from stdin, one per line. The end of the input does not stop the watchdog; `kill -TERM` does.
 
@@ -88,6 +87,20 @@ npx agent-leash watch ./my-repo --no-tui --quiet   # log lines, alerts only
 npx agent-leash watch ./my-repo --no-auto-rollback # observe and alert, never rewrite a file
 npx agent-leash status                             # one-time process table
 ```
+
+---
+
+## Which Agents It Recognizes
+
+agent-leash keeps no list of AI products, and it does not care which model an agent talks to. The file guard needs no list at all: it sees every change, whoever makes it. For the process list, a coding agent is recognized in one of three ways:
+
+1. **By the MCP servers it starts.** An agent that uses MCP is the parent of its MCP servers, whatever the agent is called. Editors, desktop apps and terminals that start MCP servers are never taken for agents.
+2. **By name**, for the agents that come built in: `claude`, `codex` and `aider`, matched by their exact program name, never as part of another name.
+3. **By your list**, for any other agent: `npx agent-leash config set agents vibe,opencode`.
+
+`panic` stops the agents of the watched repository and the processes they started. Your dev server, your editor and the sessions in other repositories keep running.
+
+The process list marks old sessions in other repositories as `STALE` and processes whose parent is gone as `FROZEN`. Those are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. You end a process with `kill <pid>` after a confirmation, or from its row in the dashboard.
 
 ---
 
@@ -125,14 +138,14 @@ flowchart LR
   DASH -->|"POST /api/panic"| GIT
   DASH -->|"POST /api/kill/:pid"| PROC
   TUI -->|"revert / panic"| GIT
-  TUI -->|"kill / clean"| PROC
+  TUI -->|"kill / panic"| PROC
 ```
 
 ### Key Engineering Details
 
 1. **Dual-Layer Session Checkpoint (`git stash create` + Memory Snapshot, Zero-Secret-Access for `.env*`)**: On startup, `agent-leash` creates an invisible Git commit object without touching your working tree or stash reflog, paired with an in-memory snapshot for code files. `.env*` files are strictly metadata-monitored (warn-only): their contents are **never** read into memory or overwritten on disk.
 2. **Rollbacks That Lose Nothing**: Before a rollback overwrites or removes a file, the version being replaced is copied to a private temp directory (the path is in the log and in the exit summary). A rollback only touches files inside the watched repository, and only deletes files that were created during the session. `agent-leash` recognizes the file system echo of its own rollback by content, so the rollback never triggers a second alert.
-3. **Smart Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen—even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB), and uptime (`etime`) to distinguish **healthy standby MCP children** (`STANDBY`) from **forgotten multi-day sessions in other repos** (`STALE · SAFE TO KILL`) and **hung/orphaned processes** (`FROZEN`).
+3. **Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen, even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB) and uptime (`etime`) to tell **standby MCP children** (`STANDBY`) from **old sessions in other repos** (`STALE`) and **orphaned or silent processes** (`FROZEN`). The tree also tells which agent started which process, so `panic` reaches exactly the agents of the watched repository and what they started.
 
 ---
 
@@ -179,6 +192,7 @@ npx agent-leash init                         # or write a file with every defaul
 | `limits.mcpSilenceTimeoutSec` | `45` | Seconds without CPU or file activity before a process counts as frozen |
 | `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale |
 | `protectedFiles` | `.env*`, `docker-compose*.yml`, `.git/**` | Globs relative to the repository root. Your list replaces the default one, so keep `.env*` in it if you want those warnings |
+| `agents` | none | More program names to treat as coding agents, e.g. `vibe`. Not needed for agents that start MCP servers, nor for Claude Code, Codex and Aider ([how agents are recognized](#which-agents-it-recognizes)) |
 
 **Changes apply while agent-leash runs.** A saved change is picked up within about a second, whether it comes from `config set` or from your editor, and the activity log says what changed, for example `.agentguard.json reloaded: limits.maxFilesWarn 15 → 25`. Reloads are logged as warnings, so they also show with `--quiet`: the agent you are watching can write this file as easily as you can. An edit that is not valid (broken JSON, a limit below 1) is not applied at all; the previous settings stay and the log says why. At startup, an invalid value falls back to its default with a warning. Edits to `.agentguard.json` itself are never counted as agent edits and never reverted.
 
@@ -193,6 +207,7 @@ npx agent-leash init                         # or write a file with every defaul
 {
   "mode": "balanced",
   "protectedFiles": [".env*", "docker-compose*.yml", ".git/**"],
+  "agents": [],
   "limits": {
     "maxFilesWarn": 15,
     "maxFilesHardStop": 40,
@@ -243,7 +258,7 @@ console.log(dashboard.url);
 
 - The dashboard server binds to `127.0.0.1` and answers only when addressed as this machine.
 - Every state-changing request needs a token that is only handed to the dashboard page, and must come from that page's own origin. A web page in another tab cannot trigger anything.
-- Only processes from the monitored list can be terminated, and only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
+- Only processes from the monitored list can be terminated, one PID at a time; `panic` reaches only the agents of the watched repository and the processes they started. Only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
 - File names and command lines are treated as untrusted text in the dashboard and in the terminal.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
 - Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The watched agent can also edit `.agentguard.json`; a running agent-leash applies the edit and logs it as a warning. The dashboard page loads Tailwind from its CDN; with `--no-dashboard` no network request is made at all.
@@ -290,7 +305,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 169 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 179 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

@@ -287,26 +287,18 @@ export class WatchdogSession extends EventEmitter {
       : { ok: false, pid, error: 'Signal could not be delivered (already gone or not permitted)' };
   }
 
-  /** Terminates everything currently classified as stale or frozen. */
-  public killStale(): number[] {
-    const killed = this.processMonitor.killAllMonitored(true);
-    this.scheduleUpdate();
-    return killed;
-  }
-
-  public getStaleProcesses(): MonitoredProcess[] {
-    return this.processMonitor
-      .getProcesses()
-      .filter((p) => p.status === 'FROZEN' || p.status === 'STALE' || p.safety === 'safe-to-kill');
+  /** The processes `panic` would stop right now, to show before it is confirmed. */
+  public getPanicTargets(): MonitoredProcess[] {
+    return this.processMonitor.getPanicTargets();
   }
 
   /**
-   * Emergency brake: stops the agent and tool processes of the watched repository right away
-   * (SIGKILL, no grace period) and restores every changed file to the session checkpoint.
-   * Sessions in other repositories are not touched.
+   * Emergency brake: stops the coding agents of the watched repository and the processes they
+   * started right away (SIGKILL, no grace period) and restores every changed file to the session
+   * checkpoint. Dev servers, editors and sessions in other repositories are not touched.
    */
   public panic(): PanicResult {
-    const killedPids = this.processMonitor.killInWatchedRepo('SIGKILL');
+    const killedPids = this.processMonitor.killPanicTargets('SIGKILL');
     const rollback = this.watcher.panicRollbackAll();
     this.scheduleUpdate();
     return {
@@ -351,6 +343,7 @@ export class WatchdogSession extends EventEmitter {
   private applyLimits(config: GuardConfig): void {
     this.processMonitor.setSilenceTimeoutSec(config.limits.mcpSilenceTimeoutSec);
     this.processMonitor.setStaleSessionHours(config.limits.staleSessionHours);
+    this.processMonitor.setAgentNames(config.agents);
     this.watcher.loopDetector.setMaxEditsPerFilePerMinute(config.limits.maxEditsPerFilePerMinute);
   }
 

@@ -87,7 +87,7 @@ describe('WatchdogSession', () => {
     });
   });
 
-  it('cleans up what is stale or frozen and nothing else', async () => {
+  it('reports stale and frozen processes, but never terminates one because of its status', async () => {
     const h = createHarness({
       procs: [
         { pid: 100, name: 'claude', cmd: 'claude', cwd: '<repo>', cpu: 2, etime: '08:00:00' },
@@ -98,11 +98,13 @@ describe('WatchdogSession', () => {
     h.procs[0].cwd = h.dir;
     await h.monitor.scan();
 
-    expect(h.session.getStaleProcesses().map((p) => p.pid).sort()).toEqual([300, 301]);
-    expect(h.session.killStale().sort()).toEqual([300, 301]);
-    expect(h.kills.map((k) => k.pid).sort()).toEqual([300, 301]);
-    expect(h.kills.every((k) => k.signal === 'SIGTERM')).toBe(true);
-    expect(h.session.getSnapshot().processes.map((p) => p.pid)).toEqual([100]);
+    const byPid = new Map(h.session.getSnapshot().processes.map((p) => [p.pid, p]));
+    expect(byPid.get(300)?.status).toBe('STALE');
+    expect(byPid.get(301)?.status).toBe('FROZEN');
+    // no bulk cleanup: a stale verdict has been wrong about sessions still in use
+    expect('killStale' in h.session).toBe(false);
+    expect(h.session.getPanicTargets().map((p) => p.pid)).toEqual([100]);
+    expect(h.kills).toEqual([]);
   });
 
   it('panic stops the watched repository hard and leaves other sessions alone', async () => {

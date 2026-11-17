@@ -66,8 +66,16 @@ describe('command parsing', () => {
     expect(parseCommand('rollback a b.ts')).toEqual({ kind: 'revert', target: 'a b.ts' });
     expect(parseCommand('kill 4711')).toEqual({ kind: 'kill', pid: 4711 });
     expect(parseCommand('k 12')).toEqual({ kind: 'kill', pid: 12 });
-    expect(parseCommand('clean')).toEqual({ kind: 'clean' });
     expect(parseCommand('panic')).toEqual({ kind: 'panic' });
+  });
+
+  it('has no bulk cleanup, and says how to terminate one process instead', () => {
+    for (const word of ['clean', 'cleanup']) {
+      expect(parseCommand(word), word).toEqual({
+        kind: 'invalid',
+        message: 'There is no bulk cleanup: look at the list (status) and terminate one process with kill <pid>.',
+      });
+    }
   });
 
   it('explains what is wrong instead of guessing', () => {
@@ -100,14 +108,14 @@ describe('running commands against a session', () => {
 
     const revert = runCommand(h.session, parseCommand('revert app.ts'));
     expect(revert.confirm?.prompt).toContain('src/app.ts');
-    const kill = runCommand(h.session, parseCommand('kill 100'));
-    expect(kill.confirm?.prompt).toContain('PID 100');
-    expect(kill.confirm?.prompt).toContain('NOT classified as stale');
-    const clean = runCommand(h.session, parseCommand('clean'));
-    expect(clean.confirm?.prompt).toContain('1 stale/frozen process');
+    const kill = runCommand(h.session, parseCommand('kill 300'));
+    expect(kill.confirm?.prompt).toContain('PID 300');
+    expect(kill.confirm?.prompt).toContain('Its agent session ends.');
+    expect(kill.confirm?.prompt).not.toMatch(/stale|safe/i);
     const panic = runCommand(h.session, parseCommand('panic'));
-    expect(panic.confirm?.prompt).toContain('kill 1 process of this repo');
-    expect(panic.confirm?.prompt).toContain('2 modified files');
+    expect(panic.confirm?.prompt).toBe(
+      "PANIC: roll back 2 modified files and stop 1 process of this repo's agents (claude 100)?",
+    );
 
     // nothing happened yet
     expect(h.kills).toEqual([]);
@@ -116,7 +124,7 @@ describe('running commands against a session', () => {
     expect(revert.confirm!.run()).toMatchObject({ level: 'info', message: 'Rolled back src/app.ts' });
     expect(read(h.dir, 'src/app.ts')).toBe('app\n');
 
-    expect(clean.confirm!.run().message).toBe('Sent SIGTERM to 1 process');
+    expect(kill.confirm!.run().message).toBe('Sent SIGTERM to PID 300');
     expect(h.kills).toEqual([{ pid: 300, signal: 'SIGTERM' }]);
 
     expect(panic.confirm!.run().message).toMatch(/^PANIC done: 1 file restored, 1 process killed$/);
@@ -134,13 +142,12 @@ describe('running commands against a session', () => {
     expect(h.kills).toEqual([]);
   });
 
-  it('switches modes directly, and reports when there is nothing to clean', async () => {
+  it('switches modes directly, and says so when panic has no agent to stop', async () => {
     const h = createHarness();
     expect(runCommand(h.session, parseCommand('mode strict')).message).toBe('Guard mode is now STRICT');
     expect(h.session.getSnapshot().config.mode).toBe('strict');
-    const nothingToClean = runCommand(h.session, parseCommand('clean'));
-    expect(nothingToClean.level).toBe('info');
-    expect(nothingToClean.confirm).toBeUndefined();
+    const panic = runCommand(h.session, parseCommand('panic'));
+    expect(panic.confirm?.prompt).toBe('PANIC: roll back 0 modified files (no agent of this repo is running)?');
     expect(runCommand(h.session, parseCommand('exit'))).toMatchObject({ exit: true });
     expect(runCommand(h.session, parseCommand('help'))).toMatchObject({ showHelp: true });
   });
@@ -233,8 +240,9 @@ describe('full-screen frame', () => {
     expect(screen).toContain('2 monitored');
     expect(screen).toContain('1 stale/frozen');
     expect(screen).toContain('CHANGE: src/app.ts (1/5 edits/min)');
-    expect(screen).toMatch(/300\s+STALE\s+SAFE TO KILL\s+125\.0 MB\s+11d 19h/);
-    expect(screen).toMatch(/100\s+ACTIVE\s+IN REPO/);
+    expect(screen).toMatch(/300\s+STALE\s+ELSEWHERE\s+125\.0 MB\s+11d 19h/);
+    expect(screen).toMatch(/100\s+ACTIVE\s+THIS REPO/);
+    expect(screen).not.toMatch(/safe to kill|reclaimable/i);
     expect(screen).toContain('10:31:02');
     // oldest event first, like a log
     expect(screen.indexOf('checkpoint-created')).toBeLessThan(screen.indexOf('src/api/client.ts'));
@@ -443,24 +451,24 @@ describe('interactive terminal view', () => {
 
   it('asks y/N before destructive commands and treats everything but y as no', async () => {
     const { tty, ui, type, h } = await startUi();
-    type('clean\r');
-    expect(tty.screen).toContain('? Terminate 1 stale/frozen process');
+    type('kill 300\r');
+    expect(tty.screen).toContain('? Terminate PID 300');
     expect(tty.screen).toContain('[y/N]');
     type('n');
     expect(tty.screen).toContain('Cancelled — nothing was changed');
     expect(h.kills).toEqual([]);
 
-    type('clean\r');
+    type('kill 300\r');
     type('\r');
     expect(h.kills).toEqual([]);
-    type('clean\r');
+    type('kill 300\r');
     type('\u001b');
     expect(h.kills).toEqual([]);
 
-    type('clean\r');
+    type('kill 300\r');
     type('y');
     expect(h.kills).toEqual([{ pid: 300, signal: 'SIGTERM' }]);
-    expect(tty.screen).toContain('Sent SIGTERM to 1 process');
+    expect(tty.screen).toContain('Sent SIGTERM to PID 300');
 
     type('revert app\t\r');
     expect(tty.screen).toContain('? Roll src/app.ts back to the session checkpoint?');
@@ -556,7 +564,7 @@ describe('plain output', () => {
     await send('mode strict\n');
     expect(h.session.getSnapshot().config.mode).toBe('strict');
     await send('status\n');
-    expect(lines.join('\n')).toMatch(/300\s+STALE\s+SAFE TO KILL/);
+    expect(lines.join('\n')).toMatch(/300\s+STALE\s+ELSEWHERE/);
     await send('help\n');
     expect(lines.join('\n')).toContain('revert <file>');
     await send('nonsense\n');
@@ -571,7 +579,7 @@ describe('plain output', () => {
     const h = await busyHarness();
     const { lines, send } = startPlain(h);
 
-    await send('clean\n');
+    await send('kill 300\n');
     expect(lines.at(-1)).toContain('Type "yes" to confirm');
     await send('maybe\n');
     expect(lines.at(-1)).toContain('Cancelled');
@@ -581,7 +589,7 @@ describe('plain output', () => {
     await send('yes\n');
     expect(h.kills).toEqual([]);
 
-    await send('clean\nyes\n');
+    await send('kill 300\nyes\n');
     expect(h.kills).toEqual([{ pid: 300, signal: 'SIGTERM' }]);
   });
 
