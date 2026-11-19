@@ -133,6 +133,37 @@ describe('ProcessMonitor classification (production rules)', () => {
     expect(list.map((p) => p.pid).sort()).toEqual([502, 503]);
   });
 
+  it('does not call a quiet process frozen while its parent is alive, however long it is quiet', async () => {
+    // Audit D-02: a resting watch server, a browser and a young session in another repository
+    // were "frozen" after 45 quiet seconds. Quiet is not frozen.
+    const { monitor } = setup([
+      { pid: 50, name: 'zsh', cmd: '-zsh', cwd: REPO, cpu: 0, etime: '02:00:00' },
+      { pid: 51, ppid: 50, name: 'node', cmd: 'node node_modules/.bin/tsx watch src/server.ts', cwd: REPO, cpu: 0, etime: '30:00' },
+      { pid: 60, name: 'zsh', cmd: '-zsh', cwd: OTHER, cpu: 0, etime: '02:00:00' },
+      { pid: 61, ppid: 60, name: 'Chromium', cmd: 'Chromium --headless --remote-debugging-port=9222', cpu: 0, etime: '20:00' },
+      agent(62, OTHER, { ppid: 60, etime: '15:00' }),
+    ]);
+    const t0 = Date.now();
+    for (const t of [t0, t0 + 46_000, t0 + 3_600_000]) {
+      const list = await monitor.scan(t);
+      for (const pid of [51, 61, 62]) {
+        const proc = list.find((p) => p.pid === pid);
+        expect(proc, `PID ${pid} at +${(t - t0) / 1000}s`).toBeDefined();
+        expect(proc?.status, `PID ${pid} at +${(t - t0) / 1000}s`).not.toBe('FROZEN');
+      }
+    }
+    expect(monitor.getFrozenProcesses()).toEqual([]);
+  });
+
+  it('calls a quiet process frozen only when its parent is gone', async () => {
+    const { monitor } = setup([mcp(70, 1, { etime: '01:00:00' })]);
+    const t0 = Date.now();
+    await monitor.scan(t0);
+    const [orphan] = await monitor.scan(t0 + 46_000);
+    expect(orphan.status).toBe('FROZEN');
+    expect(orphan.reason).toContain('its parent is gone');
+  });
+
   it('marks tool processes started by an agent of the watched repo as belonging to it', async () => {
     const { monitor } = setup([
       agent(100, REPO, { cpu: 2 }),

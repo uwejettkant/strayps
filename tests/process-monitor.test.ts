@@ -52,10 +52,11 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     expect(chromiumProc?.status).toBe('IDLE');
   });
 
-  it('marks silent MCP/Playwright processes as FROZEN after mcpSilenceTimeoutSec and supports 1-click kill', async () => {
+  it('marks an orphaned MCP process as FROZEN after mcpSilenceTimeoutSec and can terminate it', async () => {
     let mockProcesses: RawProcessInfo[] = [
       {
         pid: 5001,
+        ppid: 1,
         name: 'node',
         cmd: 'npx @playwright/mcp@latest',
         cpu: 0,
@@ -110,10 +111,11 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     expect(monitor.getProcesses()).toHaveLength(0);
   });
 
-  it('recovers a FROZEN process when a file event or CPU heartbeat occurs', async () => {
+  it('recovers an orphaned FROZEN process when a file event or CPU heartbeat occurs', async () => {
     const mockProcesses: RawProcessInfo[] = [
       {
         pid: 6001,
+        ppid: 1,
         name: 'playwright',
         cmd: 'playwright test --headed',
         cpu: 0,

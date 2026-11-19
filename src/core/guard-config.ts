@@ -8,7 +8,7 @@ export interface GuardLimits {
   maxFilesHardStop: number;
   /** Edits to one file within 60 seconds before the circuit breaker raises an alarm. */
   maxEditsPerFilePerMinute: number;
-  /** Seconds without CPU or file activity before a process counts as frozen. */
+  /** Seconds without CPU activity before an orphaned process (parent gone) counts as frozen. */
   mcpSilenceTimeoutSec: number;
   /** Hours after which a session in another repository counts as stale. */
   staleSessionHours: number;
@@ -77,7 +77,7 @@ export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
   'limits.maxFilesWarn': 'files modified in this session before a warning',
   'limits.maxFilesHardStop': 'files modified in this session before the hard-stop alarm',
   'limits.maxEditsPerFilePerMinute': 'edits to one file within 60 s before the circuit breaker raises an alarm',
-  'limits.mcpSilenceTimeoutSec': 'seconds without CPU or file activity before a process counts as frozen',
+  'limits.mcpSilenceTimeoutSec': 'seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen',
   'limits.staleSessionHours': 'hours after which a session in another repository counts as stale',
   protectedFiles: 'globs; a change to a match raises an alarm (revert restores it); .env* contents are never read',
   agents:

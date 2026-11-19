@@ -756,8 +756,10 @@ export class ProcessMonitor extends EventEmitter {
         status = hasCpuActivity ? 'ACTIVE' : 'IDLE';
         reason = `Agent session in current repository (open for ${formattedUptime})`;
       } else if (this.agentActive && silenceSec >= this.mcpSilenceTimeoutSec && !isDevServer) {
-        status = 'FROZEN';
-        reason = `No CPU or file activity for ${silenceSec}s`;
+        // Quiet is not frozen: a resting watch server, a browser or a session in another repo
+        // waiting for its user were all called FROZEN after 45 s (audit D-02). Only a process
+        // whose parent is gone (rule above) is called frozen.
+        reason = `Quiet: no CPU or file activity for ${silenceSec}s`;
       } else if (category === 'mcp' && !hasCpuActivity) {
         reason = 'Idle MCP process waiting for requests';
       }
