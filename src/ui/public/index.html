@@ -133,32 +133,8 @@
           </p>
         </div>
 
-        <!-- Mode Switcher & Panic CTA -->
+        <!-- Panic CTA -->
         <div class="flex flex-wrap items-center gap-4">
-          <div class="bg-[#0B0F0D] border border-[#1F2C25] rounded-lg p-1 flex items-center gap-1" role="group" aria-label="Guard protection mode">
-            <button
-              type="button"
-              data-mode="strict"
-              class="mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors text-[#8FA197] hover:text-[#F2F7F4]"
-            >
-              strict
-            </button>
-            <button
-              type="button"
-              data-mode="balanced"
-              class="mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors bg-[#5BE49B] text-[#06140C] font-semibold"
-            >
-              balanced
-            </button>
-            <button
-              type="button"
-              data-mode="yolo"
-              class="mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors text-[#8FA197] hover:text-[#F2F7F4]"
-            >
-              yolo
-            </button>
-          </div>
-
           <button
             type="button"
             id="panic-open-btn"
@@ -174,9 +150,9 @@
     <!-- Key Metrics Bar -->
     <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" aria-label="Watchdog metrics">
       <div class="console-card p-4">
-        <div class="text-xs text-[#8FA197] uppercase">active mode</div>
-        <div id="metric-mode" class="text-xl font-semibold text-[#5BE49B] mt-1">balanced</div>
-        <div id="metric-mode-desc" class="text-xs text-[#8FA197] mt-1">Warns on mass edits · blocks loops &amp; .env</div>
+        <div class="text-xs text-[#8FA197] uppercase">guardrails</div>
+        <div id="metric-guard" class="text-xl font-semibold text-[#5BE49B] mt-1">3 protected patterns</div>
+        <div id="metric-guard-desc" class="text-xs text-[#8FA197] mt-1">from .agentguard.json · change with agent-leash config</div>
       </div>
 
       <div class="console-card p-4">
@@ -291,12 +267,6 @@
   </dialog>
 
   <script nonce="__LEASH_NONCE__">
-    const modeDescriptions = {
-      strict: 'Hard-stop alarm on unusual file volume · alarms on loops & protected files',
-      balanced: 'Warns on mass edits · alarms on loops & protected files',
-      yolo: 'File count limits disabled · keeps .env guard & loop alarm',
-    };
-
     const leashToken = document.querySelector('meta[name="leash-token"]')?.content || '';
 
     // Everything shown here comes from file names, command lines and working directories,
@@ -383,14 +353,6 @@
       return data;
     }
 
-    async function setMode(mode) {
-      const data = await post('/api/mode', { mode });
-      if (data) {
-        renderStatus(data.status);
-        setToast('mode switched to ' + mode);
-      }
-    }
-
     async function killProcess(pid) {
       const data = await post('/api/kill/' + pid);
       if (data) {
@@ -446,13 +408,6 @@
       });
     }
 
-    document.querySelectorAll('.mode-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const mode = btn.getAttribute('data-mode');
-        if (mode) setMode(mode);
-      });
-    });
-
     let lastStatus = null;
     // An observation (old, orphaned, silent), never a verdict that a process may be killed
     const isStaleOrFrozen = (p) => p.status === 'FROZEN' || p.status === 'STALE';
@@ -495,19 +450,10 @@
       lastStatus = state;
       const cfg = state.config;
       document.getElementById('repo-path').textContent = state.rootDir || '.';
-      document.getElementById('metric-mode').textContent = cfg.mode;
-      document.getElementById('metric-mode-desc').textContent = modeDescriptions[cfg.mode] || '';
+      const patterns = (cfg.protectedFiles || []).length;
+      document.getElementById('metric-guard').textContent =
+        patterns + ' protected pattern' + (patterns === 1 ? '' : 's');
       document.getElementById('protected-globs').textContent = (cfg.protectedFiles || []).join(', ');
-
-      // Highlight active mode button
-      document.querySelectorAll('.mode-btn').forEach((btn) => {
-        const m = btn.getAttribute('data-mode');
-        if (m === cfg.mode) {
-          btn.className = 'mode-btn px-3 py-1.5 rounded text-xs transition-colors bg-[#5BE49B] text-[#06140C] font-semibold';
-        } else {
-          btn.className = 'mode-btn px-3 py-1.5 rounded text-xs font-medium transition-colors text-[#8FA197] hover:text-[#F2F7F4]';
-        }
-      });
 
       const modCount = (state.modifiedFiles || []).length;
       const filesEl = document.getElementById('metric-files');
@@ -516,9 +462,7 @@
         'text-xl font-semibold ' +
         (state.limitState === 'hard-stop' ? 'text-red-400' : state.limitState === 'warn' ? 'text-amber-400' : 'text-[#F2F7F4]');
       document.getElementById('metric-files-limit').textContent =
-        cfg.mode === 'yolo'
-          ? '/ unlimited (yolo)'
-          : state.limitState === 'hard-stop'
+        state.limitState === 'hard-stop'
           ? '/ HARD STOP limit reached'
           : '/ ' + cfg.limits.maxFilesWarn + ' warn · ' + cfg.limits.maxFilesHardStop + ' stop';
 

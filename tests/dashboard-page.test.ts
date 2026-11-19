@@ -94,7 +94,6 @@ function loadDashboard() {
   const api = context as unknown as {
     renderStatus: (state: unknown) => void;
     esc: (value: unknown) => string;
-    setMode: (mode: string) => Promise<void>;
     killProcess: (pid: number) => Promise<void>;
   };
   return { api, elements, getElementById, requests, documentListeners };
@@ -106,7 +105,6 @@ function stateWith(overrides: Record<string, unknown> = {}) {
   return {
     rootDir: '/work/repo',
     config: {
-      mode: 'balanced',
       protectedFiles: ['.env*'],
       limits: { maxFilesWarn: 15, maxFilesHardStop: 40, maxEditsPerFilePerMinute: 5, mcpSilenceTimeoutSec: 45 },
     },
@@ -286,15 +284,13 @@ describe('dashboard page', () => {
 
   it('sends the token with every state-changing request', async () => {
     const { api, requests } = loadDashboard();
-    await api.setMode('strict');
     await api.killProcess(4711);
 
     const posts = requests.filter((r) => r.init?.method === 'POST');
-    expect(posts.map((r) => r.url)).toEqual(['/api/mode', '/api/kill/4711']);
+    expect(posts.map((r) => r.url)).toEqual(['/api/kill/4711']);
     for (const post of posts) {
       expect(post.init?.headers?.['X-Leash-Token']).toBe('token-from-meta');
     }
-    expect(posts[0].init?.body).toBe('{"mode":"strict"}');
   });
 
   it('shows the hard stop instead of the usual limits', () => {

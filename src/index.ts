@@ -17,14 +17,10 @@ export {
   type GuardConfigManagerOptions,
   type GuardConfigOverrides,
   type GuardLimits,
-  type GuardMode,
   globToRegExp,
   matchesGlobPattern,
-  normalizeMode,
   type ParsedConfigValue,
   parseConfigValue,
-  parseMode,
-  type PersistModeResult,
   resolveConfigKey,
   type WriteConfigValueResult,
   writeConfigValue,
@@ -52,7 +48,6 @@ export {
 } from './core/process-monitor.js';
 export {
   type KillResult,
-  type ModeResult,
   type PanicResult,
   type StatusSnapshot,
   WatchdogSession,

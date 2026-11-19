@@ -45,7 +45,6 @@ describe('dashboard API: who may change things', () => {
   const mutations: Array<[string, string | undefined]> = [
     ['/api/panic', undefined],
     ['/api/kill/100', undefined],
-    ['/api/mode', json({ mode: 'yolo' })],
     ['/api/rollback-file', json({ filePath: 'a.ts' })],
   ];
 
@@ -73,30 +72,32 @@ describe('dashboard API: who may change things', () => {
 
     expect(h.kills).toEqual([]);
     expect(read(h.dir, 'a.ts')).toBe('changed\n');
-    expect(h.session.getSnapshot().config.mode).toBe('balanced');
   });
 
   it('rejects a valid token that arrives from another origin or site', async () => {
-    const h = createHarness();
+    const h = createHarness({ files: { 'a.ts': 'a\n' }, watcher: { keepDiscarded: false } });
+    h.watcher.createCheckpoint();
+    writeFiles(h.dir, { 'a.ts': 'changed\n' });
+    h.watcher.handleFileSystemEvent('change', 'a.ts');
     const { app, token } = appFor(h);
 
-    const foreignOrigin = await app.request('/api/mode', {
+    const foreignOrigin = await app.request('/api/rollback-file', {
       method: 'POST',
-      body: json({ mode: 'yolo' }),
+      body: json({ filePath: 'a.ts' }),
       headers: withToken(token, { Host: 'localhost:4321', Origin: 'http://localhost:9999' }),
     });
     expect(foreignOrigin.status).toBe(403);
 
-    const crossSite = await app.request('/api/mode', {
+    const crossSite = await app.request('/api/rollback-file', {
       method: 'POST',
-      body: json({ mode: 'yolo' }),
+      body: json({ filePath: 'a.ts' }),
       headers: withToken(token, { Host: 'localhost:4321', 'Sec-Fetch-Site': 'same-site' }),
     });
     expect(crossSite.status).toBe(403);
 
-    const sameOrigin = await app.request('/api/mode', {
+    const sameOrigin = await app.request('/api/rollback-file', {
       method: 'POST',
-      body: json({ mode: 'yolo' }),
+      body: json({ filePath: 'a.ts' }),
       headers: withToken(token, {
         Host: 'localhost:4321',
         Origin: 'http://localhost:4321',
@@ -104,7 +105,7 @@ describe('dashboard API: who may change things', () => {
       }),
     });
     expect(sameOrigin.status).toBe(200);
-    expect(h.session.getSnapshot().config.mode).toBe('yolo');
+    expect(read(h.dir, 'a.ts')).toBe('a\n');
   });
 
   it('answers only when addressed as this machine (DNS rebinding)', async () => {
@@ -189,7 +190,7 @@ describe('dashboard API: what the actions do', () => {
     expect(exists(outside, 'victim.txt')).toBe(true);
   });
 
-  it('validates the mode and reports the full result of a panic', async () => {
+  it('validates input and reports the full result of a panic', async () => {
     const h = createHarness({
       files: { 'a.ts': 'a\n' },
       watcher: { keepDiscarded: false },
@@ -202,12 +203,15 @@ describe('dashboard API: what the actions do', () => {
     h.watcher.handleFileSystemEvent('change', 'a.ts');
     const { app, token } = appFor(h);
 
-    for (const mode of ['garbage', '', 5]) {
-      const res = await app.request('/api/mode', { method: 'POST', headers: withToken(token), body: json({ mode }) });
+    for (const filePath of ['', 5, null]) {
+      const res = await app.request('/api/rollback-file', { method: 'POST', headers: withToken(token), body: json({ filePath }) });
       expect(res.status).toBe(400);
     }
-    const malformed = await app.request('/api/mode', { method: 'POST', headers: withToken(token), body: '{not json' });
+    const malformed = await app.request('/api/rollback-file', { method: 'POST', headers: withToken(token), body: '{not json' });
     expect(malformed.status).toBe(400);
+    // there are no modes any more
+    const mode = await app.request('/api/mode', { method: 'POST', headers: withToken(token), body: json({ mode: 'yolo' }) });
+    expect(mode.status).toBe(404);
 
     const panic = await app.request('/api/panic', { method: 'POST', headers: withToken(token) });
     expect(panic.status).toBe(200);
@@ -312,10 +316,10 @@ describe('listening', () => {
     expect(status.status).toBe(200);
     const denied = await fetch(`http://127.0.0.1:${server.port}/api/panic`, { method: 'POST' });
     expect(denied.status).toBe(403);
-    const allowed = await fetch(`http://127.0.0.1:${server.port}/api/mode`, {
+    const allowed = await fetch(`http://127.0.0.1:${server.port}/api/rollback-file`, {
       method: 'POST',
       headers: withToken(server.token),
-      body: json({ mode: 'strict' }),
+      body: json({ filePath: 'not-modified.ts' }),
     });
     expect(allowed.status).toBe(200);
   });

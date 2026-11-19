@@ -81,13 +81,12 @@ describe('agent-leash CLI', () => {
     expect(run.output().trim()).toBe(packageVersion);
   });
 
-  it('stops with a one-line error for a missing directory, a file, a bad mode and a bad port', async () => {
+  it('stops with a one-line error for a missing directory, a file and a bad port', async () => {
     const dir = makeTmpDir();
     writeFiles(dir, { 'a.ts': 'a\n' });
     const cases: Array<[string[], string]> = [
       [['watch', path.join(dir, 'missing')], 'Directory not found'],
       [['watch', path.join(dir, 'a.ts')], 'Not a directory'],
-      [['watch', dir, '--mode', 'stricct'], 'Invalid --mode "stricct"'],
       [['watch', dir, '--port', 'banana'], 'Invalid --port "banana"'],
       [['watch', dir, '--port', '70000'], 'Invalid --port "70000"'],
       [['status', path.join(dir, 'missing')], 'Directory not found'],
@@ -141,8 +140,6 @@ describe('agent-leash CLI', () => {
     await run.waitFor('Type "yes" to confirm');
     run.child.stdin.write('yes\n');
     await run.waitFor('Sent SIGTERM to PID 31877');
-    run.child.stdin.write('mode strict\n');
-    await run.waitFor('Guard mode is now STRICT');
     run.child.stdin.write('quit\n');
     expect((await run.exit).code).toBe(0);
   });
@@ -220,22 +217,19 @@ describe('agent-leash CLI', () => {
 
   it('creates a config file once and never overwrites it unasked', async () => {
     const dir = makeTmpDir();
-    const first = runCli(['init', dir, '--mode', 'strict']);
+    const first = runCli(['init', dir]);
     expect((await first.exit).code).toBe(0);
-    expect(JSON.parse(read(dir, '.agentguard.json')).mode).toBe('strict');
+    expect(JSON.parse(read(dir, '.agentguard.json'))).not.toHaveProperty('mode');
 
-    writeFiles(dir, { '.agentguard.json': '{"mode":"strict","protectedFiles":["secrets/**"]}\n' });
+    writeFiles(dir, { '.agentguard.json': '{"protectedFiles":["secrets/**"]}\n' });
     const second = runCli(['init', dir]);
     expect((await second.exit).code).toBe(1);
     expect(second.output()).toContain('already exists');
     expect(read(dir, '.agentguard.json')).toContain('secrets/**');
 
-    const forced = runCli(['init', dir, '--force', '--mode', 'yolo']);
+    const forced = runCli(['init', dir, '--force']);
     expect((await forced.exit).code).toBe(0);
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toMatchObject({ mode: 'yolo', protectedFiles: ['.env*', 'docker-compose*.yml', '.git/**'] });
-
-    const badMode = runCli(['init', makeTmpDir(), '--mode', 'nonsense']);
-    expect((await badMode.exit).code).toBe(1);
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toMatchObject({ protectedFiles: ['.env*', 'docker-compose*.yml', '.git/**'] });
   });
 
   it('tells the user about problems in the config file at startup', async () => {
@@ -243,7 +237,7 @@ describe('agent-leash CLI', () => {
     writeFiles(dir, { '.agentguard.json': '{"mode":"turbo","limits":{"maxEditsPerFilePerMinute":-1}}' });
     const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
     await run.waitFor(READY);
-    await run.waitFor('mode "turbo" is not one of strict | balanced | yolo');
+    await run.waitFor('"mode" no longer exists and is ignored');
     expect(run.output()).toContain('limits.maxEditsPerFilePerMinute must be a number >= 1 (got -1), using 5');
     expect(run.output()).toContain('loop=5/min');
     run.child.kill('SIGINT');
@@ -263,11 +257,11 @@ describe('agent-leash config', () => {
     expect(bare.output()).toMatch(/limits\.staleSessionHours = 6 {2}\(default\)/);
     expect(fs.existsSync(configFile(dir)), 'showing never creates the file').toBe(false);
 
-    writeFiles(dir, { '.agentguard.json': '{"mode":"strict","limits":{"maxFilesWarn":20,"maxFielsWarn":3}}' });
+    writeFiles(dir, { '.agentguard.json': '{"agents":["vibe"],"limits":{"maxFilesWarn":20,"maxFielsWarn":3}}' });
     const withFile = runCli(['config', 'show', dir]);
     expect(await withFile.exit).toEqual({ code: 0, signal: null });
     expect(withFile.output()).toContain('.agentguard.json found');
-    expect(withFile.output()).toMatch(/mode = strict {2}\(file\)/);
+    expect(withFile.output()).toMatch(/agents = vibe {2}\(file\)/);
     expect(withFile.output()).toMatch(/limits\.maxFilesWarn = 20 {2}\(file\)/);
     expect(withFile.output()).toMatch(/limits\.maxFilesHardStop = 40 {2}\(default\)/);
     expect(withFile.output()).toContain('limits.maxFielsWarn is not a known setting and is ignored');
@@ -287,18 +281,18 @@ describe('agent-leash config', () => {
     expect(created).toContain('A running agent-leash picks this up within a second.');
     expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ limits: { maxFilesWarn: 20 } });
 
-    await run('set', 'MODE', 'strict');
+    await run('set', 'AGENTS', 'vibe');
     await run('set', 'protectedFiles', '.env*, secrets/**');
     expect(await run('set', 'limits.maxFilesWarn', '25')).toContain('Updated');
     expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({
-      mode: 'strict',
+      agents: ['vibe'],
       protectedFiles: ['.env*', 'secrets/**'],
       limits: { maxFilesWarn: 25 },
     });
 
     expect(await run('unset', 'maxFilesWarn')).toContain('Removed limits.maxFilesWarn');
     // an empty "limits" object is removed with its last key
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ mode: 'strict', protectedFiles: ['.env*', 'secrets/**'] });
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ agents: ['vibe'], protectedFiles: ['.env*', 'secrets/**'] });
     expect(await run('unset', 'maxFilesWarn')).toContain(
       'limits.maxFilesWarn is not set in .agentguard.json; the default (15) already applies.',
     );
@@ -307,13 +301,13 @@ describe('agent-leash config', () => {
   it('refuses unknown settings, invalid values and a broken file with a one-line error, changing nothing', async () => {
     const dir = makeTmpDir();
     const broken = path.join(dir, 'broken');
-    writeFiles(dir, { 'broken/.agentguard.json': '{ "mode": ' });
+    writeFiles(dir, { 'broken/.agentguard.json': '{ "agents": ' });
     const cases: Array<[string[], string]> = [
-      [['config', 'set', 'maxFielsWarn', '3', '-C', dir], 'Unknown setting "maxFielsWarn". Known settings: mode, limits.maxFilesWarn'],
+      [['config', 'set', 'maxFielsWarn', '3', '-C', dir], 'Unknown setting "maxFielsWarn". Known settings: limits.maxFilesWarn'],
       [['config', 'set', 'maxFilesWarn', '0', '-C', dir], 'limits.maxFilesWarn must be a whole number >= 1 (got "0")'],
-      [['config', 'set', 'mode', 'turbo', '-C', dir], '"turbo" is not a mode; expected strict, balanced or yolo'],
-      [['config', 'set', 'mode', 'strict', '-C', broken], 'is not valid JSON'],
-      [['config', 'unset', 'mode', '-C', broken], 'Fix it first; nothing was changed.'],
+      [['config', 'set', 'mode', 'strict', '-C', dir], 'Unknown setting "mode"'],
+      [['config', 'set', 'agents', 'vibe', '-C', broken], 'is not valid JSON'],
+      [['config', 'unset', 'agents', '-C', broken], 'Fix it first; nothing was changed.'],
       [['config', 'unset', 'nope', '-C', dir], 'Unknown setting "nope"'],
       [['config', 'show', path.join(dir, 'missing')], 'Directory not found'],
     ];
@@ -329,7 +323,7 @@ describe('agent-leash config', () => {
       expect(output.trim().split('\n')).toHaveLength(1);
     });
     expect(fs.existsSync(configFile(dir)), 'no file for a refused value').toBe(false);
-    expect(read(broken, '.agentguard.json')).toBe('{ "mode": ');
+    expect(read(broken, '.agentguard.json')).toBe('{ "agents": ');
   });
 
   it('never prints control characters from .agentguard.json to the terminal', async () => {
@@ -341,10 +335,10 @@ describe('agent-leash config', () => {
     });
     const broken = makeTmpDir();
     // V8 quotes the start of the text in this parse error, control characters included
-    writeFiles(broken, { '.agentguard.json': `{"mode": a${hostile}}` });
+    writeFiles(broken, { '.agentguard.json': `{"agents": a${hostile}}` });
 
     const set = runCli(['config', 'set', 'maxFilesWarn', '25', '-C', dir]);
-    const refused = runCli(['config', 'set', 'mode', 'yolo', '-C', broken]);
+    const refused = runCli(['config', 'set', 'agents', 'vibe', '-C', broken]);
     const watch = runCli(['watch', broken, '--demo', '--no-dashboard']);
     const watchUnknownKey = runCli(['watch', dir, '--demo', '--no-dashboard']);
     for (const run of [watch, watchUnknownKey]) {
@@ -360,10 +354,10 @@ describe('agent-leash config', () => {
     }
   }, 30_000);
 
-  it('applies edits to .agentguard.json while watching, and a mode switch keeps them', async () => {
+  it('applies edits to .agentguard.json while watching', async () => {
     const dir = makeTmpDir();
     writeFiles(dir, {
-      '.agentguard.json': '{"mode":"balanced","limits":{"maxFilesWarn":15}}\n',
+      '.agentguard.json': '{"limits":{"maxFilesWarn":15}}\n',
       'src/a.ts': 'a\n',
     });
     // a real directory: the process list of this machine is read but never acted on
@@ -373,19 +367,15 @@ describe('agent-leash config', () => {
     // the file watcher takes its first look right after start
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    writeFiles(dir, { '.agentguard.json': '{"mode":"balanced","limits":{"maxFilesWarn":99}}\n' });
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"maxFilesWarn":99}}\n' });
     await run.waitFor(/WARN {2}config-reload +\.agentguard\.json reloaded: limits\.maxFilesWarn 15 → 99/);
 
     // a broken save is not applied and does not stop the watchdog
-    writeFiles(dir, { '.agentguard.json': '{"mode":"balanced","limits":{"maxFilesWarn":' });
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"maxFilesWarn":' });
     await run.waitFor('.agentguard.json changed but was not applied, previous settings kept');
 
-    writeFiles(dir, { '.agentguard.json': '{"mode":"balanced","limits":{"maxFilesWarn":99}}\n' });
-    run.child.stdin.write('mode strict\n');
-    await run.waitFor('Guard mode switched to STRICT (saved to .agentguard.json)');
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ mode: 'strict', limits: { maxFilesWarn: 99 } });
-
-    // the file written by the mode switch is not reported as a change from outside
+    // saving the same values again is no change worth reporting
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"maxFilesWarn":99}}\n' });
     await new Promise((resolve) => setTimeout(resolve, 1200));
     expect(run.output().match(/reloaded:/g)).toHaveLength(1);
 
@@ -395,12 +385,13 @@ describe('agent-leash config', () => {
 
   it('never writes the config file in the demo', async () => {
     const dir = makeTmpDir();
-    const original = '{\n  "mode": "balanced",\n  "limits": { "maxFilesWarn": 15 }\n}\n';
+    const original = '{\n  "limits": { "maxFilesWarn": 15 }\n}\n';
     writeFiles(dir, { '.agentguard.json': original });
     const withFile = runCli(['watch', dir, '--demo', '--no-dashboard']);
     await withFile.waitFor(READY);
-    withFile.child.stdin.write('mode yolo\n');
-    await withFile.waitFor('Guard mode switched to YOLO (demo: not saved)');
+    await withFile.waitFor('loop-detected');
+    withFile.child.stdin.write('revert session.ts\nyes\n');
+    await withFile.waitFor('Demo: would roll back');
     withFile.child.stdin.write('exit\n');
     expect((await withFile.exit).code).toBe(0);
     expect(read(dir, '.agentguard.json')).toBe(original);
@@ -408,8 +399,6 @@ describe('agent-leash config', () => {
     const bare = makeTmpDir();
     const withoutFile = runCli(['watch', bare, '--demo', '--no-dashboard']);
     await withoutFile.waitFor(READY);
-    withoutFile.child.stdin.write('mode strict\n');
-    await withoutFile.waitFor('Guard mode switched to STRICT (demo: not saved)');
     withoutFile.child.stdin.write('exit\n');
     expect((await withoutFile.exit).code).toBe(0);
     expect(fs.existsSync(configFile(bare))).toBe(false);

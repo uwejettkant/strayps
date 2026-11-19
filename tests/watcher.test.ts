@@ -27,7 +27,6 @@ describe('GuardConfigManager & RepoWatcher', () => {
     const cfg = manager.getConfig();
 
     expect(cfg).toEqual(DEFAULT_GUARD_CONFIG);
-    expect(cfg.mode).toBe('balanced');
     expect(cfg.protectedFiles).toEqual(['.env*', 'docker-compose*.yml', '.git/**']);
     expect(cfg.limits.maxFilesWarn).toBe(15);
     expect(cfg.limits.maxFilesHardStop).toBe(40);
@@ -44,25 +43,12 @@ describe('GuardConfigManager & RepoWatcher', () => {
     expect(matchesGlobPattern('src/env.ts', '.env*')).toBe(false);
   });
 
-  it('respects mode behavior (strict, balanced, yolo) for file limits and protected files', () => {
+  it('warns at maxFilesWarn and raises the hard-stop alarm at maxFilesHardStop', () => {
     const manager = new GuardConfigManager(tmpDir);
-
-    // Balanced mode
     expect(manager.evaluateFileLimit(10)).toBe('ok');
     expect(manager.evaluateFileLimit(15)).toBe('warn');
     expect(manager.evaluateFileLimit(40)).toBe('hard-stop');
     expect(manager.isProtectedFile('docker-compose.yml')).toBe(true);
-
-    // Strict mode: warn threshold triggers hard-stop
-    manager.setMode('strict');
-    expect(manager.evaluateFileLimit(15)).toBe('hard-stop');
-
-    // Yolo / refactoring mode: disables file limits and non-.env globs, keeps .env protection
-    manager.setMode('refactoring');
-    expect(manager.getConfig().mode).toBe('yolo');
-    expect(manager.evaluateFileLimit(100)).toBe('ok');
-    expect(manager.isProtectedFile('.env.local')).toBe(true);
-    expect(manager.isProtectedFile('docker-compose.yml')).toBe(false);
   });
 
   it('never reads or overwrites .env* files (warn-only), and raises an alarm for other protected files like docker-compose.yml', () => {
@@ -174,16 +160,6 @@ describe('GuardConfigManager & RepoWatcher', () => {
     const statusJson = (await statusRes.json()) as { modifiedFiles: string[] };
     expect(statusJson.modifiedFiles).toContain('a.ts');
     expect(statusJson.modifiedFiles).toContain('new-agent-file.ts');
-
-    // Switch mode via API
-    const modeRes = await app.request('/api/mode', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-leash-token': token },
-      body: JSON.stringify({ mode: 'strict' }),
-    });
-    expect(modeRes.status).toBe(200);
-    const modeJson = (await modeRes.json()) as { mode: string };
-    expect(modeJson.mode).toBe('strict');
 
     // Execute PANIC ROLLBACK & KILL ALL via API
     const panicRes = await app.request('/api/panic', {

@@ -34,7 +34,6 @@ python3 scripts/scenarios/pty-drive.py --cols 112 --rows 30 -- \
   node dist/cli.js watch --demo --no-dashboard :: \
   wait:8.5 screen:story \
   type:help key:enter screen:help key:esc \
-  type:mo key:tab type:str key:tab key:enter screen:mode \
   type:"revert cli" key:tab key:enter screen:confirm type:y screen:reverted \
   type:"kill 31877" key:enter type:n \
   type:"kill 31877" key:enter type:y screen:killed \
@@ -62,7 +61,7 @@ python3 scripts/scenarios/pty-drive.py --cols 120 --rows 30 --cwd "$SANDBOX" -- 
 
 While it waits, edit files in `$SANDBOX` from a second shell: one normal edit, `.env`, `docker-compose.yml`, six quick edits of one file. Expected: the edit appears; `.env` warns and stays changed; `docker-compose.yml` raises a critical alarm and stays as written; the sixth edit trips the breaker with exactly one alarm, further edits raise none, the file stays as written. Then `revert docker-compose.yml` and `revert <file>` (each confirmed) restore the version before the latest series, and the breaker shows `armed` again. Edit a file, wait over a minute, edit it again, `revert` it: it must come back to the first edit, not to the committed content. The exit summary names the directory with the kept copies; look into it.
 
-Live configuration, same setup. From the second shell: `node dist/cli.js config set maxFilesWarn 30 -C "$SANDBOX"`, then save broken JSON into `$SANDBOX/.agentguard.json`, then a valid file with fewer `protectedFiles`; in the view type `mode strict`. Expected: a warning line `.agentguard.json reloaded: limits.maxFilesWarn … → 30` and the header shows `warn 30`; the broken save is reported once and changes nothing; the shorter list is reported as `no longer protected: …`; after `mode strict` the file has `"mode": "strict"` and still every value written by hand, and no second reload line follows. `node dist/cli.js config "$SANDBOX"` lists each value with `(file)` or `(default)`. With `--demo` instead, `mode yolo` must leave the file byte for byte unchanged.
+Live configuration, same setup. From the second shell: `node dist/cli.js config set maxFilesWarn 30 -C "$SANDBOX"`, then save broken JSON into `$SANDBOX/.agentguard.json`, then a valid file with fewer `protectedFiles`. Expected: a warning line `.agentguard.json reloaded: limits.maxFilesWarn … → 30` and the header shows `warn 30`; the broken save is reported once and changes nothing; the shorter list is reported as `no longer protected: …`. `node dist/cli.js config "$SANDBOX"` lists each value with `(file)` or `(default)`. A file with an old `"mode"` key still loads, with a notice that the key is ignored. With `--demo` instead, the file must stay byte for byte unchanged.
 
 ## 4. Plain output
 
@@ -78,8 +77,8 @@ node dist/cli.js watch --demo --no-dashboard < /dev/null &   # must keep running
 Start `node dist/cli.js watch --demo --port 47381` and open `http://localhost:47381/`.
 
 - No console errors; styles applied; `stream: connected`.
-- Mode buttons switch the mode. `revert` on an event and `Kill PID` on any process open the dialog first, cancel changes nothing, confirm acts. The panic dialog names the processes it stops and the number of files; it cancels and confirms. No button or label offers a bulk cleanup or says "safe to kill".
-- From a shell: `curl -X POST http://127.0.0.1:47381/api/mode -d '{"mode":"yolo"}'` must answer 403 (no token).
+- `revert` on an event and `Kill PID` on any process open the dialog first, cancel changes nothing, confirm acts. The panic dialog names the processes it stops and the number of files; it cancels and confirms. No button or label offers a bulk cleanup or says "safe to kill".
+- From a shell: `curl -X POST http://127.0.0.1:47381/api/rollback-file -d '{"filePath":"a.ts"}'` must answer 403 (no token).
 
 Hostile names, in a sandbox without `--demo` (read the page, click nothing that kills):
 

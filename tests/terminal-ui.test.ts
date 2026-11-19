@@ -58,9 +58,6 @@ describe('command parsing', () => {
     expect(parseCommand('help')).toEqual({ kind: 'help' });
     expect(parseCommand('?')).toEqual({ kind: 'help' });
     expect(parseCommand('status')).toEqual({ kind: 'status' });
-    expect(parseCommand('mode strict')).toEqual({ kind: 'mode', mode: 'strict' });
-    expect(parseCommand('m refactoring')).toEqual({ kind: 'mode', mode: 'yolo' });
-    expect(parseCommand('yolo')).toEqual({ kind: 'mode', mode: 'yolo' });
     expect(parseCommand('revert src/app.ts')).toEqual({ kind: 'revert', target: 'src/app.ts' });
     expect(parseCommand('r "my file.ts"')).toEqual({ kind: 'revert', target: 'my file.ts' });
     expect(parseCommand('rollback a b.ts')).toEqual({ kind: 'revert', target: 'a b.ts' });
@@ -79,8 +76,10 @@ describe('command parsing', () => {
   });
 
   it('explains what is wrong instead of guessing', () => {
-    expect(parseCommand('mode')).toMatchObject({ kind: 'invalid' });
-    expect(parseCommand('mode turbo')).toMatchObject({ kind: 'invalid' });
+    // there are no modes any more; the old words get an explanation
+    for (const old of ['mode strict', 'mode', 'yolo', 'balanced']) {
+      expect(parseCommand(old)).toMatchObject({ kind: 'invalid', message: expect.stringContaining('no modes any more') });
+    }
     expect(parseCommand('revert')).toMatchObject({ kind: 'invalid' });
     expect(parseCommand('kill')).toMatchObject({ kind: 'invalid' });
     expect(parseCommand('kill -9 123')).toMatchObject({ kind: 'invalid' });
@@ -142,20 +141,17 @@ describe('running commands against a session', () => {
     expect(h.kills).toEqual([]);
   });
 
-  it('switches modes directly, and says so when panic has no agent to stop', async () => {
+  it('says so when panic has no agent to stop', async () => {
     const h = createHarness();
-    expect(runCommand(h.session, parseCommand('mode strict')).message).toBe('Guard mode is now STRICT');
-    expect(h.session.getSnapshot().config.mode).toBe('strict');
     const panic = runCommand(h.session, parseCommand('panic'));
     expect(panic.confirm?.prompt).toBe('PANIC: roll back 0 files changed in the last 10 min (no agent of this repo is running)?');
     expect(runCommand(h.session, parseCommand('exit'))).toMatchObject({ exit: true });
     expect(runCommand(h.session, parseCommand('help'))).toMatchObject({ showHelp: true });
   });
 
-  it('completes commands, modes, modified files and PIDs', async () => {
+  it('completes commands, modified files and PIDs', async () => {
     const h = await busyHarness();
     expect(completeInput(h.session, 'pa').input).toBe('panic ');
-    expect(completeInput(h.session, 'mode st').input).toBe('mode strict');
     expect(completeInput(h.session, 'revert src/app').input).toBe('revert src/app.ts');
     expect(completeInput(h.session, 'revert client').input).toBe('revert src/api/client.ts');
     expect(completeInput(h.session, 'kill 30').input).toBe('kill 300');
@@ -225,14 +221,14 @@ describe('full-screen frame', () => {
     };
   }
 
-  it('shows what the dashboard shows: mode, files, breaker, events and processes', async () => {
+  it('shows what the dashboard shows: files, breaker, events and processes', async () => {
     const h = await busyHarness();
     const frame = renderFrame(viewFor(h));
     const screen = frame.lines.join('\n');
 
     expect(frame.lines).toHaveLength(34);
     expect(screen).toContain('agent-leash v9.9.9');
-    expect(screen).toContain('mode BALANCED');
+    expect(screen).not.toMatch(/\bmode\b|balanced/i);
     expect(screen).toContain('dashboard http://localhost:4321');
     expect(screen).toContain('2 modified');
     expect(screen).toContain('warn 15 · stop 40');
@@ -297,9 +293,9 @@ describe('full-screen frame', () => {
     expect(confirm.lines.at(-2)).toContain('? Terminate PID 300? [y/N]');
     expect(confirm.cursor.row).toBe(33);
 
-    const notice = renderFrame(viewFor(h, { notice: { text: 'Guard mode is now STRICT', level: 'info' }, input: 'mode st' }));
-    expect(notice.lines.at(-2)).toContain('Guard mode is now STRICT');
-    expect(notice.lines.at(-1)).toContain('› mode st');
+    const notice = renderFrame(viewFor(h, { notice: { text: 'Sent SIGTERM to PID 300', level: 'info' }, input: 'kill 30' }));
+    expect(notice.lines.at(-2)).toContain('Sent SIGTERM to PID 300');
+    expect(notice.lines.at(-1)).toContain('› kill 30');
     expect(notice.cursor).toEqual({ row: 34, col: 11 });
 
     const help = renderFrame(viewFor(h, { overlay: 'help' })).lines.join('\n');
@@ -423,22 +419,20 @@ describe('interactive terminal view', () => {
 
   it('edits the command line: typing, backspace, clear, history, pasted text', async () => {
     const { tty, ui, type, h } = await startUi();
-    type('mode strixt');
-    expect(tty.screen).toContain('› mode strixt');
-    type('\u007f\u007f');
-    type('ct');
-    expect(tty.screen).toContain('› mode strict');
+    type('kill 30x');
+    expect(tty.screen).toContain('› kill 30x');
+    type('\u007f');
+    type('0');
+    expect(tty.screen).toContain('› kill 300');
     type('\r');
-    expect(h.session.getSnapshot().config.mode).toBe('strict');
-    expect(tty.screen).toContain('Guard mode is now STRICT');
-    expect(tty.screen).toContain('mode STRICT');
+    expect(tty.screen).toContain('? Terminate PID 300');
+    type('n');
+    expect(h.kills).toEqual([]);
 
     type('\u001b[A');
-    expect(tty.screen).toContain('› mode strict');
+    expect(tty.screen).toContain('› kill 300');
     type('\u0015');
-    expect(tty.screen).not.toContain('› mode strict');
-    type('yolo\rbalanced\r');
-    expect(h.session.getSnapshot().config.mode).toBe('balanced');
+    expect(tty.screen).not.toContain('› kill 300');
     type('abc def\u0017');
     expect(tty.screen).toContain('› abc');
     type('\u001b');
@@ -561,8 +555,6 @@ describe('plain output', () => {
     const h = await busyHarness();
     const { lines, onExit, send } = startPlain(h);
 
-    await send('mode strict\n');
-    expect(h.session.getSnapshot().config.mode).toBe('strict');
     await send('status\n');
     expect(lines.join('\n')).toMatch(/300\s+STALE\s+ELSEWHERE/);
     await send('help\n');

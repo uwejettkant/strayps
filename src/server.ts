@@ -178,18 +178,6 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     return c.json(getStatusSnapshot());
   });
 
-  // Switch Guard Mode (strict | balanced | yolo)
-  app.post('/api/mode', async (c) => {
-    const body = await c.req.json<{ mode?: unknown }>().catch(() => ({ mode: undefined }));
-    if (body.mode === undefined || body.mode === null || body.mode === '') {
-      return c.json({ error: 'Missing mode parameter' }, 400);
-    }
-    const result = session.setMode(body.mode);
-    if (!result.ok) {
-      return c.json({ error: result.error }, 400);
-    }
-    return c.json({ ok: true, mode: result.config.mode, status: getStatusSnapshot() });
-  });
 
   // 1-Click Kill for a specific monitored PID
   app.post('/api/kill/:pid', (c) => {

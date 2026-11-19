@@ -100,9 +100,7 @@ function metricCells(view: FrameView): Seg[][] {
     seg(`${fileCount} modified`, filesStyle),
     snapshot.limitState === 'hard-stop'
       ? seg('  HARD STOP limit reached', p.danger)
-      : config.mode === 'yolo'
-        ? seg('  no limit (yolo)', p.dim)
-        : seg(`  warn ${config.limits.maxFilesWarn} · stop ${config.limits.maxFilesHardStop}`, p.dim),
+      : seg(`  warn ${config.limits.maxFilesWarn} · stop ${config.limits.maxFilesHardStop}`, p.dim),
   ];
 
   const tripped = snapshot.trippedFiles;
@@ -285,11 +283,9 @@ export function renderFrame(view: FrameView): Frame {
   const header: Seg[][] = [
     leftRight(title, clock, cols),
     [
-      seg(' mode ', p.dim),
-      seg(snapshot.config.mode.toUpperCase(), p.accent),
       view.dashboardUrl
-        ? seg(`  ·  dashboard ${view.dashboardUrl}`, p.dim)
-        : seg('  ·  dashboard off', p.dim),
+        ? seg(` dashboard ${view.dashboardUrl}`, p.dim)
+        : seg(' dashboard off', p.dim),
     ],
     [seg('─'.repeat(cols), p.dim)],
   ];

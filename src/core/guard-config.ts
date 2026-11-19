@@ -1,10 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type GuardMode = 'strict' | 'balanced' | 'yolo';
-
 export interface GuardLimits {
-  /** Files modified in this session before a warning (strict: hard stop). */
+  /** Files modified in this session before a warning. */
   maxFilesWarn: number;
   /** Files modified in this session before the hard-stop alarm. */
   maxFilesHardStop: number;
@@ -16,17 +14,19 @@ export interface GuardLimits {
   staleSessionHours: number;
 }
 
+/**
+ * What agent-leash watches for. There are no modes: it always watches exactly by these settings,
+ * so no switch can quietly turn off a protection the user configured.
+ */
 export interface GuardConfig {
-  mode: GuardMode;
   protectedFiles: string[];
   /** Program names to treat as coding agents, on top of the built-in names and MCP clients. */
   agents: string[];
   limits: GuardLimits;
 }
 
-/** Values that take precedence over `.agentguard.json`, e.g. from `--mode` or the programmatic API. */
+/** Values that take precedence over `.agentguard.json`, e.g. from the programmatic API. */
 export interface GuardConfigOverrides {
-  mode?: GuardMode;
   protectedFiles?: string[];
   agents?: string[];
   limits?: Partial<GuardLimits>;
@@ -40,7 +40,6 @@ export interface GuardConfigManagerOptions {
 export const CONFIG_FILENAME = '.agentguard.json';
 
 export const DEFAULT_GUARD_CONFIG: GuardConfig = {
-  mode: 'balanced',
   protectedFiles: ['.env*', 'docker-compose*.yml', '.git/**'],
   agents: [],
   limits: {
@@ -60,10 +59,9 @@ const LIMIT_KEYS: ReadonlyArray<keyof GuardLimits> = [
   'staleSessionHours',
 ];
 
-export type ConfigKey = 'mode' | 'protectedFiles' | 'agents' | `limits.${keyof GuardLimits}`;
+export type ConfigKey = 'protectedFiles' | 'agents' | `limits.${keyof GuardLimits}`;
 
 export const CONFIG_KEYS: ConfigKey[] = [
-  'mode',
   ...LIMIT_KEYS.map((key) => `limits.${key}` as ConfigKey),
   'protectedFiles',
   'agents',
@@ -76,8 +74,7 @@ function isProgramName(value: unknown): value is string {
 
 /** What each setting does. Shown by `agent-leash config`; the README table mirrors it. */
 export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
-  mode: 'strict | balanced | yolo: how file limits and protected files apply',
-  'limits.maxFilesWarn': 'files modified in this session before a warning (strict: hard stop)',
+  'limits.maxFilesWarn': 'files modified in this session before a warning',
   'limits.maxFilesHardStop': 'files modified in this session before the hard-stop alarm',
   'limits.maxEditsPerFilePerMinute': 'edits to one file within 60 s before the circuit breaker raises an alarm',
   'limits.mcpSilenceTimeoutSec': 'seconds without CPU or file activity before a process counts as frozen',
@@ -88,7 +85,7 @@ export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
 };
 
 /** Where an effective value comes from. */
-export type ConfigSource = 'default' | 'file' | 'override' | 'session';
+export type ConfigSource = 'default' | 'file' | 'override';
 
 export interface ConfigReloadResult {
   /** True if the file was valid and its values are now in effect. */
@@ -97,34 +94,6 @@ export interface ConfigReloadResult {
   changes: string[];
   /** Problems in the file. When `applied` is false, they are the reason. */
   warnings: string[];
-}
-
-/** What happened to the file when the mode was switched at runtime. */
-export type PersistModeResult = 'written' | 'no-file' | 'read-only' | 'invalid-file' | 'not-requested';
-
-/**
- * Normalizes a mode string, supporting 'refactoring' as an alias for 'yolo'.
- */
-export function normalizeMode(rawMode: unknown): GuardMode {
-  if (typeof rawMode !== 'string') {
-    return DEFAULT_GUARD_CONFIG.mode;
-  }
-  const lower = rawMode.trim().toLowerCase();
-  if (lower === 'strict') return 'strict';
-  if (lower === 'yolo' || lower === 'refactoring') return 'yolo';
-  return 'balanced';
-}
-
-/**
- * Strict variant of `normalizeMode` for user input (CLI flags, API calls):
- * returns null instead of silently falling back to the default.
- */
-export function parseMode(rawMode: unknown): GuardMode | null {
-  if (typeof rawMode !== 'string') return null;
-  const lower = rawMode.trim().toLowerCase();
-  if (lower === 'strict' || lower === 'balanced' || lower === 'yolo') return lower;
-  if (lower === 'refactoring') return 'yolo';
-  return null;
 }
 
 /**
@@ -208,11 +177,10 @@ interface ValueError {
 interface FileRead {
   state: 'missing' | 'ok' | 'invalid';
   invalidReason?: string;
-  mode?: GuardMode;
   protectedFiles?: string[];
   agents?: string[];
   limits: Partial<GuardLimits>;
-  /** Invalid values; they are left out of `mode` / `protectedFiles` / `agents` / `limits`. */
+  /** Invalid values; they are left out of `protectedFiles` / `agents` / `limits`. */
   errors: ValueError[];
   /** Things that are valid but probably not what was meant (unknown keys). */
   notices: string[];
@@ -245,7 +213,12 @@ function readConfigFile(filePath: string): FileRead {
   result.state = 'ok';
 
   for (const key of Object.keys(record)) {
-    if (key !== 'mode' && key !== 'protectedFiles' && key !== 'agents' && key !== 'limits') {
+    if (key === 'mode') {
+      // The modes were removed: an old file still loads, the key just has no effect
+      result.notices.push('"mode" no longer exists and is ignored: agent-leash always watches by the settings in this file');
+      continue;
+    }
+    if (key !== 'protectedFiles' && key !== 'agents' && key !== 'limits') {
       result.notices.push(`"${key}" is not a known setting and is ignored`);
     }
   }
@@ -264,18 +237,6 @@ function readConfigFile(filePath: string): FileRead {
       result.errors.push({
         message: 'agents must be an array of program names',
         startupSuffix: ', using none',
-      });
-    }
-  }
-
-  if (record.mode !== undefined) {
-    const mode = parseMode(record.mode);
-    if (mode) {
-      result.mode = mode;
-    } else {
-      result.errors.push({
-        message: `mode ${JSON.stringify(record.mode)} is not one of strict | balanced | yolo`,
-        startupSuffix: `, using "${DEFAULT_GUARD_CONFIG.mode}"`,
       });
     }
   }
@@ -328,7 +289,6 @@ function readConfigFile(filePath: string): FileRead {
 
 function describeChanges(before: GuardConfig, after: GuardConfig): string[] {
   const changes: string[] = [];
-  if (before.mode !== after.mode) changes.push(`mode ${before.mode} → ${after.mode}`);
   for (const key of LIMIT_KEYS) {
     if (before.limits[key] !== after.limits[key]) {
       changes.push(`limits.${key} ${before.limits[key]} → ${after.limits[key]}`);
@@ -355,8 +315,6 @@ export class GuardConfigManager {
   private warnings: string[] = [];
   private overrides: GuardConfigOverrides;
   private readOnly: boolean;
-  /** The mode as last read from (or written to) the file; undefined when the file sets none. */
-  private fileMode: GuardMode | undefined;
   private sources: Record<ConfigKey, ConfigSource>;
 
   constructor(
@@ -380,7 +338,6 @@ export class GuardConfigManager {
 
   public getConfig(): GuardConfig {
     return {
-      mode: this.config.mode,
       protectedFiles: [...this.config.protectedFiles],
       agents: [...this.config.agents],
       limits: { ...this.config.limits },
@@ -392,7 +349,7 @@ export class GuardConfigManager {
     return [...this.warnings];
   }
 
-  /** Where each effective value comes from (built-in default, the file, an override, or a runtime switch). */
+  /** Where each effective value comes from: built-in default, the file, or an override. */
   public getSources(): Record<ConfigKey, ConfigSource> {
     return { ...this.sources };
   }
@@ -421,21 +378,7 @@ export class GuardConfigManager {
     }
     warnings.push(...file.notices);
 
-    this.fileMode = file.mode;
-    let mode: GuardMode;
-    let modeSource: ConfigSource;
-    if (this.overrides.mode) {
-      mode = normalizeMode(this.overrides.mode);
-      modeSource = 'override';
-    } else if (file.mode) {
-      mode = file.mode;
-      modeSource = 'file';
-    } else {
-      mode = DEFAULT_GUARD_CONFIG.mode;
-      modeSource = 'default';
-    }
-
-    const merged = this.merge(file, mode, modeSource);
+    const merged = this.merge(file);
     this.config = merged.config;
     this.warnings = [...warnings, ...merged.notices];
     return this.getConfig();
@@ -444,9 +387,6 @@ export class GuardConfigManager {
   /**
    * Re-reads the file while the watchdog runs. A file with invalid content is not applied at all:
    * the previous settings stay in effect and the result says why.
-   *
-   * The mode follows the most recent explicit choice: a mode changed in the file wins, otherwise
-   * the current mode (from `--mode` or a runtime switch) stays.
    */
   public reload(): ConfigReloadResult {
     const file = readConfigFile(this.configFilePath);
@@ -458,45 +398,10 @@ export class GuardConfigManager {
     }
 
     const before = this.getConfig();
-    let mode = this.config.mode;
-    let modeSource = this.sources.mode;
-    if (file.mode !== this.fileMode) {
-      if (file.mode) {
-        mode = file.mode;
-        modeSource = 'file';
-      } else if (this.overrides.mode) {
-        mode = normalizeMode(this.overrides.mode);
-        modeSource = 'override';
-      } else {
-        mode = DEFAULT_GUARD_CONFIG.mode;
-        modeSource = 'default';
-      }
-    }
-    this.fileMode = file.mode;
-
-    const merged = this.merge(file, mode, modeSource);
+    const merged = this.merge(file);
     this.config = merged.config;
     this.warnings = [...file.notices, ...merged.notices];
     return { applied: true, changes: describeChanges(before, this.config), warnings: this.getWarnings() };
-  }
-
-  /**
-   * Switches the mode at runtime. With `persist`, only the `mode` key of an existing file is
-   * updated; everything else in the file stays exactly as it is on disk.
-   */
-  public switchMode(
-    mode: GuardMode | string,
-    persist: boolean = true,
-  ): { config: GuardConfig; persisted: PersistModeResult } {
-    this.config.mode = normalizeMode(mode);
-    this.sources.mode = 'session';
-    const persisted = persist ? this.persistMode(this.config.mode) : 'not-requested';
-    return { config: this.getConfig(), persisted };
-  }
-
-  /** Switches the mode; kept for existing callers. Prefer `switchMode`. */
-  public setMode(mode: GuardMode | string, persist: boolean = false): GuardConfig {
-    return this.switchMode(mode, persist).config;
   }
 
   /** Writes the complete effective configuration (used by `agent-leash init`). */
@@ -506,69 +411,35 @@ export class GuardConfigManager {
     }
     if (customConfig) {
       this.config = {
-        mode: normalizeMode(customConfig.mode),
         protectedFiles: [...customConfig.protectedFiles],
         agents: [...(customConfig.agents ?? [])],
         limits: { ...customConfig.limits },
       };
     }
     fs.writeFileSync(this.configFilePath, JSON.stringify(this.config, null, 2) + '\n', 'utf-8');
-    this.fileMode = this.config.mode;
     for (const key of CONFIG_KEYS) this.sources[key] = 'file';
     return this.configFilePath;
   }
 
   public isProtectedFile(filePath: string): boolean {
-    const patterns =
-      this.config.mode === 'yolo'
-        ? this.config.protectedFiles.filter((p) => p.includes('.env') || p.includes('.git'))
-        : this.config.protectedFiles;
-
-    return patterns.some((pattern) => matchesGlobPattern(filePath, pattern, this.rootDir));
+    return this.config.protectedFiles.some((pattern) => matchesGlobPattern(filePath, pattern, this.rootDir));
   }
 
   public evaluateFileLimit(modifiedFileCount: number): 'ok' | 'warn' | 'hard-stop' {
-    if (this.config.mode === 'yolo') {
-      return 'ok';
-    }
-
     if (modifiedFileCount >= this.config.limits.maxFilesHardStop) {
       return 'hard-stop';
     }
 
     if (modifiedFileCount >= this.config.limits.maxFilesWarn) {
-      // In strict mode, unusual volume already triggers a hard stop
-      return this.config.mode === 'strict' ? 'hard-stop' : 'warn';
+      return 'warn';
     }
 
     return 'ok';
   }
 
-  private persistMode(mode: GuardMode): PersistModeResult {
-    if (this.readOnly) return 'read-only';
-    if (!fs.existsSync(this.configFilePath)) return 'no-file';
-    let record: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.configFilePath, 'utf-8')) as unknown;
-      if (!isRecord(parsed)) return 'invalid-file';
-      record = parsed;
-    } catch {
-      // Never overwrite a file the user is in the middle of editing
-      return 'invalid-file';
-    }
-    record.mode = mode;
-    fs.writeFileSync(this.configFilePath, JSON.stringify(record, null, 2) + '\n', 'utf-8');
-    this.fileMode = mode;
-    return 'written';
-  }
-
-  private merge(
-    file: FileRead,
-    mode: GuardMode,
-    modeSource: ConfigSource,
-  ): { config: GuardConfig; notices: string[] } {
+  private merge(file: FileRead): { config: GuardConfig; notices: string[] } {
     const notices: string[] = [];
-    const sources = { ...this.sources, mode: modeSource };
+    const sources = { ...this.sources };
 
     const limits = { ...DEFAULT_GUARD_CONFIG.limits };
     for (const key of LIMIT_KEYS) {
@@ -618,7 +489,7 @@ export class GuardConfigManager {
     }
 
     this.sources = sources;
-    return { config: { mode, protectedFiles, agents, limits }, notices };
+    return { config: { protectedFiles, agents, limits }, notices };
   }
 }
 
@@ -635,18 +506,12 @@ export function resolveConfigKey(input: string): ConfigKey | null {
 }
 
 export type ParsedConfigValue =
-  | { ok: true; value: GuardMode | number | string[] }
+  | { ok: true; value: number | string[] }
   | { ok: false; error: string };
 
 /** Validates a value typed on the command line for one setting. */
 export function parseConfigValue(key: ConfigKey, raw: string): ParsedConfigValue {
   const text = raw.trim();
-  if (key === 'mode') {
-    const mode = parseMode(text);
-    return mode
-      ? { ok: true, value: mode }
-      : { ok: false, error: `"${raw}" is not a mode; expected strict, balanced or yolo` };
-  }
   if (key === 'protectedFiles') {
     const globs = text
       .split(',')
@@ -692,7 +557,7 @@ export interface WriteConfigValueResult {
 export function writeConfigValue(
   rootDir: string,
   key: ConfigKey,
-  value: GuardMode | number | string[] | undefined,
+  value: number | string[] | undefined,
 ): WriteConfigValueResult {
   const filePath = path.join(path.resolve(rootDir), CONFIG_FILENAME);
   const exists = fs.existsSync(filePath);

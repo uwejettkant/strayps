@@ -7,8 +7,6 @@ import {
   GuardConfigManager,
   globToRegExp,
   matchesGlobPattern,
-  normalizeMode,
-  parseMode,
 } from '../src/core/guard-config.js';
 import { cleanupTmpDirs, makeTmpDir, writeFiles } from './helpers/harness.js';
 
@@ -20,24 +18,9 @@ function managerWith(config: unknown): GuardConfigManager {
   return new GuardConfigManager(dir);
 }
 
-describe('guard modes', () => {
-  it('parses user input strictly and config values leniently', () => {
-    expect(parseMode('strict')).toBe('strict');
-    expect(parseMode(' Balanced ')).toBe('balanced');
-    expect(parseMode('YOLO')).toBe('yolo');
-    expect(parseMode('refactoring')).toBe('yolo');
-    for (const bad of ['stricct', '', 'strict mode', 1, null, undefined, {}]) {
-      expect(parseMode(bad), String(bad)).toBeNull();
-    }
-    expect(normalizeMode('stricct')).toBe('balanced');
-    expect(normalizeMode(undefined)).toBe('balanced');
-  });
-});
-
 describe('.agentguard.json', () => {
   it('loads a valid file without warnings', () => {
     const manager = managerWith({
-      mode: 'strict',
       protectedFiles: ['secrets/**', 'prisma/schema.prisma'],
       agents: ['vibe', 'opencode'],
       limits: {
@@ -51,7 +34,6 @@ describe('.agentguard.json', () => {
     expect(manager.getWarnings()).toEqual([]);
     expect(manager.hasConfigFile()).toBe(true);
     expect(manager.getConfig()).toEqual({
-      mode: 'strict',
       protectedFiles: ['secrets/**', 'prisma/schema.prisma'],
       agents: ['vibe', 'opencode'],
       limits: {
@@ -84,12 +66,10 @@ describe('.agentguard.json', () => {
 
   it('refuses limits that would switch the guard off or make it fire on every edit', () => {
     const manager = managerWith({
-      mode: 'turbo',
       limits: { maxEditsPerFilePerMinute: -1, maxFilesWarn: 'many', maxFilesHardStop: 0, mcpSilenceTimeoutSec: null },
     });
     expect(manager.getConfig()).toEqual(DEFAULT_GUARD_CONFIG);
     const warnings = manager.getWarnings().join('\n');
-    expect(warnings).toContain('mode "turbo"');
     expect(warnings).toContain('limits.maxEditsPerFilePerMinute must be a number >= 1 (got -1)');
     expect(warnings).toContain('limits.maxFilesWarn must be a number >= 1 (got "many")');
     expect(warnings).toContain('limits.maxFilesHardStop must be a number >= 1 (got 0)');
@@ -111,22 +91,12 @@ describe('.agentguard.json', () => {
 
   it('rounds fractional limits down and keeps overrides above the file', () => {
     const dir = makeTmpDir();
-    writeFiles(dir, { [CONFIG_FILENAME]: JSON.stringify({ mode: 'strict', limits: { maxFilesWarn: 7.9 } }) });
-    const manager = new GuardConfigManager(dir, { mode: 'yolo' });
-    expect(manager.getConfig().mode).toBe('yolo');
+    writeFiles(dir, { [CONFIG_FILENAME]: JSON.stringify({ limits: { maxFilesWarn: 7.9, maxFilesHardStop: 30 } }) });
+    const manager = new GuardConfigManager(dir, { limits: { maxFilesHardStop: 50 } });
     expect(manager.getConfig().limits.maxFilesWarn).toBe(7);
+    expect(manager.getConfig().limits.maxFilesHardStop).toBe(50);
   });
 
-  it('writes a mode change back only if a config file already exists', () => {
-    const without = new GuardConfigManager(makeTmpDir());
-    without.setMode('strict', true);
-    expect(without.hasConfigFile()).toBe(false);
-
-    const withFile = managerWith({ mode: 'balanced' });
-    withFile.setMode('strict', true);
-    const onDisk = JSON.parse(fs.readFileSync(withFile.configFilePath, 'utf-8')) as { mode: string };
-    expect(onDisk.mode).toBe('strict');
-  });
 });
 
 describe('protected file globs', () => {
@@ -159,10 +129,10 @@ describe('protected file globs', () => {
     expect(manager.isProtectedFile(path.join(dir, 'apps/api/index.ts'))).toBe(false);
   });
 
-  it('keeps secrets protected in yolo mode but drops the other patterns', () => {
-    const manager = managerWith({ mode: 'yolo', protectedFiles: ['.env*', 'docker-compose*.yml', 'infra/**'] });
+  it('always applies every configured pattern: no setting turns protection off', () => {
+    const manager = managerWith({ protectedFiles: ['.env*', 'docker-compose*.yml', 'infra/**'] });
     expect(manager.isProtectedFile('.env.local')).toBe(true);
-    expect(manager.isProtectedFile('docker-compose.yml')).toBe(false);
-    expect(manager.isProtectedFile('infra/main.tf')).toBe(false);
+    expect(manager.isProtectedFile('docker-compose.yml')).toBe(true);
+    expect(manager.isProtectedFile('infra/main.tf')).toBe(true);
   });
 });

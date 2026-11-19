@@ -197,17 +197,13 @@ export function formatStatusReport(
 ): string[] {
   const { config } = snapshot;
   const totals = processTotals(snapshot.processes);
-  const limits =
-    config.mode === 'yolo'
-      ? 'unlimited (yolo)'
-      : `warn ${config.limits.maxFilesWarn} · stop ${config.limits.maxFilesHardStop}`;
+  const limits = `warn ${config.limits.maxFilesWarn} · stop ${config.limits.maxFilesHardStop}`;
   const breaker =
     snapshot.trippedFiles.length > 0
       ? palette.danger(`TRIPPED: ${snapshot.trippedFiles.map(sanitize).join(', ')}`)
       : palette.ok('armed');
   const lines = [
     `  Repo:        ${sanitize(tildify(snapshot.rootDir))}`,
-    `  Mode:        ${config.mode.toUpperCase()}`,
     `  Files:       ${snapshot.modifiedFiles.length} modified (${limits})${snapshot.limitState === 'hard-stop' ? palette.danger('  HARD STOP limit reached') : ''}`,
     `  Breaker:     ${breaker} (max ${config.limits.maxEditsPerFilePerMinute} edits/file/min)`,
     `  Processes:   ${totals.count} monitored (${totals.totalMb.toFixed(1)} MB) · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(1)} MB)`,

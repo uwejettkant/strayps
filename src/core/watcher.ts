@@ -18,7 +18,6 @@ export type WatchEventType =
   | 'panic-rollback'
   | 'checkpoint-created'
   | 'watch-error'
-  | 'mode-change'
   | 'config-reload'
   | 'process-alert'
   | 'process-recovered'
@@ -584,7 +583,7 @@ export class RepoWatcher extends EventEmitter {
           type: 'limit-hard-stop',
           filePath: relPath,
           modifiedFilesCount: this.modifiedFiles.size,
-          message: `HARD STOP: ${this.modifiedFiles.size} files modified in ${cfg.mode.toUpperCase()} mode!`,
+          message: `HARD STOP: ${this.modifiedFiles.size} files modified (limit ${cfg.limits.maxFilesHardStop})`,
           severity: 'critical',
           timestamp: now,
         });

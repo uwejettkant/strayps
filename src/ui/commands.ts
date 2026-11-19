@@ -1,4 +1,3 @@
-import { type GuardMode, parseMode } from '../core/guard-config.js';
 import type { MonitoredProcess } from '../core/process-monitor.js';
 import type { WatchdogSession } from '../core/session.js';
 import { PANIC_WINDOW_MS } from '../core/watcher.js';
@@ -9,7 +8,6 @@ export type LeashCommand =
   | { kind: 'help' }
   | { kind: 'exit' }
   | { kind: 'status' }
-  | { kind: 'mode'; mode: GuardMode }
   | { kind: 'revert'; target: string }
   | { kind: 'kill'; pid: number }
   | { kind: 'panic' }
@@ -28,11 +26,10 @@ export interface CommandResult {
   confirm?: { prompt: string; run: () => CommandResult };
 }
 
-export const COMMAND_NAMES = ['help', 'status', 'mode', 'revert', 'kill', 'panic', 'exit'];
+export const COMMAND_NAMES = ['help', 'status', 'revert', 'kill', 'panic', 'exit'];
 
 export const HELP_LINES: Array<[string, string]> = [
   ['exit, quit, q', 'stop the watchdog (Ctrl+C works too)'],
-  ['mode <strict|balanced|yolo>', 'switch the guard mode'],
   ['revert <file>', 'roll one file back to the version before its latest changes'],
   ['kill <pid>', 'terminate one monitored process (SIGTERM, then SIGKILL)'],
   ['panic', 'stop the agents of this repo, roll back what changed in the last 10 min'],
@@ -56,7 +53,6 @@ function describeProcesses(processes: MonitoredProcess[], shown: number = 3): st
 }
 
 const EXIT_WORDS = new Set(['exit', 'quit', 'q', ':q', 'stop', 'bye']);
-const MODE_WORDS = new Set(['strict', 'balanced', 'yolo', 'refactoring']);
 
 /** Turns one line of user input into a command. Never throws. */
 export function parseCommand(line: string): LeashCommand {
@@ -79,16 +75,12 @@ export function parseCommand(line: string): LeashCommand {
   }
   if (word === 'panic' || word === 'panic!') return { kind: 'panic' };
 
-  if (MODE_WORDS.has(word) && !rest) {
-    return { kind: 'mode', mode: parseMode(word)! };
-  }
-
-  if (word === 'mode' || word === 'm') {
-    const mode = parseMode(rest);
-    if (!mode) {
-      return { kind: 'invalid', message: 'Usage: mode <strict|balanced|yolo>' };
-    }
-    return { kind: 'mode', mode };
+  if (word === 'mode' || word === 'm' || ['strict', 'balanced', 'yolo'].includes(word)) {
+    // The modes were removed: agent-leash always watches by the settings in .agentguard.json
+    return {
+      kind: 'invalid',
+      message: 'There are no modes any more: agent-leash watches by your settings (agent-leash config).',
+    };
   }
 
   if (word === 'revert' || word === 'rollback' || word === 'undo' || word === 'r') {
@@ -152,13 +144,6 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
 
     case 'exit':
       return { message: 'Shutting down…', level: 'info', exit: true };
-
-    case 'mode': {
-      const result = session.setMode(command.mode);
-      return result.ok
-        ? { message: `Guard mode is now ${result.config.mode.toUpperCase()}`, level: 'info' }
-        : { message: result.error, level: 'error' };
-    }
 
     case 'revert': {
       const resolved = resolveModifiedFile(command.target, session.getSnapshot().modifiedFiles);
@@ -260,7 +245,7 @@ function commonPrefix(values: string[]): string {
   return prefix;
 }
 
-/** Tab completion: command names, guard modes, modified files and monitored PIDs. */
+/** Tab completion: command names, modified files and monitored PIDs. */
 export function completeInput(session: WatchdogSession, input: string): Completion {
   const spaceAt = input.search(/\s/);
   let head = '';
@@ -272,9 +257,7 @@ export function completeInput(session: WatchdogSession, input: string): Completi
     head = input.slice(0, spaceAt + 1);
     partial = input.slice(spaceAt + 1).replace(/^\s+/, '');
     const snapshot = session.getSnapshot();
-    if (word === 'mode' || word === 'm') {
-      pool = ['strict', 'balanced', 'yolo'];
-    } else if (word === 'revert' || word === 'rollback' || word === 'undo' || word === 'r') {
+    if (word === 'revert' || word === 'rollback' || word === 'undo' || word === 'r') {
       pool = snapshot.modifiedFiles;
     } else if (word === 'kill' || word === 'k') {
       pool = snapshot.processes.map((p) => String(p.pid));

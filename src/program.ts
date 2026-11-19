@@ -10,9 +10,7 @@ import {
   type ConfigKey,
   GuardConfigManager,
   type GuardLimits,
-  type GuardMode,
   parseConfigValue,
-  parseMode,
   resolveConfigKey,
   writeConfigValue,
 } from './core/guard-config.js';
@@ -40,7 +38,6 @@ export class CliError extends Error {}
 
 interface WatchOptions {
   port?: string;
-  mode?: string;
   demo?: boolean;
   tui?: boolean;
   dashboard?: boolean;
@@ -67,15 +64,6 @@ function parsePort(raw: string | undefined): number | undefined {
     throw new CliError(`Invalid --port "${raw}": expected a number between 0 and 65535`);
   }
   return Number(raw);
-}
-
-function parseModeOption(raw: string | undefined) {
-  if (raw === undefined) return undefined;
-  const mode = parseMode(raw);
-  if (!mode) {
-    throw new CliError(`Invalid --mode "${raw}": expected strict, balanced or yolo`);
-  }
-  return mode;
 }
 
 /**
@@ -190,16 +178,11 @@ function summaryLines(
 async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   const rootDir = resolveTargetDir(dir);
   const requestedPort = parsePort(options.port);
-  const modeOverride = parseModeOption(options.mode);
   const demo = Boolean(options.demo);
   const startedAt = Date.now();
 
-  // The demo never writes: a mode switch in the demo must not end up in the user's config file
-  const configManager = new GuardConfigManager(
-    rootDir,
-    modeOverride ? { mode: modeOverride } : undefined,
-    { readOnly: demo },
-  );
+  // The demo never writes, not even the config file
+  const configManager = new GuardConfigManager(rootDir, undefined, { readOnly: demo });
   const cfg = configManager.getConfig();
 
   const loopDetector = new LoopDetector({
@@ -354,7 +337,6 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   out('');
   out(`${palette.accent(`agent-leash v${getVersion()}`)} — AI Agent & MCP Watchdog${demo ? palette.warn('  [DEMO: simulated, nothing is touched]') : ''}`);
   out(`  Repo:        ${rootDir}`);
-  out(`  Mode:        ${cfg.mode.toUpperCase()}`);
   out(`  Checkpoint:  ${checkpoint.ref} (${checkpoint.type}, ${checkpoint.snapshottedFiles} files)`);
   out(`  Dashboard:   ${running ? running.url : 'off (--no-dashboard)'}`);
   out(`  Limits:      warn=${cfg.limits.maxFilesWarn}, stop=${cfg.limits.maxFilesHardStop}, loop=${cfg.limits.maxEditsPerFilePerMinute}/min, mcp=${cfg.limits.mcpSilenceTimeoutSec}s, stale=${cfg.limits.staleSessionHours}h`);
@@ -417,7 +399,6 @@ function displayValue(value: unknown): string {
 function effectiveValue(manager: GuardConfigManager, key: ConfigKey): string {
   const config = manager.getConfig();
   const list = (values: string[]) => (values.length > 0 ? values.join(', ') : 'none');
-  if (key === 'mode') return config.mode;
   if (key === 'protectedFiles') return list(config.protectedFiles);
   if (key === 'agents') return list(config.agents);
   return String(config.limits[key.slice('limits.'.length) as keyof GuardLimits]);
@@ -465,7 +446,7 @@ function requireConfigKey(input: string): ConfigKey {
   return key;
 }
 
-function writeOrFail(rootDir: string, key: ConfigKey, value: GuardMode | number | string[] | undefined) {
+function writeOrFail(rootDir: string, key: ConfigKey, value: number | string[] | undefined) {
   try {
     return writeConfigValue(rootDir, key, value);
   } catch (err) {
@@ -509,9 +490,8 @@ function runConfigUnset(rawKey: string, dir: string): void {
   reportConfigProblems(rootDir);
 }
 
-function runInit(dir: string, options: { mode: string; force?: boolean }): void {
+function runInit(dir: string, options: { force?: boolean }): void {
   const rootDir = resolveTargetDir(dir);
-  const mode = parseModeOption(options.mode) ?? 'balanced';
   const target = path.join(rootDir, CONFIG_FILENAME);
   if (fs.existsSync(target) && !options.force) {
     throw new CliError(`${target} already exists. Edit it, or pass --force to replace it with the defaults.`);
@@ -519,9 +499,9 @@ function runInit(dir: string, options: { mode: string; force?: boolean }): void 
   if (options.force && fs.existsSync(target)) {
     fs.rmSync(target);
   }
-  const manager = new GuardConfigManager(rootDir, { mode });
+  const manager = new GuardConfigManager(rootDir);
   const writtenPath = manager.saveConfig();
-  process.stdout.write(`Created ${writtenPath} with mode="${manager.getConfig().mode}".\n`);
+  process.stdout.write(`Created ${writtenPath} with the default settings.\n`);
 }
 
 export function createCliProgram(): Command {
@@ -537,7 +517,6 @@ export function createCliProgram(): Command {
     .description('Watch a repository for agent thrashing, protected file edits, and frozen MCPs')
     .argument('[dir]', 'Target repository directory', '.')
     .option('-p, --port <port>', `Port for the local web dashboard (default: ${DEFAULT_PORT}, next free port if taken)`)
-    .option('-m, --mode <mode>', 'Override guard mode (strict | balanced | yolo)')
     .option('--no-tui', 'Plain log output instead of the full-screen terminal view')
     .option('--no-dashboard', 'Do not start the local web dashboard')
     .option('-q, --quiet', 'Plain output only: print warnings and critical events, not every edit')
@@ -554,9 +533,8 @@ export function createCliProgram(): Command {
     .command('init')
     .description('Create a default .agentguard.json configuration file in the target repository')
     .argument('[dir]', 'Target repository directory', '.')
-    .option('-m, --mode <mode>', 'Initial guard mode (strict | balanced | yolo)', 'balanced')
     .option('-f, --force', 'Replace an existing .agentguard.json')
-    .action((dir: string, options: { mode: string; force?: boolean }) => runInit(dir, options));
+    .action((dir: string, options: { force?: boolean }) => runInit(dir, options));
 
   const config = program
     .command('config')
@@ -571,7 +549,7 @@ export function createCliProgram(): Command {
   config
     .command('set')
     .description('Set one value in .agentguard.json (the file is created if missing)')
-    .argument('<key>', 'Setting, e.g. limits.maxFilesWarn, maxFilesWarn or mode')
+    .argument('<key>', 'Setting, e.g. limits.maxFilesWarn, maxFilesWarn or agents')
     .argument('<value>', 'New value; protectedFiles takes globs separated by commas')
     .option('-C, --dir <dir>', 'Target repository directory', '.')
     .action((key: string, value: string, options: { dir: string }) => runConfigSet(key, value, options.dir));

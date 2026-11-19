@@ -68,7 +68,7 @@ scripts/scenarios/package-check.sh     # build, pack, install the tarball, impor
 ```text
             GuardConfigManager          RepoWatcher                 ProcessMonitor
             (.agentguard.json,          (chokidar, checkpoint,      (ps + cwd lookup every 2 s,
-             modes, globs)               rollback, kept copies)      classification, termination)
+             guardrails, globs)          rollback, kept copies)      classification, termination)
                       \                       |                         /
                        +--------------  WatchdogSession  --------------+
                           one snapshot · one set of actions · events:
@@ -81,7 +81,7 @@ scripts/scenarios/package-check.sh     # build, pack, install the tarball, impor
 
 | Module | Responsibility |
 | :--- | :--- |
-| `src/core/guard-config.ts` | `.agentguard.json`, defaults, validation with warnings, glob matching, mode policies (`strict`, `balanced`, `yolo`). `reload` applies a changed file only when all of it is valid; `switchMode` writes only the `mode` key; `writeConfigValue` changes one key for `agent-leash config`; `getSources` says where each value comes from. `parseMode` is strict (user input), `normalizeMode` lenient. |
+| `src/core/guard-config.ts` | `.agentguard.json`, defaults, validation with warnings, glob matching. There are no modes: the guardrails always apply exactly as configured, and an old `"mode"` key is ignored with a notice. `reload` applies a changed file only when all of it is valid; `writeConfigValue` changes one key for `agent-leash config`; `getSources` says where each value comes from. |
 | `src/core/loop-detector.ts` | Sliding 60-second window per file; trips once per series when `maxEditsPerFilePerMinute` is exceeded, re-arms after a quiet window. |
 | `src/core/watcher.ts` | File events and alarms, session checkpoint (memory snapshot plus a git ref for large tracked files), per-file versions (`STABLE_AFTER_MS`: the version before the latest series is the rollback target), revert and panic rollback (`PANIC_WINDOW_MS`), kept copies of replaced versions, recognition of its own writes by content, `dryRun` for the demo. |
 | `src/core/process-monitor.ts` | Process list, working directories (`/proc` on Linux, `lsof` elsewhere), agent recognition (`programNames` for exact names, `findMcpClient` for agents of any name), classification (`ACTIVE`, `IDLE`, `STANDBY`, `STALE`, `FROZEN`), `inWatchedRepo` and `agentPid` via the process tree, `panicTarget`, `host` (what a session is attached to), graceful termination. |

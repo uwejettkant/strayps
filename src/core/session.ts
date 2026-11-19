@@ -5,7 +5,6 @@ import {
   type ConfigReloadResult,
   type GuardConfig,
   GuardConfigManager,
-  parseMode,
 } from './guard-config.js';
 import {
   type MonitoredProcess,
@@ -51,7 +50,6 @@ export interface PanicResult {
 }
 
 export type KillResult = { ok: true; pid: number } | { ok: false; pid: number; error: string };
-export type ModeResult = { ok: true; config: GuardConfig } | { ok: false; error: string };
 
 const MAX_SNAPSHOT_EVENTS = 80;
 const MAX_SESSION_EVENTS = 200;
@@ -163,35 +161,6 @@ export class WatchdogSession extends EventEmitter {
   /** How many events of each type this session has seen (not capped like the event list). */
   public getCounters(): Partial<Record<WatchEventType, number>> {
     return { ...this.counters };
-  }
-
-  /**
-   * Switches the guard mode. Unknown modes are rejected instead of silently becoming "balanced".
-   * If `.agentguard.json` exists, only its `mode` key is updated; every other value in it stays.
-   */
-  public setMode(rawMode: unknown): ModeResult {
-    const mode = parseMode(rawMode);
-    if (!mode) {
-      return { ok: false, error: 'Unknown mode, expected strict | balanced | yolo' };
-    }
-    const { config, persisted } = this.configManager.switchMode(mode, true);
-    this.applyLimits(config);
-    const note =
-      persisted === 'written'
-        ? ` (saved to ${CONFIG_FILENAME})`
-        : persisted === 'invalid-file'
-          ? ` for this session only: ${CONFIG_FILENAME} is not valid JSON and was left untouched`
-          : persisted === 'read-only'
-            ? ' (demo: not saved)'
-            : persisted === 'no-file'
-              ? ` for this session only (no ${CONFIG_FILENAME} to save it in)`
-              : '';
-    this.addEvent({
-      type: 'mode-change',
-      message: `Guard mode switched to ${config.mode.toUpperCase()}${note}`,
-      severity: persisted === 'invalid-file' ? 'warn' : 'info',
-    });
-    return { ok: true, config };
   }
 
   /**

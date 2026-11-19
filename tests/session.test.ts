@@ -20,11 +20,10 @@ describe('WatchdogSession', () => {
     writeFiles(h.dir, { 'a.ts': 'changed\n' });
     h.watcher.handleFileSystemEvent('change', 'a.ts');
     await h.monitor.scan();
-    h.session.setMode('strict');
+    h.session.addEvent({ type: 'watch-error', message: 'from the session', severity: 'warn' });
 
     const snapshot = h.session.getSnapshot();
     expect(snapshot.rootDir).toBe(h.dir);
-    expect(snapshot.config.mode).toBe('strict');
     expect(snapshot.modifiedFiles).toEqual(['a.ts']);
     expect(snapshot.limitState).toBe('ok');
     expect(snapshot.processes.map((p) => p.pid)).toEqual([300]);
@@ -33,38 +32,23 @@ describe('WatchdogSession', () => {
     expect(types).toContain('checkpoint-created');
     expect(types).toContain('file-edit');
     expect(types).toContain('process-alert');
-    expect(types).toContain('mode-change');
+    expect(types).toContain('watch-error');
     const stamps = snapshot.events.map((e) => e.timestamp);
     expect(stamps).toEqual([...stamps].sort((a, b) => b - a));
 
-    expect(h.session.getCounters()).toMatchObject({ 'file-edit': 1, 'process-alert': 1, 'mode-change': 1 });
+    expect(h.session.getCounters()).toMatchObject({ 'file-edit': 1, 'process-alert': 1, 'watch-error': 1 });
   });
 
-  it('rejects unknown modes instead of silently choosing one', () => {
-    const h = createHarness();
-    h.session.setMode('yolo');
-
-    for (const bad of ['stricct', '', 42, null, undefined, { mode: 'strict' }]) {
-      const result = h.session.setMode(bad);
-      expect(result.ok).toBe(false);
-    }
-    expect(h.session.getSnapshot().config.mode).toBe('yolo');
-    expect(h.session.setMode('refactoring')).toMatchObject({ ok: true });
-    expect(h.session.setMode('STRICT')).toMatchObject({ ok: true });
-    expect(h.session.getSnapshot().config.mode).toBe('strict');
-  });
-
-  it('reflects the hard-stop state as soon as the mode makes the current file count too many', () => {
+  it('reflects the hard-stop state as soon as edited limits make the current file count too many', () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 16; i++) files[`f${i}.ts`] = 'x\n';
-    const h = createHarness({ files, config: { mode: 'yolo' } });
+    const h = createHarness({ files });
     h.watcher.createCheckpoint();
     for (let i = 0; i < 16; i++) h.watcher.handleFileSystemEvent('change', `f${i}.ts`);
 
-    expect(h.session.getSnapshot().limitState).toBe('ok');
-    h.session.setMode('balanced');
     expect(h.session.getSnapshot().limitState).toBe('warn');
-    h.session.setMode('strict');
+    writeFiles(h.dir, { '.agentguard.json': JSON.stringify({ limits: { maxFilesWarn: 10, maxFilesHardStop: 12 } }) });
+    h.session.reloadConfig();
     expect(h.session.getSnapshot().limitState).toBe('hard-stop');
   });
 
@@ -165,7 +149,7 @@ describe('WatchdogSession', () => {
     vi.useFakeTimers();
     const files: Record<string, string> = {};
     for (let i = 0; i < 300; i++) files[`src/f${i}.ts`] = 'x\n';
-    const h = createHarness({ files, config: { mode: 'yolo' } });
+    const h = createHarness({ files, config: { limits: { maxFilesWarn: 1000, maxFilesHardStop: 2000 } } });
     h.watcher.createCheckpoint();
     const updates: StatusSnapshot[] = [];
     const events: string[] = [];
