@@ -15,13 +15,14 @@ export type WatchEventType =
   | 'limit-hard-stop'
   | 'rollback'
   | 'rollback-failed'
-  | 'panic-rollback'
   | 'checkpoint-created'
   | 'watch-error'
   | 'config-reload'
   | 'process-alert'
   | 'process-recovered'
-  | 'process-killed';
+  | 'process-killed'
+  | 'process-paused'
+  | 'process-resumed';
 
 export interface WatchActivityEvent {
   id: string;
@@ -45,7 +46,7 @@ export interface CheckpointInfo {
 
 /**
  * There is no automatic rollback. Protected files and thrashing raise an alarm; a file is only
- * restored by `revert` or `panic`, after a person confirmed it. In a long session an automatic
+ * restored by `revert`, one file at a time, after a person confirmed it. In a long session an automatic
  * rollback to the session start would throw away hours of good work.
  */
 export interface RepoWatcherOptions {
@@ -65,23 +66,11 @@ export interface RepoWatcherOptions {
   keepDiscarded?: boolean;
 }
 
-export interface PanicRollbackResult {
-  restoredFiles: string[];
-  count: number;
-  /** Files that could not be restored because no copy of their last stable version exists. */
-  skippedFiles: string[];
-  /** Modified files whose latest change is older than the panic window; left as they are. */
-  keptFiles: string[];
-}
-
 /**
  * A file left unchanged this long ends a series of changes. The version it had then is what
  * `revert` restores: the version before the latest series, never anything older.
  */
 export const STABLE_AFTER_MS = 60_000;
-
-/** `panic` rolls back the files changed within this window and keeps every older change. */
-export const PANIC_WINDOW_MS = 10 * 60_000;
 
 /** A version of a file: its bytes, null if the file did not exist, undefined if no copy is held. */
 type VersionContent = Buffer | null | undefined;
@@ -453,7 +442,7 @@ export class RepoWatcher extends EventEmitter {
    * STABLE_AFTER_MS, a series of changes ended there and that version becomes the rollback target.
    */
   private trackChange(relPath: string, now: number): void {
-    // .env* contents are never read; the demo reads nothing but still needs the times for panic
+    // .env* contents are never read, and the demo reads nothing at all
     const readable = !this.isEnvFile(relPath) && !this.dryRun;
     const start = readable ? this.initialVersion(relPath) : undefined;
     const history = this.histories.get(relPath) ?? {
@@ -471,15 +460,6 @@ export class RepoWatcher extends EventEmitter {
     history.currentSince = now;
     history.currentIsStart = false;
     this.histories.set(relPath, history);
-  }
-
-  /** Modified files whose latest change lies within the panic window: what `panic` would roll back. */
-  public getPanicFiles(now: number = Date.now()): string[] {
-    const cutoff = now - PANIC_WINDOW_MS;
-    return Array.from(this.modifiedFiles).filter((relPath) => {
-      if (this.isEnvFile(relPath)) return false;
-      return (this.histories.get(relPath)?.currentSince ?? Number.NEGATIVE_INFINITY) >= cutoff;
-    });
   }
 
   /**
@@ -680,57 +660,6 @@ export class RepoWatcher extends EventEmitter {
       message: `${what}${kept}`,
       severity: 'warn',
     });
-  }
-
-  /**
-   * Panic: rolls back the files changed within the last PANIC_WINDOW_MS, each to its last stable
-   * version. Older changes stay as they are: in a long session they are hours of good work.
-   */
-  public panicRollbackAll(now: number = Date.now()): PanicRollbackResult {
-    const recent = this.getPanicFiles(now);
-    const keptFiles = Array.from(this.modifiedFiles).filter(
-      (relPath) => !this.isEnvFile(relPath) && !recent.includes(relPath),
-    );
-    const restoredFiles: string[] = [];
-    const skippedFiles: string[] = [];
-
-    for (const relPath of recent) {
-      const outcome = this.restoreFile(relPath, now);
-      if (outcome.ok) {
-        restoredFiles.push(relPath);
-        if (outcome.backAtStart) this.modifiedFiles.delete(relPath);
-      } else {
-        skippedFiles.push(relPath);
-      }
-    }
-
-    this.loopDetector.resetAll();
-    this.lastLimitState = this.configManager.evaluateFileLimit(this.modifiedFiles.size);
-
-    const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
-    const window = `in the last ${Math.round(PANIC_WINDOW_MS / 60_000)} minutes`;
-    const keptText = keptFiles.length > 0 ? `; ${plural(keptFiles.length, 'older change')} kept` : '';
-    const skipped = skippedFiles.length
-      ? `; ${skippedFiles.length} skipped (no copy of their last stable version)`
-      : '';
-    const dir = this.discardDir ? ` — replaced versions kept in ${this.discardDir}` : '';
-    const event = this.recordActivity({
-      type: 'panic-rollback',
-      rolledBack: true,
-      modifiedFilesCount: this.modifiedFiles.size,
-      message: this.dryRun
-        ? `Demo: PANIC simulated for ${plural(restoredFiles.length, 'file')} changed ${window}, no files touched`
-        : `PANIC: ${plural(restoredFiles.length, 'file')} changed ${window} rolled back to their last stable version${keptText}${skipped}${dir}`,
-      severity: 'critical',
-    });
-    this.emit('panic-rollback', event);
-
-    return {
-      restoredFiles,
-      count: restoredFiles.length,
-      skippedFiles,
-      keptFiles,
-    };
   }
 
   /**

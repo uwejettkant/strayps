@@ -31,8 +31,6 @@ export interface StatusSnapshot {
   config: GuardConfig;
   checkpoint: CheckpointInfo | null;
   modifiedFiles: string[];
-  /** The modified files `panic` would roll back: those changed within the panic window. */
-  panicFiles: string[];
   trippedFiles: string[];
   limitState: 'ok' | 'warn' | 'hard-stop';
   events: WatchActivityEvent[];
@@ -40,13 +38,9 @@ export interface StatusSnapshot {
   timestamp: number;
 }
 
-export interface PanicResult {
-  restoredFiles: string[];
-  restoredCount: number;
-  skippedFiles: string[];
-  /** Modified files older than the panic window: left as they are. */
-  keptFiles: string[];
-  killedPids: number[];
+export interface PauseResult {
+  /** PIDs that were held or continued. */
+  pids: number[];
 }
 
 export type KillResult = { ok: true; pid: number } | { ok: false; pid: number; error: string };
@@ -121,6 +115,22 @@ export class WatchdogSession extends EventEmitter {
       });
     });
 
+    this.listen(this.processMonitor, 'processes-paused', (pids: number[]) => {
+      this.addEvent({
+        type: 'process-paused',
+        message: `Paused ${pids.length} process${pids.length === 1 ? '' : 'es'} of this repository's agents (PID ${pids.join(', ')}); resume continues them`,
+        severity: 'warn',
+      });
+    });
+
+    this.listen(this.processMonitor, 'processes-resumed', (pids: number[]) => {
+      this.addEvent({
+        type: 'process-resumed',
+        message: `Resumed ${pids.length} process${pids.length === 1 ? '' : 'es'} (PID ${pids.join(', ')})`,
+        severity: 'info',
+      });
+    });
+
     this.listen(this.processMonitor, 'scan-complete', () => {
       this.scanErrorReported = false;
       this.scheduleUpdate();
@@ -149,7 +159,6 @@ export class WatchdogSession extends EventEmitter {
       config,
       checkpoint: this.watcher.getCheckpoint(),
       modifiedFiles,
-      panicFiles: this.watcher.getPanicFiles(),
       trippedFiles: this.watcher.loopDetector.getTrippedFiles(),
       limitState: this.configManager.evaluateFileLimit(modifiedFiles.length),
       events,
@@ -261,28 +270,27 @@ export class WatchdogSession extends EventEmitter {
       : { ok: false, pid, error: 'Signal could not be delivered (already gone or not permitted)' };
   }
 
-  /** The processes `panic` would stop right now, to show before it is confirmed. */
-  public getPanicTargets(): MonitoredProcess[] {
-    return this.processMonitor.getPanicTargets();
+  /** The processes `pause` would hold right now, to show before it is confirmed. */
+  public getPauseTargets(): MonitoredProcess[] {
+    return this.processMonitor.getPauseTargets();
   }
 
   /**
-   * Emergency brake: stops the coding agents of the watched repository and the processes they
-   * started right away (SIGKILL, no grace period) and rolls the files changed in the last ten
-   * minutes back to their last stable version. Older changes, dev servers, editors and sessions
-   * in other repositories are not touched.
+   * Emergency brake: holds the coding agents of the watched repository and the processes they
+   * started (SIGSTOP). Nothing is terminated, no file is touched; `resume` continues them where
+   * they stopped. Dev servers, editors and sessions in other repositories are not touched.
    */
-  public panic(): PanicResult {
-    const killedPids = this.processMonitor.killPanicTargets('SIGKILL');
-    const rollback = this.watcher.panicRollbackAll();
+  public pause(): PauseResult {
+    const pids = this.processMonitor.pauseTargets();
     this.scheduleUpdate();
-    return {
-      restoredFiles: rollback.restoredFiles,
-      restoredCount: rollback.count,
-      skippedFiles: rollback.skippedFiles,
-      keptFiles: rollback.keptFiles,
-      killedPids,
-    };
+    return { pids };
+  }
+
+  /** Continues every process `pause` is holding. */
+  public resume(): PauseResult {
+    const pids = this.processMonitor.resumePaused();
+    this.scheduleUpdate();
+    return { pids };
   }
 
   /** Adds an entry to the activity log that does not come from the file watcher. */

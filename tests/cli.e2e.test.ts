@@ -130,16 +130,22 @@ describe('agent-leash CLI', () => {
     // an alarm only: nothing is rolled back without a confirmed revert
     expect(run.output()).not.toMatch(/rollback simulated|rolled back/i);
     run.child.stdin.write('revert session.ts\n');
-    await run.waitFor('Type "yes" to confirm');
+    await run.waitFor('Type "yes"');
     run.child.stdin.write('yes\n');
     await run.waitFor('Demo: would roll back src/auth/session.ts to the version before its latest changes');
 
     run.child.stdin.write('status\n');
     await run.waitFor(/31877\s+STALE\s+ELSEWHERE/);
     run.child.stdin.write('kill 31877\n');
-    await run.waitFor('Type "yes" to confirm');
+    await run.waitFor('Type "yes"');
     run.child.stdin.write('yes\n');
     await run.waitFor('Sent SIGTERM to PID 31877');
+    run.child.stdin.write('pause\n');
+    await run.waitFor("Pause 3 processes of this repo's agents");
+    run.child.stdin.write('yes\n');
+    await run.waitFor('Paused 3 processes; type resume to continue');
+    run.child.stdin.write('resume\n');
+    await run.waitFor('Resumed 3 processes');
     run.child.stdin.write('quit\n');
     expect((await run.exit).code).toBe(0);
   });
@@ -175,7 +181,7 @@ describe('agent-leash CLI', () => {
     expect(read(dir, 'docker-compose.yml')).toBe('version: "tampered"\n');
 
     run.child.stdin.write('revert docker-compose.yml\n');
-    await run.waitFor('Type "yes" to confirm');
+    await run.waitFor('Type "yes"');
     run.child.stdin.write('yes\n');
     await run.waitFor('Rolled back docker-compose.yml');
     expect(read(dir, 'docker-compose.yml')).toBe('version: "3.8"\n');
@@ -208,8 +214,8 @@ describe('agent-leash CLI', () => {
 
     const status = await fetch(`http://127.0.0.1:${port}/api/status`);
     expect(status.status).toBe(200);
-    const panic = await fetch(`http://127.0.0.1:${port}/api/panic`, { method: 'POST' });
-    expect(panic.status).toBe(403);
+    const pause = await fetch(`http://127.0.0.1:${port}/api/pause`, { method: 'POST' });
+    expect(pause.status).toBe(403);
 
     run.child.kill('SIGINT');
     expect((await run.exit).code).toBe(0);

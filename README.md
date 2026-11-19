@@ -36,7 +36,7 @@ Rules inside `AGENTS.md` or `CLAUDE.md` are polite suggestions. They **cannot** 
 | **Edit Thrashing** *(agent rewrites the same file 6× in 30s trying to fix a test)* | Burns tokens and leaves broken code across the working tree | **Circuit Breaker** raises an alarm on edit #6; `revert` brings back the version before the series |
 | **Secret / Infra Tampering** *(agent edits `.env.local` or `docker-compose.yml`)* | Secrets or container configs get modified silently | **Instant Alert** (`.env*` warns without its contents ever being read; `revert` restores `docker-compose.yml`) |
 | **Forgotten Multi-Day Agent & MCP Sessions** *(old sessions from other repos stay alive for days)* | Hundreds of MB of RAM silently locked by stale agent & MCP trees | **Cross-Repo Process List** shows every agent and MCP process with directory, uptime and RAM, marks old ones `STALE`; you end them one PID at a time |
-| **Runaway Multi-File Refactor** *(agent modifies 40+ unintended files)* | Painful manual `git checkout` / untracked file cleanup | **Panic** stops the agents of the repo and rolls back what changed in the last 10 minutes, after one confirmation |
+| **Runaway Multi-File Refactor** *(agent modifies 40+ unintended files)* | Painful manual `git checkout` / untracked file cleanup | **Pause** holds the agents of the repo where they are; nothing is lost, `resume` continues them, and you `revert` single files as needed |
 
 ---
 
@@ -72,11 +72,12 @@ Started in a terminal, `agent-leash` shows a full-screen live view of the same s
 | `exit`, `quit`, `q` | Stop the watchdog (Ctrl+C and Ctrl+D work too) |
 | `revert <file>` | Roll one file back to the version before its latest series of changes (Tab completes file names) |
 | `kill <pid>` | Terminate one process from the list: SIGTERM first, SIGKILL if it does not exit |
-| `panic` | Stop the coding agents of this repository and the processes they started, and roll back the files changed in the last 10 minutes |
+| `pause` | Hold the coding agents of this repository and the processes they started (SIGSTOP); nothing is terminated, no file is touched |
+| `resume` | Continue what `pause` held |
 | `status` | List all monitored processes |
 | `help` | Show the commands |
 
-`revert`, `kill` and `panic` ask `[y/N]` before they act; `panic` names the processes and the number of files first. Nothing else ever rewrites a file: see [Alarms and Rollback](#alarms-and-rollback).
+`revert`, `kill` and `pause` ask `[y/N]` before they act; `pause` names the processes first. `resume` needs no confirmation. Nothing else ever rewrites a file: see [Alarms and Rollback](#alarms-and-rollback).
 
 Without a terminal (a pipe, a log file, a background job, or `--no-tui`) the same information is printed as one line per event, and the same commands are read from stdin, one per line. The end of the input does not stop the watchdog; `kill -TERM` does.
 
@@ -96,7 +97,7 @@ agent-leash keeps no list of AI products, and it does not care which model an ag
 2. **By name**, for the agents that come built in: `claude`, `codex` and `aider`, matched by their exact program name, never as part of another name.
 3. **By your list**, for any other agent: `npx agent-leash config set agents vibe,opencode`.
 
-`panic` stops the agents of the watched repository and the processes they started. Your dev server, your editor and the sessions in other repositories keep running.
+`pause` holds the agents of the watched repository and the processes they started. Your dev server, your editor and the sessions in other repositories keep running.
 
 The process list marks old sessions in other repositories as `STALE` and processes whose parent is gone as `FROZEN`. Those are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. You end a process with `kill <pid>` after a confirmation, or from its row in the dashboard.
 
@@ -120,7 +121,7 @@ flowchart LR
   subgraph UI["Front ends (one shared session)"]
     TUI["Terminal View\n(live screen + commands)"]
     SSE["Local Hono Server\n(127.0.0.1:4321, SSE)"]
-    DASH["Dark Console Dashboard\n(Kill, Revert & Panic)"]
+    DASH["Dark Console Dashboard\n(Kill, Revert, Pause)"]
   end
 
   FS -->|add / change / unlink| CFG
@@ -133,17 +134,18 @@ flowchart LR
   LOOP --> TUI
   PROC --> TUI
   SSE --> DASH
-  DASH -->|"POST /api/panic"| GIT
+  DASH -->|"POST /api/rollback-file"| GIT
+  DASH -->|"POST /api/pause, /api/resume"| PROC
   DASH -->|"POST /api/kill/:pid"| PROC
-  TUI -->|"revert / panic"| GIT
-  TUI -->|"kill / panic"| PROC
+  TUI -->|"revert"| GIT
+  TUI -->|"kill / pause / resume"| PROC
 ```
 
 ### Key Engineering Details
 
 1. **Dual-Layer Session Checkpoint (`git stash create` + Memory Snapshot, Zero-Secret-Access for `.env*`)**: On startup, `agent-leash` creates an invisible Git commit object without touching your working tree or stash reflog, paired with an in-memory snapshot for code files. `.env*` files are strictly metadata-monitored (warn-only): their contents are **never** read into memory or overwritten on disk.
-2. **Rollbacks That Lose Nothing**: agent-leash never rolls a file back on its own. For every changed file it keeps the version from before its latest series of changes, and `revert` or `panic` restore exactly that one, never anything older. Before a rollback overwrites or removes a file, the version being replaced is copied to a private temp directory (the path is in the log and in the exit summary). A rollback only touches files inside the watched repository, and only deletes a file that did not exist before its latest changes. `agent-leash` recognizes the file system echo of its own rollback by content, so the rollback never triggers a second alert.
-3. **Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen, even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB) and uptime (`etime`) to tell **standby MCP children** (`STANDBY`) from **old sessions in other repos** (`STALE`) and **orphaned or silent processes** (`FROZEN`). The tree also tells which agent started which process, so `panic` reaches exactly the agents of the watched repository and what they started.
+2. **Rollbacks That Lose Nothing**: agent-leash never rolls a file back on its own. For every changed file it keeps the version from before its latest series of changes, and `revert` restores exactly that one, never anything older. Before a rollback overwrites or removes a file, the version being replaced is copied to a private temp directory (the path is in the log and in the exit summary). A rollback only touches files inside the watched repository, and only deletes a file that did not exist before its latest changes. `agent-leash` recognizes the file system echo of its own rollback by content, so the rollback never triggers a second alert.
+3. **Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen, even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB) and uptime (`etime`) to tell **standby MCP children** (`STANDBY`) from **old sessions in other repos** (`STALE`) and **orphaned or silent processes** (`FROZEN`). The tree also tells which agent started which process, so `pause` holds exactly the agents of the watched repository and what they started.
 
 ---
 
@@ -154,7 +156,7 @@ agent-leash never rewrites a file on its own. A protected file that changes and 
 You decide, with one command and a confirmation:
 
 - **`revert <file>`** restores the version the file had before its latest series of changes. A series ends when the file stays unchanged for a minute, so the good work before a thrashing loop survives. A second `revert` does not go further back. A file created in the latest series is removed.
-- **`panic`** stops the agents of the repository and rolls back every file changed in the last 10 minutes, each to its version before its latest changes. Older changes stay as they are; the confirmation says how many.
+- **`pause`** is the emergency brake. It holds the agents of the repository where they are (SIGSTOP): no process is terminated, no file is touched, and `resume` continues them. A long autonomous run is paid work; you look at what happened and decide file by file. There is deliberately no command that rolls back many files at once.
 
 Every version a rollback replaces is kept in a private temp directory, so even a rollback you regret can be undone by hand. Files larger than 5 MB are not kept in memory; for those, `revert` can only go back to the session start (through git) when that is their last stable version, and refuses otherwise.
 
@@ -261,7 +263,7 @@ console.log(dashboard.url);
 
 - The dashboard server binds to `127.0.0.1` and answers only when addressed as this machine.
 - Every state-changing request needs a token that is only handed to the dashboard page, and must come from that page's own origin. A web page in another tab cannot trigger anything.
-- Only processes from the monitored list can be terminated, one PID at a time; `panic` reaches only the agents of the watched repository and the processes they started. Only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
+- Only processes from the monitored list can be terminated, one PID at a time; `pause` holds only the agents of the watched repository and the processes they started, and agent-leash continues them when it exits. Only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
 - File names and command lines are treated as untrusted text in the dashboard and in the terminal.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
 - Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The watched agent can also edit `.agentguard.json`; a running agent-leash applies the edit and logs it as a warning. The dashboard page loads Tailwind from its CDN; with `--no-dashboard` no network request is made at all.
@@ -308,7 +310,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 177 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 179 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

@@ -11,9 +11,9 @@ The unit tests prove the parts. This pass proves what a user sees. Result: a fin
 
 agent-leash kills processes and rewrites files. The processes on this machine are live agent sessions, yours included.
 
-- Destructive commands (`kill`, `panic`) and endpoints (`/api/kill/*`, `/api/panic`): only against `--demo`. Demo has its own fake process table and writes nothing.
+- Commands that act on processes (`kill`, `pause`) and endpoints (`/api/kill/*`, `/api/pause`): only against `--demo`. Demo has its own fake process table and writes nothing.
 - Real mode (no `--demo`): only in a sandbox directory, and only file scenarios (edit, revert, thrash). Read the process list, never act on it.
-- Never confirm `revert` or `panic` on a repository someone is working in. (The watchdog itself never rolls back; builds before 19.11.2026 still do: never leave one running on a working repository.)
+- Never confirm `revert` on a repository someone is working in. (The watchdog itself never rolls back; builds before 19.11.2026 still do: never leave one running on a working repository.)
 
 ## 2. The gate
 
@@ -39,11 +39,12 @@ python3 scripts/scenarios/pty-drive.py --cols 112 --rows 30 -- \
   type:"kill 31877" key:enter type:y screen:killed \
   type:clean key:enter screen:no-clean \
   type:status key:enter screen:all-processes key:esc \
-  type:panic key:enter screen:panic-prompt type:y screen:panic \
+  type:pause key:enter screen:pause-prompt type:y screen:paused \
+  type:resume key:enter screen:resumed \
   type:exit key:enter wait:1.5
 ```
 
-Check on the screens: events appear oldest to newest; the breaker shows `TRIPPED` after the sixth edit; every destructive command shows `? … [y/N]` first; `n` changes nothing; after the second `kill 31877` that process is gone; `clean` answers that there is no bulk cleanup; no row says "safe to kill"; the panic prompt names the three processes of the demo agent (48110 and its two MCP servers); after `panic` only the session in the other repository and the orphaned MCP process remain.
+Check on the screens: events appear oldest to newest; the breaker shows `TRIPPED` after the sixth edit; every destructive command shows `? … [y/N]` first; `n` changes nothing; after the second `kill 31877` that process is gone; `clean` answers that there is no bulk cleanup; no row says "safe to kill"; the pause prompt names the three processes of the demo agent (48110 and its two MCP servers); after `pause` they are still listed, marked as paused, and no file event appears; `resume` continues them without a question.
 
 Check in the result block: exit code 0, alternate screen left, cursor visible, line wrap on, terminal back in cooked mode. A terminal left in raw mode is a release blocker.
 
@@ -77,7 +78,7 @@ node dist/cli.js watch --demo --no-dashboard < /dev/null &   # must keep running
 Start `node dist/cli.js watch --demo --port 47381` and open `http://localhost:47381/`.
 
 - No console errors; styles applied; `stream: connected`.
-- `revert` on an event and `Kill PID` on any process open the dialog first, cancel changes nothing, confirm acts. The panic dialog names the processes it stops and the number of files; it cancels and confirms. No button or label offers a bulk cleanup or says "safe to kill".
+- `revert` on an event and `Kill PID` on any process open the dialog first, cancel changes nothing, confirm acts. Pause names the processes it holds, cancels and confirms; while something is held the button reads Resume and continues without a dialog. A `rollback` line has no `revert` button. No button or label offers a bulk cleanup or says "safe to kill".
 - From a shell: `curl -X POST http://127.0.0.1:47381/api/rollback-file -d '{"filePath":"a.ts"}'` must answer 403 (no token).
 
 Hostile names, in a sandbox without `--demo` (read the page, click nothing that kills):

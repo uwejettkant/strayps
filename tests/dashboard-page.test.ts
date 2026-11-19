@@ -77,7 +77,7 @@ function loadDashboard() {
     EventSource: FakeEventSource,
     fetch: async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
       requests.push({ url, init });
-      return { ok: true, status: 200, json: async () => ({ ok: true, status: null, killedPids: [], restoredCount: 0 }) };
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: null, pausedPids: [], resumedPids: [] }) };
     },
     document: {
       getElementById,
@@ -208,7 +208,7 @@ describe('dashboard page', () => {
     api.renderStatus(
       stateWith({
         processes: [
-          { ...proc, pid: 1, inWatchedRepo: true, panicTarget: true },
+          { ...proc, pid: 1, inWatchedRepo: true, pauseTarget: true },
           { ...proc, pid: 2, inWatchedRepo: false, status: 'STALE' },
           { ...proc, pid: 3, inWatchedRepo: false, host: 'detached', status: 'FROZEN', category: 'mcp' },
         ],
@@ -218,7 +218,7 @@ describe('dashboard page', () => {
     expect(markup.match(/THIS REPO/g)).toHaveLength(1);
     expect(markup.match(/ELSEWHERE/g)).toHaveLength(1);
     expect(markup.match(/DETACHED/g)).toHaveLength(1);
-    expect(markup.match(/PANIC TARGET/g)).toHaveLength(1);
+    expect(markup.match(/AGENT TREE/g)).toHaveLength(1);
     expect(markup).not.toMatch(/safe to kill|kill stale/i);
     expect(getElementById('metric-silence-limit').textContent).not.toMatch(/safe to kill|reclaimable/i);
   });
@@ -228,7 +228,7 @@ describe('dashboard page', () => {
     api.renderStatus(
       stateWith({
         modifiedFiles: ['src/a.ts'],
-        processes: [{ pid: 4711, status: 'FROZEN', category: 'mcp', cmd: 'node x-mcp', memoryMb: 1, cpu: 0, inWatchedRepo: false }],
+        processes: [{ pid: 4711, status: 'FROZEN', category: 'agent', cmd: 'node x-agent', reason: 'No CPU or file activity for 50s', memoryMb: 1, cpu: 0, inWatchedRepo: false }],
       }),
     );
     const ElementClass = (api as unknown as { Element: new () => object }).Element;
@@ -237,7 +237,7 @@ describe('dashboard page', () => {
       const target = Object.assign(new ElementClass(), { closest: () => button });
       for (const listener of documentListeners.click ?? []) listener({ target });
     };
-    const dialog = getElementById('panic-dialog');
+    const dialog = getElementById('confirm-dialog');
     const answer = async (choice: string) => {
       dialog.returnValue = choice;
       dialog.open = false;
@@ -246,11 +246,15 @@ describe('dashboard page', () => {
 
     click({ 'data-action': 'revert', 'data-path': 'src/a.ts' });
     expect(dialog.open).toBe(true);
-    expect(getElementById('panic-dialog-heading').textContent).toBe('Roll back src/a.ts?');
+    expect(getElementById('confirm-dialog-heading').textContent).toBe('Roll back src/a.ts?');
     await answer('cancel');
     click({ 'data-action': 'kill', 'data-pid': '4711' });
     expect(dialog.open).toBe(true);
-    expect(getElementById('panic-dialog-heading').textContent).toBe('Terminate PID 4711?');
+    expect(getElementById('confirm-dialog-heading').textContent).toBe('Terminate PID 4711?');
+    // whole sentences: every part ends with its own period (found in the Antigravity test)
+    expect(getElementById('confirm-dialog-body').textContent).toBe(
+      'node x-agent. No CPU or file activity for 50s. Its agent session ends. It gets SIGTERM first and SIGKILL only if it does not exit.',
+    );
     await answer('cancel');
     expect(requests.filter((r) => r.init?.method === 'POST')).toEqual([]);
 
@@ -259,27 +263,44 @@ describe('dashboard page', () => {
     expect(requests.filter((r) => r.init?.method === 'POST').map((r) => r.url)).toEqual(['/api/rollback-file']);
   });
 
-  it('names the processes panic stops before it is confirmed', () => {
+  it('names the processes pause holds before it is confirmed, and resumes without a dialog', async () => {
+    const { api, getElementById, requests } = loadDashboard();
+    const procs = [
+      { pid: 100, status: 'ACTIVE', category: 'agent', cmd: 'claude-code (opus)', memoryMb: 1, cpu: 1, inWatchedRepo: true, pauseTarget: true },
+      { pid: 300, status: 'ACTIVE', category: 'node', cmd: 'node tsx watch server.ts', memoryMb: 1, cpu: 1, inWatchedRepo: true, pauseTarget: false },
+    ];
+    api.renderStatus(stateWith({ processes: procs }));
+    const button = getElementById('pause-btn');
+    expect(button.textContent).toBe('Pause agents');
+    button.listeners.click?.[0]?.({});
+    expect(getElementById('confirm-dialog-heading').textContent).toBe('Pause 1 process?');
+    const body = getElementById('confirm-dialog-body').textContent;
+    expect(body).toContain('PID 100 (claude-code (opus))');
+    expect(body).not.toContain('PID 300');
+    expect(body).toContain('Nothing is terminated and no file is touched');
+    expect(requests.filter((r) => r.init?.method === 'POST')).toEqual([]);
+
+    // while something is held, the same button continues it, without asking
+    api.renderStatus(stateWith({ processes: [{ ...procs[0], paused: true }, procs[1]] }));
+    expect(button.textContent).toBe('Resume agents');
+    expect(getElementById('process-list').innerHTML).toContain('PAUSED');
+    await button.listeners.click?.[0]?.({});
+    expect(requests.filter((r) => r.init?.method === 'POST').map((r) => r.url)).toEqual(['/api/resume']);
+  });
+
+  it('offers revert on changes and alarms, not on a line that reports a rollback', () => {
     const { api, getElementById } = loadDashboard();
     api.renderStatus(
       stateWith({
-        modifiedFiles: ['a.ts', 'b.ts', 'old.ts'],
-        panicFiles: ['a.ts', 'b.ts'],
-        processes: [
-          { pid: 100, status: 'ACTIVE', category: 'agent', cmd: 'claude-code (opus)', memoryMb: 1, cpu: 1, inWatchedRepo: true, panicTarget: true },
-          { pid: 300, status: 'ACTIVE', category: 'node', cmd: 'node tsx watch server.ts', memoryMb: 1, cpu: 1, inWatchedRepo: true, panicTarget: false },
+        events: [
+          { id: '1', type: 'file-edit', severity: 'info', timestamp: 0, filePath: 'a.ts', message: 'CHANGE: a.ts' },
+          { id: '2', type: 'rollback', severity: 'warn', timestamp: 0, filePath: 'b.ts', message: 'Rolled back b.ts' },
         ],
       }),
     );
-    const openPanic = getElementById('panic-open-btn').listeners.click?.[0];
-    expect(openPanic).toBeTypeOf('function');
-    openPanic!({});
-    const body = getElementById('panic-dialog-body').textContent;
-    expect(body).toContain('Sends SIGKILL to 1 process');
-    expect(body).toContain('PID 100 claude-code (opus)');
-    expect(body).not.toContain('PID 300');
-    expect(body).toContain('Rolls back 2 files changed in the last 10 minutes');
-    expect(body).toContain('1 older change stays as it is');
+    const markup = getElementById('activity-list').innerHTML;
+    expect(markup).toContain('data-path="a.ts"');
+    expect(markup).not.toContain('data-path="b.ts"');
   });
 
   it('sends the token with every state-changing request', async () => {

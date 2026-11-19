@@ -155,7 +155,7 @@ function summaryLines(
   const snapshot = session.getSnapshot();
   const lines = [
     `${palette.accent('agent-leash')} stopped after ${duration} — ${sanitize(tildify(session.rootDir))}`,
-    `  ${n('file-edit')} file edits · ${n('protected-file')} protected-file alerts · ${n('loop-detected')} thrashing alerts · ${n('rollback') + n('panic-rollback')} rollbacks · ${n('process-killed')} processes terminated`,
+    `  ${n('file-edit')} file edits · ${n('protected-file')} protected-file alerts · ${n('loop-detected')} thrashing alerts · ${n('rollback')} rollbacks · ${n('process-killed')} processes terminated`,
   ];
   if (snapshot.modifiedFiles.length > 0) {
     lines.push(`  ${snapshot.modifiedFiles.length} file(s) still differ from the session checkpoint`);
@@ -189,7 +189,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     maxEditsPerFilePerMinute: cfg.limits.maxEditsPerFilePerMinute,
   });
 
-  // No automatic rollback: protected files and thrashing raise an alarm, revert/panic restore
+  // No automatic rollback: protected files and thrashing raise an alarm, revert restores
   const watcher = new RepoWatcher({
     rootDir,
     configManager,
@@ -207,7 +207,11 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     ...(demo
       ? {
           processLister: async () => demoProcesses,
-          processKiller: (pid: number) => {
+          processKiller: (pid: number, signal?: NodeJS.Signals) => {
+            // pause and resume only hold and continue; the demo process stays in the list
+            if (signal === 'SIGSTOP' || signal === 'SIGCONT') {
+              return demoProcesses.some((p) => p.pid === pid);
+            }
             const before = demoProcesses.length;
             demoProcesses = demoProcesses.filter((p) => p.pid !== pid);
             return demoProcesses.length < before;

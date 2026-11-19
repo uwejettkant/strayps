@@ -1,6 +1,6 @@
 ---
 name: process-classification
-description: Rules and procedure for changing how agent-leash recognizes coding agents, classifies processes (ACTIVE, IDLE, STANDBY, STALE, FROZEN) and decides what panic stops. Use before touching src/core/process-monitor.ts (agent recognition, the keyword, launcher and host lists, the stale or silence thresholds, panic targets) or the wording of process labels.
+description: Rules and procedure for changing how agent-leash recognizes coding agents, classifies processes (ACTIVE, IDLE, STANDBY, STALE, FROZEN) and decides what pause holds. Use before touching src/core/process-monitor.ts (agent recognition, the keyword, launcher and host lists, the stale or silence thresholds, pause targets) or the wording of process labels.
 ---
 
 # Changing process recognition and classification
@@ -39,7 +39,7 @@ agent-leash keeps no list of AI products. A process is a coding agent when one o
 
 "Belongs to the watched repository" (`inWatchedRepo`) means: its own working directory is inside the repository, **or** one of its ancestors in the process tree is such a process. MCP servers often run in `/` or in their install directory; only the tree tells whose they are.
 
-`agentPid` is the nearest monitored agent a process descends from. `panicTarget` is true for the agents of the watched repository and for the processes they started; `panic` stops exactly those. A dev server started from the user's terminal, an editor and its MCP servers, and every session in another repository are never panic targets.
+`agentPid` is the nearest monitored agent a process descends from. `pauseTarget` is true for the agents of the watched repository and for the processes they started; `pause` holds exactly those (SIGSTOP) and `resume` continues them. A dev server started from the user's terminal, an editor and its MCP servers, and every session in another repository are never paused. A held process is never reported `STALE` or `FROZEN`.
 
 `host` names the application a process tree hangs off (VS Code, Claude Desktop, a terminal …). It is shown to the user, keeps rule 3 of section 1 away from apps, and does not change the classification.
 
@@ -50,7 +50,7 @@ Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `l
 - **22,042 seconds.** After 6 h 7 min of work the active VS Code session of the watched repository was marked `STALE` during an idle moment and killed by the next cleanup. Fix: rule 6.
 - **Its MCP server too.** The same session's MCP server was still marked `STALE` after 6 h when its working directory was not inside the repository (rule 3 ran before rule 5). Fix: `inWatchedRepo` through the process tree.
 - **Different rules in tests.** The classification had branches that only ran with the real process lister, so the tests exercised other rules than production. Fix: one rule set; the lister and the working-directory lookup are injected separately.
-- **An agent nobody listed.** On 17.11.2026 the Antigravity CLI (`agy`) worked in the watched repository and did not appear at all; only its MCP server did. `panic` would have stopped the Claude session next to it, but not `agy`. Fix: rule 3 of section 1, without adding `agy` to any list.
+- **An agent nobody listed.** On 17.11.2026 the Antigravity CLI (`agy`) worked in the watched repository and did not appear at all; only its MCP server did. The emergency brake would have stopped the Claude session next to it, but not `agy`. Fix: rule 3 of section 1, without adding `agy` to any list.
 
 ## 4. Known weak spots (not decided yet)
 
@@ -68,6 +68,6 @@ Do not settle these by yourself. Propose, with evidence.
 2. **Write the test first**, in `tests/process-control.test.ts`, as a small fake process table (`agent(...)`, `mcp(...)` helpers, a terminal tab for launchers). Run it against the current code and see it fail.
 3. **Scan more than once.** A rule that holds on the first scan can flip after the silence timeout. Scan at `t0`, `t0 + 46 s` and far beyond.
 4. **Change the rule**, keep the tables in this file current.
-5. **Check the other direction.** A change that recognizes more must not turn an editor, an app or a dev server into an agent or a panic target; a change that protects more must not hide what is really orphaned.
-6. **Look at reality, read-only:** `node dist/cli.js status` on a machine with several sessions open. Check every agent row (is it one?) and every row `panic` would stop. Never test a classification by killing.
+5. **Check the other direction.** A change that recognizes more must not turn an editor, an app or a dev server into an agent or a pause target; a change that protects more must not hide what is really orphaned.
+6. **Look at reality, read-only:** `node dist/cli.js status` on a machine with several sessions open. Check every agent row (is it one?) and every row `pause` would hold. Never test a classification by killing.
 7. **Wording.** Labels describe what is observed. A word that sounds like permission ("safe to kill", "reclaimable") comes back only together with evidence that it holds.

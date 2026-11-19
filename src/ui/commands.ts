@@ -1,6 +1,5 @@
 import type { MonitoredProcess } from '../core/process-monitor.js';
 import type { WatchdogSession } from '../core/session.js';
-import { PANIC_WINDOW_MS } from '../core/watcher.js';
 import { sanitize } from './format.js';
 
 export type LeashCommand =
@@ -10,7 +9,8 @@ export type LeashCommand =
   | { kind: 'status' }
   | { kind: 'revert'; target: string }
   | { kind: 'kill'; pid: number }
-  | { kind: 'panic' }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
   | { kind: 'invalid'; message: string };
 
 export interface CommandResult {
@@ -26,13 +26,14 @@ export interface CommandResult {
   confirm?: { prompt: string; run: () => CommandResult };
 }
 
-export const COMMAND_NAMES = ['help', 'status', 'revert', 'kill', 'panic', 'exit'];
+export const COMMAND_NAMES = ['help', 'status', 'revert', 'kill', 'pause', 'resume', 'exit'];
 
 export const HELP_LINES: Array<[string, string]> = [
   ['exit, quit, q', 'stop the watchdog (Ctrl+C works too)'],
   ['revert <file>', 'roll one file back to the version before its latest changes'],
   ['kill <pid>', 'terminate one monitored process (SIGTERM, then SIGKILL)'],
-  ['panic', 'stop the agents of this repo, roll back what changed in the last 10 min'],
+  ['pause', "hold this repo's agents (nothing is lost)"],
+  ['resume', 'continue what pause held'],
   ['status', 'list all monitored processes'],
   ['help, ?', 'show this list'],
 ];
@@ -73,7 +74,15 @@ export function parseCommand(line: string): LeashCommand {
       message: 'There is no bulk cleanup: look at the list (status) and terminate one process with kill <pid>.',
     };
   }
-  if (word === 'panic' || word === 'panic!') return { kind: 'panic' };
+  if (word === 'pause') return { kind: 'pause' };
+  if (word === 'resume' || word === 'continue') return { kind: 'resume' };
+  if (word === 'panic' || word === 'panic!') {
+    // panic stopped agents for good and rolled files back; a long run is paid work
+    return {
+      kind: 'invalid',
+      message: 'panic was replaced by pause: it holds the agents of this repo without losing anything; resume continues them.',
+    };
+  }
 
   if (word === 'mode' || word === 'm' || ['strict', 'balanced', 'yolo'].includes(word)) {
     // The modes were removed: agent-leash always watches by the settings in .agentguard.json
@@ -191,38 +200,33 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
       };
     }
 
-    case 'panic': {
-      const snapshot = session.getSnapshot();
-      const targets = session.getPanicTargets();
-      const files = snapshot.panicFiles.length;
-      const older = snapshot.modifiedFiles.filter(
-        (f) => !snapshot.panicFiles.includes(f) && !session.watcher.isEnvFile(f),
-      ).length;
-      const minutes = Math.round(PANIC_WINDOW_MS / 60_000);
-      // Both counts first: a narrow terminal cuts the end of the line, and the list can take that
-      const fileText = `roll back ${files} file${files === 1 ? '' : 's'} changed in the last ${minutes} min${older > 0 ? ` (${older} older kept)` : ''}`;
-      const stopText =
-        targets.length > 0
-          ? ` and stop ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents (${describeProcesses(targets)})`
-          : ' (no agent of this repo is running)';
+    case 'pause': {
+      const targets = session.getPauseTargets();
+      if (targets.length === 0) {
+        return { message: 'No agent of this repo is running, nothing to pause', level: 'info' };
+      }
       return {
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `PANIC: ${fileText}${stopText}?`,
+          prompt: `Pause ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents (${describeProcesses(targets)})? Nothing is lost; resume continues them.`,
           run: () => {
-            const result = session.panic();
-            const skipped = result.skippedFiles.length
-              ? `, ${result.skippedFiles.length} skipped`
-              : '';
-            const kept = result.keptFiles.length ? `, ${result.keptFiles.length} older kept` : '';
+            const { pids } = session.pause();
             return {
-              message: `PANIC done: ${result.restoredCount} file${result.restoredCount === 1 ? '' : 's'} rolled back${skipped}${kept}, ${result.killedPids.length} process${result.killedPids.length === 1 ? '' : 'es'} killed`,
+              message: `Paused ${pids.length} process${pids.length === 1 ? '' : 'es'}; type resume to continue`,
               level: 'warn',
             };
           },
         },
       };
+    }
+
+    case 'resume': {
+      // Continuing what agent-leash itself held is not destructive: no confirmation
+      const { pids } = session.resume();
+      return pids.length > 0
+        ? { message: `Resumed ${pids.length} process${pids.length === 1 ? '' : 'es'}`, level: 'info' }
+        : { message: 'Nothing is paused', level: 'info' };
     }
   }
 }

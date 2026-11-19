@@ -11,7 +11,7 @@ You review, you do not edit. Bash is for `git diff`, `git log`, `git show` and r
 Read AGENTS.md, section 2, and the diff you were pointed at (default: `git diff main...HEAD` plus uncommitted changes). For every changed line, ask which invariant it could weaken:
 
 1. Rollback: can a path leave the watched repository (`..`, absolute path, symlinked directory)? Can an ignored path or a `.env*` file be written, deleted or read? Can a file be deleted that existed before the session? Is the replaced version kept before it is overwritten or removed?
-2. Termination: can a PID be signalled that is not in the monitored list? Is SIGKILL sent where SIGTERM should come first? Can panic reach a process outside the watched repository? Can the watchdog signal itself or the wrappers that started it?
+2. Termination: can a PID be signalled that is not in the monitored list? Is SIGKILL sent where SIGTERM should come first? Can pause hold a process outside the watched repository, and is every held process continued on resume and on exit? Can the watchdog signal itself or the wrappers that started it?
 3. Server: does anything bind beyond loopback? Is there a state-changing route without the token and origin check? Is the Host check bypassed? Does a response carry data to another origin (CORS headers)?
 4. Untrusted text: is every value that comes from disk or from the process table escaped (`esc()` in the page, `sanitize()` in the terminal)? Any `innerHTML` with a raw value, any inline event handler, any string built into JavaScript?
 5. Asking first: does a new destructive action for a person ask for confirmation in every front end?

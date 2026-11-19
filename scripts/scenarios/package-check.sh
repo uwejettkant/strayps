@@ -60,7 +60,7 @@ mkdir "$WORK/elsewhere" && cd "$WORK/elsewhere"
 RUN=$!
 for _ in $(seq 1 40); do grep -q 'Dashboard:   http' run.log 2>/dev/null && break; sleep 0.1; done
 URL=$(sed -n 's/.*Dashboard:   \(http[^ ]*\).*/\1/p' run.log | sed 's/localhost/127.0.0.1/')
-curl -s "$URL/" | grep -q 'id="panic-dialog"' \
+curl -s "$URL/" | grep -q 'id="confirm-dialog"' \
   && pass "dashboard page is served from the installed package" || fail "dashboard page"
 wait "$RUN" && grep -q 'agent-leash stopped after' run.log \
   && pass "installed binary stops cleanly on 'exit'" || fail "exit via stdin"

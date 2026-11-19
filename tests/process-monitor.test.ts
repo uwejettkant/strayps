@@ -240,7 +240,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     expect(list).toHaveLength(1);
     expect(list[0].pid).toBe(11905);
     expect(list[0].status).toBe('STALE');
-    expect(list[0].panicTarget).toBe(false);
+    expect(list[0].pauseTarget).toBe(false);
     expect(list[0].memoryMb).toBe(67.7);
     expect(list[0].uptime).toBe('13d 19h');
   });
@@ -270,6 +270,6 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     const list = await monitor.scan(10_000);
     expect(list).toHaveLength(1);
     expect(list[0].status).not.toBe('STALE');
-    expect(list[0].panicTarget).toBe(true);
+    expect(list[0].pauseTarget).toBe(true);
   });
 });

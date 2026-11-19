@@ -190,7 +190,7 @@ function processRows(view: FrameView, count: number): Seg[][] {
     const host = proc.host && proc.host !== 'detached' ? ` [${sanitize(proc.host)}]` : '';
     return [
       seg(` ${padEnd(String(proc.pid), 7)} `, p.strong),
-      seg(padEnd(proc.status, 8), statusStyle(p, proc)),
+      seg(padEnd(proc.paused ? 'PAUSED' : proc.status, 8), proc.paused ? p.warn : statusStyle(p, proc)),
       seg(` ${padEnd(whereLabel(proc), 13)}`, p.dim),
       seg(
         ` ${padStart(`${proc.memoryMb.toFixed(1)} MB`, 9)} ${padStart(sanitize(proc.uptime), 8)} ${padStart(`${proc.cpu.toFixed(1)}%`, 6)}  `,
@@ -251,7 +251,7 @@ function helpRows(view: FrameView): Seg[][] {
   ]);
   rows.push([seg('')]);
   rows.push([
-    seg(' Destructive commands (revert, kill, panic) always ask before they act.', p.dim),
+    seg(' Commands that change something (revert, kill, pause) always ask before they act.', p.dim),
   ]);
   rows.push([seg(' Press any key to return.', p.dim)]);
   return rows;

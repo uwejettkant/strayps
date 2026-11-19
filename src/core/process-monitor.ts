@@ -51,10 +51,12 @@ export interface MonitoredProcess {
   /** True if the process runs inside the watched repository or descends from a process that does. */
   inWatchedRepo: boolean;
   /**
-   * `panic` stops this process: a coding agent of the watched repository, or a process one of them
-   * started. Dev servers, editors and other sessions are never panic targets.
+   * `pause` holds this process: a coding agent of the watched repository, or a process one of them
+   * started. Dev servers, editors and other sessions are never paused.
    */
-  panicTarget: boolean;
+  pauseTarget: boolean;
+  /** Held with SIGSTOP by agent-leash; `resume` continues it where it stopped. */
+  paused: boolean;
   /** Application the process tree hangs off (VS Code, Claude Desktop, a terminal, ...), if recognizable. */
   host?: string;
   /** Only for agents: how the process was recognized as one. */
@@ -415,6 +417,7 @@ export class ProcessMonitor extends EventEmitter {
 
   private timer: NodeJS.Timeout | null = null;
   private tracked: Map<number, MonitoredProcess> = new Map();
+  private paused: Set<number> = new Set();
   private alertedPids: Set<number> = new Set();
   private lastFileActivityAt: number = Date.now();
   private scanInFlight: Promise<MonitoredProcess[]> | null = null;
@@ -463,6 +466,8 @@ export class ProcessMonitor extends EventEmitter {
       clearInterval(this.timer);
       this.timer = null;
     }
+    // Never leave an agent held when the watchdog goes away
+    this.resumePaused();
     for (const pid of Array.from(this.terminating.keys())) {
       this.escalateKill(pid);
     }
@@ -524,7 +529,7 @@ export class ProcessMonitor extends EventEmitter {
 
   /**
    * Performs a single scan of running processes and updates inactivity timers,
-   * real RAM usage (MB), uptime, classification and panic targets.
+   * real RAM usage (MB), uptime, classification and pause targets.
    * Overlapping calls share the scan that is already running.
    */
   public scan(now: number = Date.now()): Promise<MonitoredProcess[]> {
@@ -760,12 +765,18 @@ export class ProcessMonitor extends EventEmitter {
         reason += ' · recognized as an agent by the MCP server it started';
       }
 
-      // Panic stops the agents of this repository and what they started, nothing else:
+      // Pause holds the agents of this repository and what they started, nothing else:
       // not a dev server from the user's terminal, not an editor, not another session.
       const agentPid = nearestAgent(raw.pid);
-      const panicTarget =
+      const pauseTarget =
         belongsToWatchedRepo &&
         (category === 'agent' || (agentPid !== undefined && belongsToRepo(agentPid)));
+      // A held process uses no CPU by design: that is neither stale nor frozen
+      const paused = this.paused.has(raw.pid);
+      if (paused) {
+        if (status === 'FROZEN' || status === 'STALE') status = 'IDLE';
+        reason = 'Paused by agent-leash; resume continues it';
+      }
 
       const monitored: MonitoredProcess = {
         pid: raw.pid,
@@ -785,7 +796,8 @@ export class ProcessMonitor extends EventEmitter {
         status,
         reason,
         inWatchedRepo: belongsToWatchedRepo,
-        panicTarget,
+        pauseTarget,
+        paused,
         host,
         ...(category === 'agent' ? { detectedBy: detectedBy ?? 'name' } : {}),
         agentPid,
@@ -805,6 +817,7 @@ export class ProcessMonitor extends EventEmitter {
     for (const pid of Array.from(this.tracked.keys())) {
       if (!seenPids.has(pid)) {
         this.tracked.delete(pid);
+        this.paused.delete(pid);
         this.alertedPids.delete(pid);
       }
     }
@@ -850,6 +863,8 @@ export class ProcessMonitor extends EventEmitter {
 
     const sent = this.processKiller(pid, signal);
     if (!sent) return false;
+    // A held process only acts on SIGTERM once it runs again
+    if (this.paused.delete(pid)) this.processKiller(pid, 'SIGCONT');
 
     this.tracked.delete(pid);
     this.alertedPids.delete(pid);
@@ -879,32 +894,48 @@ export class ProcessMonitor extends EventEmitter {
     }
   }
 
-  /** What `panic` would stop right now: the agents of the watched repository and what they started. */
-  public getPanicTargets(): MonitoredProcess[] {
-    return this.getProcesses().filter((proc) => proc.panicTarget);
+  /** What `pause` would hold right now: the agents of the watched repository and what they started. */
+  public getPauseTargets(): MonitoredProcess[] {
+    return this.getProcesses().filter((proc) => proc.pauseTarget && !proc.paused);
+  }
+
+  /** PIDs agent-leash is holding right now. */
+  public getPausedPids(): number[] {
+    return Array.from(this.paused);
   }
 
   /**
-   * Terminates the panic targets: the coding agents of the watched repository and the processes
-   * they started. Dev servers, editors and sessions in other repositories are left alone.
+   * Holds the pause targets with SIGSTOP. Nothing is terminated and nothing is lost: `resume`
+   * continues every process where it stopped. A long autonomous run is paid work; an emergency
+   * brake must not throw it away.
    */
-  public killPanicTargets(signal: NodeJS.Signals = 'SIGTERM'): number[] {
-    return this.killWhere((proc) => proc.panicTarget, signal);
-  }
-
-  private killWhere(
-    predicate: (proc: MonitoredProcess) => boolean,
-    signal: NodeJS.Signals = 'SIGTERM',
-  ): number[] {
-    const killedPids: number[] = [];
-    for (const proc of Array.from(this.tracked.values())) {
-      if (!predicate(proc)) continue;
-      if (this.killProcess(proc.pid, signal)) {
-        killedPids.push(proc.pid);
+  public pauseTargets(): number[] {
+    const held: number[] = [];
+    for (const proc of this.getPauseTargets()) {
+      if (proc.pid === this.selfPid) continue;
+      if (this.processKiller(proc.pid, 'SIGSTOP')) {
+        this.paused.add(proc.pid);
+        proc.paused = true;
+        held.push(proc.pid);
       }
     }
-    return killedPids;
+    if (held.length > 0) this.emit('processes-paused', held);
+    return held;
   }
+
+  /** Continues every process agent-leash is holding (SIGCONT). */
+  public resumePaused(): number[] {
+    const resumed: number[] = [];
+    for (const pid of Array.from(this.paused)) {
+      this.paused.delete(pid);
+      const proc = this.tracked.get(pid);
+      if (proc) proc.paused = false;
+      if (this.processKiller(pid, 'SIGCONT')) resumed.push(pid);
+    }
+    if (resumed.length > 0) this.emit('processes-resumed', resumed);
+    return resumed;
+  }
+
 
   private classifyProcess(
     raw: RawProcessInfo,

@@ -183,7 +183,7 @@ export function formatProcessTable(
     const used = fixed.length + 8 + 1 + 13 + 1 + tail.length;
     const rest = truncate(`${sanitize(proc.cmd)}${where}${host}`, Math.max(10, width - used));
     lines.push(
-      `${fixed}${style(padEnd(proc.status, 8))} ${palette.dim(padEnd(whereLabel(proc), 13))} ${tail}${rest}`,
+      `${fixed}${(proc.paused ? palette.warn : style)(padEnd(proc.paused ? 'PAUSED' : proc.status, 8))} ${palette.dim(padEnd(whereLabel(proc), 13))} ${tail}${rest}`,
     );
   }
   return lines;

@@ -87,42 +87,37 @@ describe('WatchdogSession', () => {
     expect(byPid.get(301)?.status).toBe('FROZEN');
     // no bulk cleanup: a stale verdict has been wrong about sessions still in use
     expect('killStale' in h.session).toBe(false);
-    expect(h.session.getPanicTargets().map((p) => p.pid)).toEqual([100]);
+    expect(h.session.getPauseTargets().map((p) => p.pid)).toEqual([100]);
     expect(h.kills).toEqual([]);
   });
 
-  it('panic stops the watched repository hard and leaves other sessions alone', async () => {
+  it('pause holds the agents of the watched repository, touches no file and logs it; resume continues them', async () => {
     const h = createHarness({
       files: { 'a.ts': 'a\n' },
-      watcher: { keepDiscarded: false },
       procs: [
         { pid: 100, name: 'claude', cmd: 'claude', cpu: 5, etime: '10:00' },
         { pid: 101, ppid: 100, name: 'node', cmd: 'node some-mcp-server', cwd: '/', cpu: 0, etime: '10:00' },
         { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, cpu: 9, etime: '03-00:00:00' },
-        { pid: 301, ppid: 300, name: 'node', cmd: 'node some-mcp-server', cwd: OTHER, etime: '03-00:00:00' },
       ],
     });
     h.procs[0].cwd = h.dir;
     h.watcher.createCheckpoint();
     await h.monitor.scan();
-
-    writeFiles(h.dir, { 'a.ts': 'broken\n', 'rogue.ts': 'rogue\n' });
+    writeFiles(h.dir, { 'a.ts': 'agent work\n' });
     h.watcher.handleFileSystemEvent('change', 'a.ts');
-    h.watcher.handleFileSystemEvent('add', 'rogue.ts');
 
-    const result = h.session.panic();
+    expect(h.session.getPauseTargets().map((p) => p.pid).sort()).toEqual([100, 101]);
+    expect(h.session.pause().pids.sort()).toEqual([100, 101]);
+    expect(h.kills.map((k) => k.signal)).toEqual(['SIGSTOP', 'SIGSTOP']);
+    // nothing is rolled back, nothing leaves the list
+    expect(read(h.dir, 'a.ts')).toBe('agent work\n');
+    expect(h.session.getSnapshot().processes.filter((p) => p.paused).map((p) => p.pid).sort()).toEqual([100, 101]);
+    expect(h.session.getSnapshot().events[0]).toMatchObject({ type: 'process-paused', severity: 'warn' });
 
-    expect(result.killedPids.sort()).toEqual([100, 101]);
-    expect(h.kills).toEqual([
-      { pid: 100, signal: 'SIGKILL' },
-      { pid: 101, signal: 'SIGKILL' },
-    ]);
-    expect(result.restoredFiles.sort()).toEqual(['a.ts', 'rogue.ts']);
-    expect(result.restoredCount).toBe(2);
-    expect(read(h.dir, 'a.ts')).toBe('a\n');
-    expect(exists(h.dir, 'rogue.ts')).toBe(false);
-    // the session in the other repository is still running
-    expect(h.session.getSnapshot().processes.map((p) => p.pid).sort()).toEqual([300, 301]);
+    expect(h.session.resume().pids.sort()).toEqual([100, 101]);
+    expect(h.kills.slice(2).map((k) => k.signal)).toEqual(['SIGCONT', 'SIGCONT']);
+    expect(h.session.getSnapshot().events[0].type).toBe('process-resumed');
+    expect(h.session.resume().pids).toEqual([]);
   });
 
   it('re-arms the circuit breaker for a file once it has been rolled back', () => {

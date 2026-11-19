@@ -100,6 +100,8 @@ export function createHarness(options: HarnessOptions = {}): Harness {
       kills.push({ pid, signal });
       const index = procs.findIndex((p) => p.pid === pid);
       if (index === -1) return false;
+      // pause and resume hold and continue a process; they never end it
+      if (signal === 'SIGSTOP' || signal === 'SIGCONT') return true;
       if (signal === 'SIGKILL' || !stubborn.has(pid)) {
         procs.splice(index, 1);
       }

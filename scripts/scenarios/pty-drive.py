@@ -26,7 +26,7 @@ Example (safe: --demo touches no files and no real processes):
     node dist/cli.js watch --demo --no-dashboard :: \
     wait:8 screen:story type:clean key:enter screen:confirm type:y screen:done type:exit key:enter
 
-Never drive kill, clean or panic against an instance that runs without --demo.
+Never drive kill or pause against an instance that runs without --demo.
 POSIX only (pty, termios).
 """
 import fcntl, os, pty, re, select, signal, struct, sys, termios, time

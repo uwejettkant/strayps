@@ -93,7 +93,7 @@ export class PlainReporter {
     }
     if (result.confirm) {
       this.pendingConfirm = result.confirm;
-      write(this.palette.warn(`? ${result.confirm.prompt} Type "yes" to confirm:`));
+      write(this.palette.warn(`? ${result.confirm.prompt} Type "yes" (or y) to confirm:`));
       return;
     }
     if (result.showHelp) {

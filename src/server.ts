@@ -205,17 +205,15 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     return c.json({ ok: restored, filePath: body.filePath, status: getStatusSnapshot() });
   });
 
-  // PANIC: stop the agents of the watched repository (and what they started), roll back all files
-  app.post('/api/panic', (c) => {
-    const result = session.panic();
-    return c.json({
-      ok: true,
-      restoredFiles: result.restoredFiles,
-      restoredCount: result.restoredCount,
-      skippedFiles: result.skippedFiles,
-      killedPids: result.killedPids,
-      status: getStatusSnapshot(),
-    });
+  // Emergency brake: hold the agents of the watched repository (and what they started)
+  app.post('/api/pause', (c) => {
+    const result = session.pause();
+    return c.json({ ok: true, pausedPids: result.pids, status: getStatusSnapshot() });
+  });
+
+  app.post('/api/resume', (c) => {
+    const result = session.resume();
+    return c.json({ ok: true, resumedPids: result.pids, status: getStatusSnapshot() });
   });
 
   // Live SSE Event Stream

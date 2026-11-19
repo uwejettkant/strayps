@@ -108,7 +108,7 @@ describe('ProcessMonitor classification (production rules)', () => {
 
     expect(list[0].status).toBe('IDLE');
     expect(list[0].inWatchedRepo).toBe(true);
-    expect(list[0].panicTarget).toBe(true);
+    expect(list[0].pauseTarget).toBe(true);
     expect(onFrozen).not.toHaveBeenCalled();
   });
 
@@ -128,7 +128,7 @@ describe('ProcessMonitor classification (production rules)', () => {
     // an observation, not a verdict: age alone has been wrong about sessions still in use
     expect(session.reason).not.toMatch(/safe to kill/i);
     expect(session.inWatchedRepo).toBe(false);
-    expect(session.panicTarget).toBe(false);
+    expect(session.pauseTarget).toBe(false);
     // the editor itself is not an agent process
     expect(list.map((p) => p.pid).sort()).toEqual([502, 503]);
   });
@@ -374,7 +374,7 @@ describe('ProcessMonitor termination', () => {
     expect(kills).toHaveLength(2);
   });
 
-  it('limits panic to the agents of the watched repository and what they started', async () => {
+  it('pauses only the agents of the watched repository and what they started, and resumes them', async () => {
     const { monitor, kills } = setup([
       agent(100, REPO, { cpu: 1 }),
       mcp(101, 100, { cwd: '/' }),
@@ -389,11 +389,42 @@ describe('ProcessMonitor termination', () => {
     ]);
     await monitor.scan(1_000);
 
-    expect(monitor.getPanicTargets().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101]);
-    const killed = monitor.killPanicTargets('SIGKILL');
-    expect(killed.sort((a, b) => a - b)).toEqual([100, 101]);
-    expect(kills.every((k) => k.signal === 'SIGKILL')).toBe(true);
-    expect(kills.map((k) => k.pid).sort((a, b) => a - b)).toEqual([100, 101]);
+    expect(monitor.getPauseTargets().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101]);
+    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101]);
+    // held, not terminated: nothing leaves the list, nothing is killed
+    expect(kills.map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGSTOP', '101:SIGSTOP']);
+    expect(monitor.getProcesses()).toHaveLength(6);
+    expect(monitor.getPausedPids().sort((a, b) => a - b)).toEqual([100, 101]);
+    // pausing again holds nothing twice
+    expect(monitor.pauseTargets()).toEqual([]);
+
+    expect(monitor.resumePaused().sort((a, b) => a - b)).toEqual([100, 101]);
+    expect(kills.slice(2).map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGCONT', '101:SIGCONT']);
+    expect(monitor.getPausedPids()).toEqual([]);
+  });
+
+  it('never leaves an agent held when the watchdog stops', async () => {
+    const { monitor, kills } = setup([agent(100, REPO, { cpu: 1 })]);
+    await monitor.scan(1_000);
+    monitor.pauseTargets();
+    monitor.stop();
+    expect(kills.map((k) => k.signal)).toEqual(['SIGSTOP', 'SIGCONT']);
+  });
+
+  it('does not report a held process as frozen, and says why it is quiet', async () => {
+    const { monitor } = setup([agent(100, REPO, { cpu: 1 }), mcp(101, 100, { cwd: '/' })]);
+    const onFrozen = vi.fn();
+    monitor.on('process-frozen', onFrozen);
+    const t0 = 5_000_000;
+    await monitor.scan(t0);
+    monitor.pauseTargets();
+    const list = await monitor.scan(t0 + 10 * 60_000);
+    for (const proc of list) {
+      expect(proc.paused).toBe(true);
+      expect(['IDLE', 'STANDBY', 'ACTIVE']).toContain(proc.status);
+      expect(proc.reason).toBe('Paused by agent-leash; resume continues it');
+    }
+    expect(onFrozen).not.toHaveBeenCalled();
   });
 
   it('the default killer cannot reach a real process from inside the test suite', async () => {

@@ -133,15 +133,15 @@
           </p>
         </div>
 
-        <!-- Panic CTA -->
+        <!-- Emergency brake: pause holds the agents, resume continues them -->
         <div class="flex flex-wrap items-center gap-4">
           <button
             type="button"
-            id="panic-open-btn"
-            class="px-4 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 text-white font-semibold text-xs sm:text-sm tracking-wide uppercase shadow-lg shadow-red-950/60 border border-red-400/40 transition flex items-center gap-2 cursor-pointer"
+            id="pause-btn"
+            class="px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-[#1A1205] font-semibold text-xs sm:text-sm tracking-wide uppercase border border-amber-300/40 transition cursor-pointer"
+            title="Holds the agents of this repository; nothing is lost"
           >
-            <span class="w-2 h-2 rounded-full bg-white animate-ping"></span>
-            PANIC: STOP AGENTS &amp; ROLL BACK
+            Pause agents
           </button>
         </div>
       </div>
@@ -232,19 +232,19 @@
     </footer>
   </div>
 
-  <!-- Native modal confirmation dialog for every destructive action (revert, kill, panic) -->
+  <!-- Native modal confirmation dialog for every action that changes something (revert, kill, pause) -->
   <dialog
-    id="panic-dialog"
-    aria-labelledby="panic-dialog-title"
+    id="confirm-dialog"
+    aria-labelledby="confirm-dialog-title"
     closedby="any"
     class="bg-[#0D120F] text-[#E4ECE7] border border-red-500/50 rounded-xl p-6 max-w-md w-full shadow-2xl"
   >
-    <h2 id="panic-dialog-title" class="text-lg font-semibold text-[#F2F7F4] flex items-center gap-2">
+    <h2 id="confirm-dialog-title" class="text-lg font-semibold text-[#F2F7F4] flex items-center gap-2">
       <span class="w-2.5 h-2.5 rounded-full bg-red-500 inline-block"></span>
-      <span id="panic-dialog-heading">Confirm Panic</span>
+      <span id="confirm-dialog-heading">Confirm</span>
     </h2>
-    <p id="panic-dialog-body" class="text-xs text-[#C9D6CE] mt-2 leading-relaxed">
-      Stops the agents of this repository and rolls back what they changed in the last 10 minutes. Nothing happens before you confirm.
+    <p id="confirm-dialog-body" class="text-xs text-[#C9D6CE] mt-2 leading-relaxed">
+      Nothing happens before you confirm.
     </p>
     <form method="dialog" class="mt-5 flex items-center justify-end gap-3">
       <button
@@ -258,10 +258,10 @@
       <button
         type="submit"
         value="confirm"
-        id="panic-dialog-confirm"
+        id="confirm-dialog-confirm"
         class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-xs font-semibold text-white uppercase tracking-wide cursor-pointer"
       >
-        Execute Panic
+        Confirm
       </button>
     </form>
   </dialog>
@@ -280,43 +280,43 @@
         .replace(/'/g, '&#39;');
     }
 
-    const panicDialog = document.getElementById('panic-dialog');
-    const panicOpenBtn = document.getElementById('panic-open-btn');
-    const dialogHeading = document.getElementById('panic-dialog-heading');
-    const dialogBody = document.getElementById('panic-dialog-body');
-    const dialogConfirm = document.getElementById('panic-dialog-confirm');
+    const confirmDialog = document.getElementById('confirm-dialog');
+    const pauseBtn = document.getElementById('pause-btn');
+    const dialogHeading = document.getElementById('confirm-dialog-heading');
+    const dialogBody = document.getElementById('confirm-dialog-body');
+    const dialogConfirm = document.getElementById('confirm-dialog-confirm');
     let pendingConfirm = null;
 
     // Fallback for browsers without `<dialog closedby="any">`
-    if (!('closedBy' in HTMLDialogElement.prototype) && panicDialog) {
+    if (!('closedBy' in HTMLDialogElement.prototype) && confirmDialog) {
       const outside = (e, dialog) => {
         const r = dialog.getBoundingClientRect();
         return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
       };
       let pressedOutside = false;
-      panicDialog.addEventListener('pointerdown', (e) => {
-        pressedOutside = outside(e, panicDialog);
+      confirmDialog.addEventListener('pointerdown', (e) => {
+        pressedOutside = outside(e, confirmDialog);
       });
-      panicDialog.addEventListener('pointerup', (e) => {
-        if (pressedOutside && outside(e, panicDialog)) panicDialog.close();
+      confirmDialog.addEventListener('pointerup', (e) => {
+        if (pressedOutside && outside(e, confirmDialog)) confirmDialog.close();
       });
     }
 
     /** Asks before anything destructive. Resolves the action only on an explicit confirm. */
     function confirmAction({ heading, body, confirmLabel, run }) {
-      if (!panicDialog) return;
+      if (!confirmDialog) return;
       dialogHeading.textContent = heading;
       dialogBody.textContent = body;
       dialogConfirm.textContent = confirmLabel;
       pendingConfirm = run;
-      if (!panicDialog.open) panicDialog.showModal();
+      if (!confirmDialog.open) confirmDialog.showModal();
     }
 
-    if (panicDialog) {
-      panicDialog.addEventListener('close', async () => {
-        const choice = panicDialog.returnValue;
+    if (confirmDialog) {
+      confirmDialog.addEventListener('close', async () => {
+        const choice = confirmDialog.returnValue;
         const run = pendingConfirm;
-        panicDialog.returnValue = '';
+        confirmDialog.returnValue = '';
         pendingConfirm = null;
         if (choice === 'confirm' && run) {
           await run();
@@ -369,41 +369,47 @@
       }
     }
 
-    async function triggerPanic() {
-      setToast('executing PANIC...', true);
-      const data = await post('/api/panic');
+    async function pauseAgents() {
+      const data = await post('/api/pause');
       if (data) {
         renderStatus(data.status);
-        setToast(
-          'PANIC complete: ' + data.restoredCount + ' files restored, ' + data.killedPids.length + ' processes terminated',
-          true
-        );
+        setToast('paused ' + data.pausedPids.length + ' processes; resume continues them', true);
       }
     }
 
-    if (panicOpenBtn) {
-      panicOpenBtn.addEventListener('click', () => {
-        const targets = ((lastStatus && lastStatus.processes) || []).filter((p) => p.panicTarget);
-        const files = ((lastStatus && lastStatus.panicFiles) || []).length;
-        const older = ((lastStatus && lastStatus.modifiedFiles) || []).length - files;
+    async function resumeAgents() {
+      const data = await post('/api/resume');
+      if (data) {
+        renderStatus(data.status);
+        setToast('resumed ' + data.resumedPids.length + ' processes');
+      }
+    }
+
+    if (pauseBtn) {
+      pauseBtn.addEventListener('click', () => {
+        const procs = (lastStatus && lastStatus.processes) || [];
+        // Continuing what agent-leash itself held is not destructive: no dialog
+        if (procs.some((p) => p.paused)) {
+          resumeAgents();
+          return;
+        }
+        const targets = procs.filter((p) => p.pauseTarget);
+        if (targets.length === 0) {
+          setToast('no agent of this repository is running, nothing to pause');
+          return;
+        }
         const listed = targets
           .slice(0, 5)
-          .map((p) => 'PID ' + p.pid + ' ' + p.cmd)
+          .map((p) => 'PID ' + p.pid + ' (' + p.cmd + ')')
           .join(', ');
-        const stop =
-          targets.length > 0
-            ? 'Sends SIGKILL to ' + targets.length + ' process' + (targets.length === 1 ? '' : 'es') +
-              ' of this repository’s agents: ' + listed + (targets.length > 5 ? ', …' : '') + '. '
-            : 'No agent of this repository is running, so no process is stopped. ';
         confirmAction({
-          heading: 'Confirm Panic',
+          heading: 'Pause ' + targets.length + ' process' + (targets.length === 1 ? '' : 'es') + '?',
           body:
-            stop +
-            'Rolls back ' + files + ' file' + (files === 1 ? '' : 's') + ' changed in the last 10 minutes to the version before their latest changes' +
-            (older > 0 ? '; ' + older + ' older change' + (older === 1 ? ' stays' : 's stay') + ' as ' + (older === 1 ? 'it is' : 'they are') : '') + '. ' +
+            'Holds the agents of this repository and what they started: ' + listed + (targets.length > 5 ? ', …' : '') +
+            '. Nothing is terminated and no file is touched; Resume continues them where they stopped. ' +
             'Dev servers, editors and sessions in other repositories are not touched.',
-          confirmLabel: 'Execute Panic',
-          run: triggerPanic,
+          confirmLabel: 'Pause',
+          run: pauseAgents,
         });
       });
     }
@@ -436,9 +442,9 @@
         confirmAction({
           heading: 'Terminate PID ' + pid + '?',
           body:
-            proc.cmd + (proc.cwd ? ' in ' + proc.cwd : '') + '. ' + (proc.reason || '') +
-            (proc.category === 'agent' ? ' Its agent session ends.' : '') +
-            ' It gets SIGTERM first and SIGKILL only if it does not exit.',
+            proc.cmd + (proc.cwd ? ' in ' + proc.cwd : '') + '. ' + (proc.reason ? proc.reason + '. ' : '') +
+            (proc.category === 'agent' ? 'Its agent session ends. ' : '') +
+            'It gets SIGTERM first and SIGKILL only if it does not exit.',
           confirmLabel: 'Terminate PID ' + pid,
           run: () => killProcess(pid),
         });
@@ -484,6 +490,11 @@
         'max ' + cfg.limits.maxEditsPerFilePerMinute + ' edits/file/min';
 
       const procs = state.processes || [];
+      if (pauseBtn) {
+        const anyPaused = procs.some((p) => p.paused);
+        pauseBtn.textContent = anyPaused ? 'Resume agents' : 'Pause agents';
+        pauseBtn.title = anyPaused ? 'Continues the held processes' : 'Holds the agents of this repository; nothing is lost';
+      }
       const stale = procs.filter(isStaleOrFrozen);
       const staleMb = stale.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
       const totalMb = procs.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
@@ -524,7 +535,8 @@
               ? 'bg-amber-950/80 text-amber-300 border-amber-500/40'
               : 'bg-[#16201B] text-[#5BE49B] border-[#1F2C25]';
 
-          const rollbackBtn = ev.filePath
+          // A rollback line reports a revert; offering another one there only confuses
+          const rollbackBtn = ev.filePath && ev.type !== 'rollback' && ev.type !== 'rollback-failed'
             ? `<button type="button" data-action="revert" data-path="${esc(ev.filePath)}" class="text-[11px] px-2 py-0.5 rounded border border-[#2E4237] text-[#B4C3BA] hover:border-[#5BE49B] hover:text-[#F2F7F4] cursor-pointer">revert</button>`
             : '';
 
@@ -570,8 +582,10 @@
             : proc.host === 'detached'
             ? '<span class="px-1.5 py-0.2 rounded bg-[#0B0F0D] text-[#B4C3BA] border border-[#2E4237] text-[10px]">DETACHED</span>'
             : '<span class="px-1.5 py-0.2 rounded bg-[#0B0F0D] text-[#B4C3BA] border border-[#2E4237] text-[10px]">ELSEWHERE</span>';
-          const panicPill = proc.panicTarget
-            ? '<span class="px-1.5 py-0.2 rounded bg-red-950/60 text-red-300 border border-red-500/40 text-[10px]" title="Panic stops this process">PANIC TARGET</span>'
+          const pausePill = proc.paused
+            ? '<span class="px-1.5 py-0.2 rounded bg-amber-950/60 text-amber-300 border border-amber-500/40 text-[10px]">PAUSED</span>'
+            : proc.pauseTarget
+            ? '<span class="px-1.5 py-0.2 rounded bg-[#0B0F0D] text-amber-300 border border-amber-500/30 text-[10px]" title="Pause holds this process">AGENT TREE</span>'
             : '';
 
           const hostPill =
@@ -599,7 +613,7 @@
                   <span class="font-semibold text-[#F2F7F4]">PID ${pid}</span>
                   <span class="px-1.5 py-0.2 rounded border text-[10px] uppercase ${statusBadge}">${esc(proc.status)}</span>
                   ${wherePill}
-                  ${panicPill}
+                  ${pausePill}
                   ${hostPill}
                   <span class="text-[#8FA197]">[${esc(proc.category)}]</span>
                 </div>

@@ -10,6 +10,7 @@ import {
 import {
   createPalette,
   formatEventLine,
+  formatProcessTable,
   sanitize,
   shouldUseColor,
   truncate,
@@ -63,7 +64,9 @@ describe('command parsing', () => {
     expect(parseCommand('rollback a b.ts')).toEqual({ kind: 'revert', target: 'a b.ts' });
     expect(parseCommand('kill 4711')).toEqual({ kind: 'kill', pid: 4711 });
     expect(parseCommand('k 12')).toEqual({ kind: 'kill', pid: 12 });
-    expect(parseCommand('panic')).toEqual({ kind: 'panic' });
+    expect(parseCommand('pause')).toEqual({ kind: 'pause' });
+    expect(parseCommand('resume')).toEqual({ kind: 'resume' });
+    expect(parseCommand('panic')).toMatchObject({ kind: 'invalid', message: expect.stringContaining('replaced by pause') });
   });
 
   it('has no bulk cleanup, and says how to terminate one process instead', () => {
@@ -111,9 +114,9 @@ describe('running commands against a session', () => {
     expect(kill.confirm?.prompt).toContain('PID 300');
     expect(kill.confirm?.prompt).toContain('Its agent session ends.');
     expect(kill.confirm?.prompt).not.toMatch(/stale|safe/i);
-    const panic = runCommand(h.session, parseCommand('panic'));
-    expect(panic.confirm?.prompt).toBe(
-      "PANIC: roll back 2 files changed in the last 10 min and stop 1 process of this repo's agents (claude 100)?",
+    const pause = runCommand(h.session, parseCommand('pause'));
+    expect(pause.confirm?.prompt).toBe(
+      "Pause 1 process of this repo's agents (claude 100)? Nothing is lost; resume continues them.",
     );
 
     // nothing happened yet
@@ -126,9 +129,16 @@ describe('running commands against a session', () => {
     expect(kill.confirm!.run().message).toBe('Sent SIGTERM to PID 300');
     expect(h.kills).toEqual([{ pid: 300, signal: 'SIGTERM' }]);
 
-    expect(panic.confirm!.run().message).toMatch(/^PANIC done: 1 file rolled back, 1 process killed$/);
-    expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGKILL' });
-    expect(read(h.dir, 'src/api/client.ts')).toBe('client\n');
+    expect(pause.confirm!.run().message).toBe('Paused 1 process; type resume to continue');
+    expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGSTOP' });
+    expect(formatProcessTable(h.session.getSnapshot().processes, createPalette(false, false)).join('\n')).toMatch(/100\s+PAUSED\s+THIS REPO/);
+    // pausing touches no file
+    expect(read(h.dir, 'src/api/client.ts')).toBe('changed\n');
+    // continuing is not destructive: no confirmation
+    const resumed = runCommand(h.session, parseCommand('resume'));
+    expect(resumed.message).toBe('Resumed 1 process');
+    expect(resumed.confirm).toBeUndefined();
+    expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGCONT' });
   });
 
   it('refuses targets that are not on the lists', async () => {
@@ -141,17 +151,19 @@ describe('running commands against a session', () => {
     expect(h.kills).toEqual([]);
   });
 
-  it('says so when panic has no agent to stop', async () => {
+  it('says so when there is no agent to pause or nothing to resume', async () => {
     const h = createHarness();
-    const panic = runCommand(h.session, parseCommand('panic'));
-    expect(panic.confirm?.prompt).toBe('PANIC: roll back 0 files changed in the last 10 min (no agent of this repo is running)?');
+    const pause = runCommand(h.session, parseCommand('pause'));
+    expect(pause.message).toBe('No agent of this repo is running, nothing to pause');
+    expect(pause.confirm).toBeUndefined();
+    expect(runCommand(h.session, parseCommand('resume')).message).toBe('Nothing is paused');
     expect(runCommand(h.session, parseCommand('exit'))).toMatchObject({ exit: true });
     expect(runCommand(h.session, parseCommand('help'))).toMatchObject({ showHelp: true });
   });
 
   it('completes commands, modified files and PIDs', async () => {
     const h = await busyHarness();
-    expect(completeInput(h.session, 'pa').input).toBe('panic ');
+    expect(completeInput(h.session, 'pa').input).toBe('pause ');
     expect(completeInput(h.session, 'revert src/app').input).toBe('revert src/app.ts');
     expect(completeInput(h.session, 'revert client').input).toBe('revert src/api/client.ts');
     expect(completeInput(h.session, 'kill 30').input).toBe('kill 300');
@@ -572,7 +584,7 @@ describe('plain output', () => {
     const { lines, send } = startPlain(h);
 
     await send('kill 300\n');
-    expect(lines.at(-1)).toContain('Type "yes" to confirm');
+    expect(lines.at(-1)).toContain('Type "yes"');
     await send('maybe\n');
     expect(lines.at(-1)).toContain('Cancelled');
     expect(h.kills).toEqual([]);

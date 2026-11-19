@@ -92,10 +92,6 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(watcher.rollbackFile('data/big.bin')).toBe(false);
     expect(exists(repo, 'data/big.bin')).toBe(true);
     expect(fs.statSync(path.join(repo, 'data/big.bin')).size).toBe(big.length + 1);
-
-    const result = watcher.panicRollbackAll();
-    expect(result.skippedFiles).toContain('data/big.bin');
-    expect(exists(repo, 'data/big.bin')).toBe(true);
   });
 
   it('restores a large tracked file from the git checkpoint without touching the index', () => {
@@ -178,7 +174,7 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(watcher.getDiscardDir()).toBeNull();
   });
 
-  it('never reads, restores or copies .env files, not even on panic', () => {
+  it('never reads, restores or copies .env files', () => {
     const repo = makeTmpDir();
     writeFiles(repo, { '.env': 'SECRET=1\n', 'config/.env.production': 'SECRET=2\n', 'a.ts': 'a\n' });
     const watcher = watcherFor(repo);
@@ -188,8 +184,7 @@ describe('RepoWatcher rollback: what it may touch', () => {
     watcher.handleFileSystemEvent('change', 'a.ts');
 
     expect(watcher.rollbackFile('.env')).toBe(false);
-    const result = watcher.panicRollbackAll();
-    expect(result.restoredFiles).toEqual(['a.ts']);
+    expect(watcher.rollbackFile('a.ts')).toBe(true);
     expect(read(repo, '.env')).toBe('SECRET=changed\n');
 
     const discardDir = watcher.getDiscardDir()!;
@@ -347,7 +342,7 @@ describe('RepoWatcher rollback: bookkeeping', () => {
     expect(onHardStop).toHaveBeenCalledTimes(2);
   });
 
-  it('panic restores changed files, removes new ones and reports what it could not restore', () => {
+  it('revert restores changed and deleted files and removes new ones, one at a time', () => {
     const repo = makeTmpDir();
     writeFiles(repo, { 'a.ts': 'a\n', 'b.ts': 'b\n', 'untouched.ts': 'same\n' });
     const watcher = watcherFor(repo, { keepDiscarded: false });
@@ -359,9 +354,7 @@ describe('RepoWatcher rollback: bookkeeping', () => {
     watcher.handleFileSystemEvent('add', 'new.ts');
     watcher.handleFileSystemEvent('unlink', 'b.ts');
 
-    const result = watcher.panicRollbackAll();
-    expect(result.restoredFiles.sort()).toEqual(['a.ts', 'b.ts', 'new.ts']);
-    expect(result.skippedFiles).toEqual([]);
+    for (const file of ['a.ts', 'b.ts', 'new.ts']) expect(watcher.rollbackFile(file), file).toBe(true);
     expect(read(repo, 'a.ts')).toBe('a\n');
     expect(read(repo, 'b.ts')).toBe('b\n');
     expect(exists(repo, 'new.ts')).toBe(false);
@@ -389,8 +382,7 @@ describe('RepoWatcher dry run (demo mode)', () => {
     watcher.handleFileSystemEvent('add', 'src/new.ts');
 
     expect(watcher.rollbackFile('src/auth/session.ts')).toBe(true);
-    const panic = watcher.panicRollbackAll();
-    expect(panic.count).toBeGreaterThan(0);
+    expect(watcher.rollbackFile('src/new.ts')).toBe(true);
 
     expect(read(repo, 'src/auth/session.ts')).toBe('uncommitted work during the demo\n');
     expect(watcher.getDiscardDir()).toBeNull();

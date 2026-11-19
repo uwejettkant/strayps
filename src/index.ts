@@ -48,14 +48,13 @@ export {
 } from './core/process-monitor.js';
 export {
   type KillResult,
-  type PanicResult,
+  type PauseResult,
   type StatusSnapshot,
   WatchdogSession,
   type WatchdogSessionDeps,
 } from './core/session.js';
 export {
   type CheckpointInfo,
-  type PanicRollbackResult,
   RepoWatcher,
   type RepoWatcherOptions,
   type WatchActivityEvent,

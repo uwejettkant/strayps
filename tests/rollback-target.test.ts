@@ -4,7 +4,7 @@ import { cleanupTmpDirs, createHarness, exists, type Harness, read, writeFiles }
 /**
  * Where a rollback goes back to. Decided on 17.11.2026: agent-leash never rolls back on its own
  * (in a long session that would throw away hours of good work); it raises an alarm, and `revert`
- * or `panic` restore the version a file had before its latest series of changes, never further.
+ * restores the version a file had before its latest series of changes, never further.
  */
 afterEach(cleanupTmpDirs);
 
@@ -101,30 +101,5 @@ describe('revert goes back to the last stable version, never further', () => {
     h.session.rollbackFile('src/rogue.ts');
     expect(read(h.dir, 'src/new.ts')).toBe('new helper\n');
     expect(exists(h.dir, 'src/rogue.ts')).toBe(false);
-  });
-});
-
-describe('panic in a long session', () => {
-  it('rolls back only what changed in the last ten minutes, each file to its last stable version', () => {
-    const h = createHarness({ files: { 'a.ts': 'a start\n', 'b.ts': 'b start\n' } });
-    h.watcher.createCheckpoint();
-    const now = Date.now();
-    edit(h, 'a.ts', 'a: an hour of good work\n', now - 60 * MINUTE);
-    edit(h, 'b.ts', 'b: good\n', now - 40 * MINUTE);
-    edit(h, 'b.ts', 'b: loop 1\n', now - 4 * MINUTE);
-    edit(h, 'b.ts', 'b: loop 2\n', now - 4 * MINUTE + 2_000);
-    edit(h, 'c.ts', 'rogue\n', now - 3 * MINUTE, 'add');
-
-    expect(h.session.getSnapshot().panicFiles.sort()).toEqual(['b.ts', 'c.ts']);
-    const result = h.session.panic();
-
-    expect(result.restoredFiles.sort()).toEqual(['b.ts', 'c.ts']);
-    expect(result.keptFiles).toEqual(['a.ts']);
-    expect(read(h.dir, 'a.ts')).toBe('a: an hour of good work\n');
-    expect(read(h.dir, 'b.ts')).toBe('b: good\n');
-    expect(exists(h.dir, 'c.ts')).toBe(false);
-    expect(eventsOf(h, 'panic-rollback')[0].message).toMatch(
-      /^PANIC: 2 files changed in the last 10 minutes rolled back to their last stable version; 1 older change kept/,
-    );
   });
 });

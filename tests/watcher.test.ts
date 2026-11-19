@@ -128,7 +128,7 @@ describe('GuardConfigManager & RepoWatcher', () => {
     expect(fs.readFileSync(targetFile, 'utf-8')).toBe('export const stable = true;\n');
   });
 
-  it('executes panicRollbackAll and restores modified and newly added files via Hono server API', async () => {
+  it('restores modified and newly added files one at a time through the API', async () => {
     const fileA = path.join(tmpDir, 'a.ts');
     const fileB = path.join(tmpDir, 'new-agent-file.ts');
     fs.writeFileSync(fileA, 'const a = 1;\n', 'utf-8');
@@ -161,14 +161,14 @@ describe('GuardConfigManager & RepoWatcher', () => {
     expect(statusJson.modifiedFiles).toContain('a.ts');
     expect(statusJson.modifiedFiles).toContain('new-agent-file.ts');
 
-    // Execute PANIC ROLLBACK & KILL ALL via API
-    const panicRes = await app.request('/api/panic', {
-      method: 'POST',
-      headers: { 'x-leash-token': token },
-    });
-    expect(panicRes.status).toBe(200);
-    const panicJson = (await panicRes.json()) as { ok: boolean };
-    expect(panicJson.ok).toBe(true);
+    for (const filePath of ['a.ts', 'new-agent-file.ts']) {
+      const res = await app.request('/api/rollback-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-leash-token': token },
+        body: JSON.stringify({ filePath }),
+      });
+      expect(((await res.json()) as { ok: boolean }).ok, filePath).toBe(true);
+    }
     expect(fs.readFileSync(fileA, 'utf-8')).toBe('const a = 1;\n');
     expect(fs.existsSync(fileB)).toBe(false);
 
@@ -176,8 +176,8 @@ describe('GuardConfigManager & RepoWatcher', () => {
     const uiRes = await app.request('/');
     expect(uiRes.status).toBe(200);
     const html = await uiRes.text();
-    expect(html).toContain('PANIC: STOP AGENTS &amp; ROLL BACK');
-    expect(html).toContain('id="panic-dialog"');
+    expect(html).toContain('id="pause-btn"');
+    expect(html).toContain('id="confirm-dialog"');
     expect(html).toContain('name="color-scheme" content="light dark"');
   });
 

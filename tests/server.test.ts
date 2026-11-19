@@ -43,7 +43,8 @@ const withToken = (token: string, extra: Record<string, string> = {}) => ({
 
 describe('dashboard API: who may change things', () => {
   const mutations: Array<[string, string | undefined]> = [
-    ['/api/panic', undefined],
+    ['/api/pause', undefined],
+    ['/api/resume', undefined],
     ['/api/kill/100', undefined],
     ['/api/rollback-file', json({ filePath: 'a.ts' })],
   ];
@@ -190,7 +191,7 @@ describe('dashboard API: what the actions do', () => {
     expect(exists(outside, 'victim.txt')).toBe(true);
   });
 
-  it('validates input and reports the full result of a panic', async () => {
+  it('validates input, pauses and resumes the agents of the repository', async () => {
     const h = createHarness({
       files: { 'a.ts': 'a\n' },
       watcher: { keepDiscarded: false },
@@ -213,16 +214,20 @@ describe('dashboard API: what the actions do', () => {
     const mode = await app.request('/api/mode', { method: 'POST', headers: withToken(token), body: json({ mode: 'yolo' }) });
     expect(mode.status).toBe(404);
 
+    // panic is gone: pause replaced it
     const panic = await app.request('/api/panic', { method: 'POST', headers: withToken(token) });
-    expect(panic.status).toBe(200);
-    expect(await panic.json()).toMatchObject({
-      ok: true,
-      restoredFiles: ['a.ts'],
-      restoredCount: 1,
-      skippedFiles: [],
-      killedPids: [100],
-    });
-    expect(h.kills).toEqual([{ pid: 100, signal: 'SIGKILL' }]);
+    expect(panic.status).toBe(404);
+
+    const pause = await app.request('/api/pause', { method: 'POST', headers: withToken(token) });
+    expect(pause.status).toBe(200);
+    expect(await pause.json()).toMatchObject({ ok: true, pausedPids: [100] });
+    expect(read(h.dir, 'a.ts')).toBe('changed\n');
+    const resume = await app.request('/api/resume', { method: 'POST', headers: withToken(token) });
+    expect(await resume.json()).toMatchObject({ ok: true, resumedPids: [100] });
+    expect(h.kills).toEqual([
+      { pid: 100, signal: 'SIGSTOP' },
+      { pid: 100, signal: 'SIGCONT' },
+    ]);
   });
 });
 
@@ -263,7 +268,7 @@ describe('dashboard page', () => {
     try {
       const html = await (await app.request('/')).text();
       expect(html).not.toContain('decoy page');
-      expect(html).toContain('id="panic-dialog"');
+      expect(html).toContain('id="confirm-dialog"');
     } finally {
       process.chdir(previous);
     }
@@ -314,7 +319,7 @@ describe('listening', () => {
 
     const status = await fetch(`http://127.0.0.1:${server.port}/api/status`);
     expect(status.status).toBe(200);
-    const denied = await fetch(`http://127.0.0.1:${server.port}/api/panic`, { method: 'POST' });
+    const denied = await fetch(`http://127.0.0.1:${server.port}/api/pause`, { method: 'POST' });
     expect(denied.status).toBe(403);
     const allowed = await fetch(`http://127.0.0.1:${server.port}/api/rollback-file`, {
       method: 'POST',
