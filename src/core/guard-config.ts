@@ -8,7 +8,7 @@ export interface GuardLimits {
   maxFilesWarn: number;
   /** Files modified in this session before the hard-stop alarm. */
   maxFilesHardStop: number;
-  /** Edits to one file within 60 seconds before the circuit breaker reverts it. */
+  /** Edits to one file within 60 seconds before the circuit breaker raises an alarm. */
   maxEditsPerFilePerMinute: number;
   /** Seconds without CPU or file activity before a process counts as frozen. */
   mcpSilenceTimeoutSec: number;
@@ -79,10 +79,10 @@ export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
   mode: 'strict | balanced | yolo: how file limits and protected files apply',
   'limits.maxFilesWarn': 'files modified in this session before a warning (strict: hard stop)',
   'limits.maxFilesHardStop': 'files modified in this session before the hard-stop alarm',
-  'limits.maxEditsPerFilePerMinute': 'edits to one file within 60 s before the circuit breaker reverts it',
+  'limits.maxEditsPerFilePerMinute': 'edits to one file within 60 s before the circuit breaker raises an alarm',
   'limits.mcpSilenceTimeoutSec': 'seconds without CPU or file activity before a process counts as frozen',
   'limits.staleSessionHours': 'hours after which a session in another repository counts as stale',
-  protectedFiles: 'globs; .env* only warns, every other match is reverted at once',
+  protectedFiles: 'globs; a change to a match raises an alarm (revert restores it); .env* contents are never read',
   agents:
     'more program names to treat as coding agents (exact name, e.g. vibe); agents that start MCP servers are found without this',
 };

@@ -9,7 +9,7 @@
 
 ## 1. What this is
 
-`agent-leash` is a TypeScript CLI that watches a repository while autonomous coding agents work in it. It reports and reverts edit loops and edits to protected files, and it lists agent and MCP processes so that forgotten ones can be terminated. The same state is shown in a full-screen terminal view, in plain log output, and in a local web dashboard.
+`agent-leash` is a TypeScript CLI that watches a repository while autonomous coding agents work in it. It raises alarms on edit loops and edits to protected files, restores files when a person asks for it, and it lists agent and MCP processes so that forgotten ones can be terminated. The same state is shown in a full-screen terminal view, in plain log output, and in a local web dashboard.
 
 It is a safety tool. People install it so that less goes wrong. Every change is judged by one question first: **can this make the tool destroy something the user did not ask it to destroy?**
 
@@ -20,16 +20,17 @@ It is a safety tool. People install it so that less goes wrong. Every change is 
    - Never send `kill` or `panic` (terminal) or `POST /api/kill/*`, `/api/panic` to an instance that runs without `--demo`.
    - `agent-leash status` is read-only and fine against the real machine.
    - Safety nets, not excuses: `tests/setup.ts` blocks `process.kill` inside the test suite; `scripts/agents/leash-guard.mjs` (Claude Code hook) asks the user before a kill or panic endpoint is called.
-2. **Never run the watchdog on a repository you are editing with auto-rollback on.** It reverts your files when the circuit breaker trips. `npm run dev` therefore uses `--no-auto-rollback`. Scenario runs go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
+2. **Never confirm a `revert` or `panic` on a repository someone is working in.** The watchdog itself never rewrites a file (there is no automatic rollback), so watching this repository is safe; a confirmed rollback is not. An instance built before that change (`--no-auto-rollback` still exists in it) does roll back on its own: do not leave one running on this repository. Scenario runs go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
 3. **Product safety invariants.** Each one has tests. If a change breaks one of those tests, the change is wrong, not the test.
-   - *Rollback* only touches paths inside the watched repository, never ignored paths (`.git`, `node_modules`, …), never `.env*`. It deletes a file only if that file was created during the session, and it keeps the version it replaces.
+   - *No automatic rollback*: protected files and thrashing raise an alarm. A file is rewritten only by a confirmed `revert` or `panic`.
+   - *Rollback* goes back to the version before a file's latest series of changes, never further; `panic` only touches files changed in the last 10 minutes. It only touches paths inside the watched repository, never ignored paths (`.git`, `node_modules`, …), never `.env*`. It deletes a file only if it did not exist before its latest changes, and it keeps the version it replaces.
    - *`.env*` contents are never read* — not into the snapshot, not for comparison, not for backup.
    - *Kill* only reaches PIDs from the monitored list, one PID at a time. SIGTERM first, SIGKILL after the grace period. Panic is the exception: SIGKILL at once, but only for the coding agents of the watched repository and the processes they started; never a dev server, an editor or another session.
    - *No verdicts on processes*: `STALE` and `FROZEN` are observations. Nothing is labeled safe to kill, and nothing is terminated in bulk because of its status, until the classification is proven on sessions still in use (it has been wrong twice).
    - *Agent recognition without a product list*: an agent is the client of an MCP server, a built-in name (`claude`, `codex`, `aider`, exact program name) or a name from the `agents` setting. Editors, desktop apps and terminals are never agents. Adding a product name to the code needs a real case that the other two ways miss.
    - *Server*: binds to loopback; answers only when addressed as this machine (Host allowlist); every state-changing request needs the dashboard token and the same origin.
    - *Untrusted text*: file names, command lines, working directories and reasons come from the processes being watched. In the dashboard they go through `esc()`, in the terminal through `sanitize()`. No inline event handlers, no generated JavaScript.
-   - *Asking first*: every destructive action a person triggers (revert, kill, panic) asks for confirmation, in every front end, whatever the file or process looks like. Automatic rollbacks are the product's job and are announced, not asked.
+   - *Asking first*: every destructive action a person triggers (revert, kill, panic) asks for confirmation, in every front end, whatever the file or process looks like.
    - *Demo mode* changes nothing: it writes no file (not even `.agentguard.json`) and reaches no real process. The only file it reads is `.agentguard.json`.
    - *Config reloads*: an `.agentguard.json` that is not valid changes nothing in a running watchdog. Every applied reload is logged as a warning, because the agent being watched can write the file too. Edits to the file are never treated as agent edits and never reverted.
 4. **One path for state and actions.** Front ends read `WatchdogSession.getSnapshot()` and act through session methods. A new action goes into the session first, then into the API route, the terminal command and the dashboard, with a test at session level and one per front end.
@@ -50,7 +51,7 @@ npm test               # vitest run (unit, API, CLI end-to-end)
 npm run test:watch     # vitest in watch mode
 npm run test:coverage  # tests with a coverage report
 npm run build          # tsup: dist/index.js (library), dist/cli.js (binary), dist/index.d.ts
-npm run dev            # watch this repo, observe only (--no-auto-rollback)
+npm run dev            # watch this repo from the sources
 npm run demo           # simulated session: fake agent, fake processes, nothing touched
 ```
 
@@ -81,8 +82,8 @@ scripts/scenarios/package-check.sh     # build, pack, install the tarball, impor
 | Module | Responsibility |
 | :--- | :--- |
 | `src/core/guard-config.ts` | `.agentguard.json`, defaults, validation with warnings, glob matching, mode policies (`strict`, `balanced`, `yolo`). `reload` applies a changed file only when all of it is valid; `switchMode` writes only the `mode` key; `writeConfigValue` changes one key for `agent-leash config`; `getSources` says where each value comes from. `parseMode` is strict (user input), `normalizeMode` lenient. |
-| `src/core/loop-detector.ts` | Sliding 60-second window per file; trips when `maxEditsPerFilePerMinute` is exceeded. |
-| `src/core/watcher.ts` | File events, session checkpoint (memory snapshot plus a git ref for large tracked files), rollback and panic rollback, kept copies of replaced versions, recognition of its own writes by content, `dryRun` for the demo. |
+| `src/core/loop-detector.ts` | Sliding 60-second window per file; trips once per series when `maxEditsPerFilePerMinute` is exceeded, re-arms after a quiet window. |
+| `src/core/watcher.ts` | File events and alarms, session checkpoint (memory snapshot plus a git ref for large tracked files), per-file versions (`STABLE_AFTER_MS`: the version before the latest series is the rollback target), revert and panic rollback (`PANIC_WINDOW_MS`), kept copies of replaced versions, recognition of its own writes by content, `dryRun` for the demo. |
 | `src/core/process-monitor.ts` | Process list, working directories (`/proc` on Linux, `lsof` elsewhere), agent recognition (`programNames` for exact names, `findMcpClient` for agents of any name), classification (`ACTIVE`, `IDLE`, `STANDBY`, `STALE`, `FROZEN`), `inWatchedRepo` and `agentPid` via the process tree, `panicTarget`, `host` (what a session is attached to), graceful termination. |
 | `src/core/session.ts` | The only place where the three meet. Snapshot, actions (`setMode`, `rollbackFile`, `killProcess`, `getPanicTargets`, `panic`), event log, coalesced updates, live config (`watchConfigFile` polls `.agentguard.json`, `reloadConfig` applies it to monitor and circuit breaker). |
 | `src/server.ts` | Hono app: request guards (Host, origin, token), routes, SSE, page delivery with nonce and CSP, `listenWatchdogServer` (loopback, port fallback). |
@@ -127,7 +128,7 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 | Skill `release-check` | `.agents/skills/release-check/` | The maintainer asks for a release, or to judge release readiness. |
 | Subagent `scenario-tester` | `.claude/agents/scenario-tester.md` | The scenario pass should run in its own context and come back as a findings list. |
 | Subagent `safety-reviewer` | `.claude/agents/safety-reviewer.md` | A diff touches rollback, termination, the server or anything rendered from watched data. |
-| Hook `leash-guard` | `scripts/agents/leash-guard.mjs`, `.claude/settings.json` | Always on in Claude Code: asks before a kill/panic endpoint is called or the watchdog is started on this repo with auto-rollback. |
+| Hook `leash-guard` | `scripts/agents/leash-guard.mjs`, `.claude/settings.json` | Always on in Claude Code: asks before a kill/panic endpoint is called. |
 
 Skills are created and edited only in `.agents/skills/`, with `name` and `description` as their only frontmatter. `.claude/skills/` holds symlinks to them. `.agents/` contains no `AGENTS.md`.
 

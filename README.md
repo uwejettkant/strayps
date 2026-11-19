@@ -33,10 +33,10 @@ Rules inside `AGENTS.md` or `CLAUDE.md` are polite suggestions. They **cannot** 
 
 | Failure Mode in Autonomous Runs | Without `agent-leash` | With `agent-leash` |
 | :--- | :--- | :--- |
-| **Edit Thrashing** *(agent rewrites the same file 6× in 30s trying to fix a test)* | Burns tokens and leaves broken code across the working tree | **Circuit Breaker trips** on edit #6 and reverts the file; the version it replaces is kept |
-| **Secret / Infra Tampering** *(agent edits `.env.local` or `docker-compose.yml`)* | Secrets or container configs get modified silently | **Instant Alert & Infra Restore** (`.env*` warns immediately without reading/writing secrets; `docker-compose.yml` auto-reverts) |
+| **Edit Thrashing** *(agent rewrites the same file 6× in 30s trying to fix a test)* | Burns tokens and leaves broken code across the working tree | **Circuit Breaker** raises an alarm on edit #6; `revert` brings back the version before the series |
+| **Secret / Infra Tampering** *(agent edits `.env.local` or `docker-compose.yml`)* | Secrets or container configs get modified silently | **Instant Alert** (`.env*` warns without its contents ever being read; `revert` restores `docker-compose.yml`) |
 | **Forgotten Multi-Day Agent & MCP Sessions** *(old sessions from other repos stay alive for days)* | Hundreds of MB of RAM silently locked by stale agent & MCP trees | **Cross-Repo Process List** shows every agent and MCP process with directory, uptime and RAM, marks old ones `STALE`; you end them one PID at a time |
-| **Runaway Multi-File Refactor** *(agent modifies 40+ unintended files)* | Painful manual `git checkout` / untracked file cleanup | **Red Panic Button** restores tracked & untracked files to initial state |
+| **Runaway Multi-File Refactor** *(agent modifies 40+ unintended files)* | Painful manual `git checkout` / untracked file cleanup | **Panic** stops the agents of the repo and rolls back what changed in the last 10 minutes, after one confirmation |
 
 ---
 
@@ -71,20 +71,19 @@ Started in a terminal, `agent-leash` shows a full-screen live view of the same s
 | :--- | :--- |
 | `exit`, `quit`, `q` | Stop the watchdog (Ctrl+C and Ctrl+D work too) |
 | `mode <strict\|balanced\|yolo>` | Switch the guard mode (saved to `.agentguard.json` if the repository has one) |
-| `revert <file>` | Roll one modified file back to the session checkpoint (Tab completes file names) |
+| `revert <file>` | Roll one file back to the version before its latest series of changes (Tab completes file names) |
 | `kill <pid>` | Terminate one process from the list: SIGTERM first, SIGKILL if it does not exit |
-| `panic` | Stop the coding agents of this repository and the processes they started, and roll back all files |
+| `panic` | Stop the coding agents of this repository and the processes they started, and roll back the files changed in the last 10 minutes |
 | `status` | List all monitored processes |
 | `help` | Show the commands |
 
-`revert`, `kill` and `panic` ask `[y/N]` before they act; `panic` names the processes it will stop.
+`revert`, `kill` and `panic` ask `[y/N]` before they act; `panic` names the processes and the number of files first. Nothing else ever rewrites a file: see [Alarms and Rollback](#alarms-and-rollback).
 
 Without a terminal (a pipe, a log file, a background job, or `--no-tui`) the same information is printed as one line per event, and the same commands are read from stdin, one per line. The end of the input does not stop the watchdog; `kill -TERM` does.
 
 ```bash
 npx agent-leash watch ./my-repo --no-dashboard     # terminal only, no web server
 npx agent-leash watch ./my-repo --no-tui --quiet   # log lines, alerts only
-npx agent-leash watch ./my-repo --no-auto-rollback # observe and alert, never rewrite a file
 npx agent-leash status                             # one-time process table
 ```
 
@@ -122,13 +121,13 @@ flowchart LR
   subgraph UI["Front ends (one shared session)"]
     TUI["Terminal View\n(live screen + commands)"]
     SSE["Local Hono Server\n(127.0.0.1:4321, SSE)"]
-    DASH["Dark Console Dashboard\n(Kill & Panic Rollback)"]
+    DASH["Dark Console Dashboard\n(Kill, Revert & Panic)"]
   end
 
   FS -->|add / change / unlink| CFG
-  CFG -->|".env* / protected"| GIT
+  CFG -->|".env* / protected: alarm"| SSE
   CFG -->|write event| LOOP
-  LOOP -->|"> 5 edits/min"| GIT
+  LOOP -->|"> 5 edits/min: alarm"| SSE
   PROC -->|"stale / frozen"| SSE
   LOOP --> SSE
   CFG --> SSE
@@ -144,8 +143,23 @@ flowchart LR
 ### Key Engineering Details
 
 1. **Dual-Layer Session Checkpoint (`git stash create` + Memory Snapshot, Zero-Secret-Access for `.env*`)**: On startup, `agent-leash` creates an invisible Git commit object without touching your working tree or stash reflog, paired with an in-memory snapshot for code files. `.env*` files are strictly metadata-monitored (warn-only): their contents are **never** read into memory or overwritten on disk.
-2. **Rollbacks That Lose Nothing**: Before a rollback overwrites or removes a file, the version being replaced is copied to a private temp directory (the path is in the log and in the exit summary). A rollback only touches files inside the watched repository, and only deletes files that were created during the session. `agent-leash` recognizes the file system echo of its own rollback by content, so the rollback never triggers a second alert.
+2. **Rollbacks That Lose Nothing**: agent-leash never rolls a file back on its own. For every changed file it keeps the version from before its latest series of changes, and `revert` or `panic` restore exactly that one, never anything older. Before a rollback overwrites or removes a file, the version being replaced is copied to a private temp directory (the path is in the log and in the exit summary). A rollback only touches files inside the watched repository, and only deletes a file that did not exist before its latest changes. `agent-leash` recognizes the file system echo of its own rollback by content, so the rollback never triggers a second alert.
 3. **Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen, even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB) and uptime (`etime`) to tell **standby MCP children** (`STANDBY`) from **old sessions in other repos** (`STALE`) and **orphaned or silent processes** (`FROZEN`). The tree also tells which agent started which process, so `panic` reaches exactly the agents of the watched repository and what they started.
+
+---
+
+## Alarms and Rollback
+
+agent-leash never rewrites a file on its own. A protected file that changes and an agent that rewrites the same file again and again (the circuit breaker) raise an alarm, and the file stays exactly as the agent left it. In a long session an automatic rollback would throw away hours of good work.
+
+You decide, with one command and a confirmation:
+
+- **`revert <file>`** restores the version the file had before its latest series of changes. A series ends when the file stays unchanged for a minute, so the good work before a thrashing loop survives. A second `revert` does not go further back. A file created in the latest series is removed.
+- **`panic`** stops the agents of the repository and rolls back every file changed in the last 10 minutes, each to its version before its latest changes. Older changes stay as they are; the confirmation says how many.
+
+Every version a rollback replaces is kept in a private temp directory, so even a rollback you regret can be undone by hand. Files larger than 5 MB are not kept in memory; for those, `revert` can only go back to the session start (through git) when that is their last stable version, and refuses otherwise.
+
+The circuit breaker raises one alarm per series and re-arms after a quiet minute.
 
 ---
 
@@ -161,7 +175,7 @@ The mode decides how file volume and protected files are judged. The circuit bre
 
 What this means in practice:
 
-- **Protected files** are reverted as soon as they change, and the replaced version is kept. `.env*` files only raise a warning, because agent-leash never reads their contents. With `--no-auto-rollback` nothing is reverted in any mode; you get the alert only.
+- **Protected files** raise an alarm as soon as they change; `revert` restores them. `.env*` files only raise a warning, because agent-leash never reads their contents and so can never restore them.
 - **A hard stop is an alarm, not a brake.** Reaching a file limit raises an alarm in the terminal view, the log and the dashboard. It does not stop the agent; `panic` does, after asking.
 - The numbers above are the defaults. Every one of them can be changed, see [Configuration](#configuration).
 
@@ -188,7 +202,7 @@ npx agent-leash init                         # or write a file with every defaul
 | `mode` | `balanced` | `strict`, `balanced` or `yolo`, see [Choosing a Mode](#choosing-a-mode) |
 | `limits.maxFilesWarn` | `15` | Files modified in this session before a warning (in `strict`: the hard-stop alarm) |
 | `limits.maxFilesHardStop` | `40` | Files modified in this session before the hard-stop alarm |
-| `limits.maxEditsPerFilePerMinute` | `5` | Edits to one file within 60 seconds before the circuit breaker reverts it |
+| `limits.maxEditsPerFilePerMinute` | `5` | Edits to one file within 60 seconds before the circuit breaker raises an alarm |
 | `limits.mcpSilenceTimeoutSec` | `45` | Seconds without CPU or file activity before a process counts as frozen |
 | `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale |
 | `protectedFiles` | `.env*`, `docker-compose*.yml`, `.git/**` | Globs relative to the repository root. Your list replaces the default one, so keep `.env*` in it if you want those warnings |
@@ -305,11 +319,11 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 179 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 183 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing
-npm run dev       # Watch this repo in observe-only mode (--no-auto-rollback)
+npm run dev       # Watch this repo from the sources
 ```
 
 Development needs Node 22.12 or newer. Rules for coding agents working on this repository are in [`AGENTS.md`](./AGENTS.md). Bugs and feature requests go into GitHub issues; security problems are reported privately, see [`SECURITY.md`](./SECURITY.md).

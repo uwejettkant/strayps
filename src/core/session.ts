@@ -32,6 +32,8 @@ export interface StatusSnapshot {
   config: GuardConfig;
   checkpoint: CheckpointInfo | null;
   modifiedFiles: string[];
+  /** The modified files `panic` would roll back: those changed within the panic window. */
+  panicFiles: string[];
   trippedFiles: string[];
   limitState: 'ok' | 'warn' | 'hard-stop';
   events: WatchActivityEvent[];
@@ -43,6 +45,8 @@ export interface PanicResult {
   restoredFiles: string[];
   restoredCount: number;
   skippedFiles: string[];
+  /** Modified files older than the panic window: left as they are. */
+  keptFiles: string[];
   killedPids: number[];
 }
 
@@ -147,6 +151,7 @@ export class WatchdogSession extends EventEmitter {
       config,
       checkpoint: this.watcher.getCheckpoint(),
       modifiedFiles,
+      panicFiles: this.watcher.getPanicFiles(),
       trippedFiles: this.watcher.loopDetector.getTrippedFiles(),
       limitState: this.configManager.evaluateFileLimit(modifiedFiles.length),
       events,
@@ -294,8 +299,9 @@ export class WatchdogSession extends EventEmitter {
 
   /**
    * Emergency brake: stops the coding agents of the watched repository and the processes they
-   * started right away (SIGKILL, no grace period) and restores every changed file to the session
-   * checkpoint. Dev servers, editors and sessions in other repositories are not touched.
+   * started right away (SIGKILL, no grace period) and rolls the files changed in the last ten
+   * minutes back to their last stable version. Older changes, dev servers, editors and sessions
+   * in other repositories are not touched.
    */
   public panic(): PanicResult {
     const killedPids = this.processMonitor.killPanicTargets('SIGKILL');
@@ -305,6 +311,7 @@ export class WatchdogSession extends EventEmitter {
       restoredFiles: rollback.restoredFiles,
       restoredCount: rollback.count,
       skippedFiles: rollback.skippedFiles,
+      keptFiles: rollback.keptFiles,
       killedPids,
     };
   }

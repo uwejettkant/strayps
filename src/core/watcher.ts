@@ -44,12 +44,15 @@ export interface CheckpointInfo {
   snapshottedFiles: number;
 }
 
+/**
+ * There is no automatic rollback. Protected files and thrashing raise an alarm; a file is only
+ * restored by `revert` or `panic`, after a person confirmed it. In a long session an automatic
+ * rollback to the session start would throw away hours of good work.
+ */
 export interface RepoWatcherOptions {
   rootDir: string;
   configManager?: GuardConfigManager;
   loopDetector?: LoopDetector;
-  autoRollbackOnLoop?: boolean;
-  autoRollbackProtected?: boolean;
   debounceMs?: number;
   /**
    * Simulation mode (used by `--demo`): nothing is read from or written to disk.
@@ -66,8 +69,33 @@ export interface RepoWatcherOptions {
 export interface PanicRollbackResult {
   restoredFiles: string[];
   count: number;
-  /** Files that could not be restored because no checkpoint copy exists. */
+  /** Files that could not be restored because no copy of their last stable version exists. */
   skippedFiles: string[];
+  /** Modified files whose latest change is older than the panic window; left as they are. */
+  keptFiles: string[];
+}
+
+/**
+ * A file left unchanged this long ends a series of changes. The version it had then is what
+ * `revert` restores: the version before the latest series, never anything older.
+ */
+export const STABLE_AFTER_MS = 60_000;
+
+/** `panic` rolls back the files changed within this window and keeps every older change. */
+export const PANIC_WINDOW_MS = 10 * 60_000;
+
+/** A version of a file: its bytes, null if the file did not exist, undefined if no copy is held. */
+type VersionContent = Buffer | null | undefined;
+
+interface FileHistory {
+  /** The file as the watcher last saw it, and since when. */
+  current: VersionContent;
+  currentSince: number;
+  currentIsStart: boolean;
+  /** The version before the latest series of changes: what `revert` restores. */
+  stable: VersionContent;
+  /** True while the stable version is the one from the session start. */
+  stableIsStart: boolean;
 }
 
 const IGNORED_DIRS = new Set([
@@ -105,6 +133,10 @@ interface RestoreOutcome {
   action?: 'restored' | 'removed' | 'unchanged' | 'simulated';
   reason?: string;
   backupPath?: string;
+  /** The file is back at its session-start version, so it no longer counts as modified. */
+  backAtStart?: boolean;
+  /** Restored with git from the session checkpoint (no copy in memory). */
+  fromCheckpoint?: boolean;
 }
 
 /** Larger files are restored without keeping the replaced version (they are not in the snapshot either). */
@@ -119,10 +151,10 @@ export class RepoWatcher extends EventEmitter {
   public readonly dryRun: boolean;
 
   private watcher: FSWatcher | null = null;
-  private autoRollbackOnLoop: boolean;
-  private autoRollbackProtected: boolean;
   private keepDiscarded: boolean;
   private initialSnapshot: Map<string, Buffer> = new Map();
+  /** Versions of every file changed in this session (see FileHistory). */
+  private histories: Map<string, FileHistory> = new Map();
   /** Every path that existed at session start, including files we hold no copy of. */
   private existedAtStart: Set<string> = new Set();
   private modifiedFiles: Set<string> = new Set();
@@ -152,8 +184,6 @@ export class RepoWatcher extends EventEmitter {
       new LoopDetector({
         maxEditsPerFilePerMinute: cfg.limits.maxEditsPerFilePerMinute,
       });
-    this.autoRollbackOnLoop = options.autoRollbackOnLoop ?? true;
-    this.autoRollbackProtected = options.autoRollbackProtected ?? true;
     this.dryRun = options.dryRun ?? false;
     this.keepDiscarded = options.keepDiscarded ?? true;
   }
@@ -244,6 +274,7 @@ export class RepoWatcher extends EventEmitter {
   public createCheckpoint(): CheckpointInfo {
     this.initialSnapshot.clear();
     this.existedAtStart.clear();
+    this.histories.clear();
     this.checkpointSha = null;
 
     if (this.dryRun) {
@@ -399,6 +430,59 @@ export class RepoWatcher extends EventEmitter {
     return false;
   }
 
+  /** The version a file had at session start (see VersionContent). */
+  private initialVersion(relPath: string): VersionContent {
+    const copy = this.initialSnapshot.get(relPath);
+    if (copy) return copy;
+    return this.existedAtStart.has(relPath) ? undefined : null;
+  }
+
+  /** Reads the file as it is now; undefined when it is too large or unreadable to keep a copy. */
+  private readVersion(relPath: string): VersionContent {
+    const absPath = path.join(this.rootDir, relPath);
+    try {
+      const stat = fs.statSync(absPath);
+      if (!stat.isFile() || stat.size > SNAPSHOT_MAX_BYTES) return undefined;
+      return fs.readFileSync(absPath);
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
+    }
+  }
+
+  /**
+   * Records a change of a file at time `now`. If the version before it had been left alone for
+   * STABLE_AFTER_MS, a series of changes ended there and that version becomes the rollback target.
+   */
+  private trackChange(relPath: string, now: number): void {
+    // .env* contents are never read; the demo reads nothing but still needs the times for panic
+    const readable = !this.isEnvFile(relPath) && !this.dryRun;
+    const start = readable ? this.initialVersion(relPath) : undefined;
+    const history = this.histories.get(relPath) ?? {
+      current: start,
+      currentSince: Number.NEGATIVE_INFINITY,
+      currentIsStart: true,
+      stable: start,
+      stableIsStart: true,
+    };
+    if (now - history.currentSince >= STABLE_AFTER_MS) {
+      history.stable = history.current;
+      history.stableIsStart = history.currentIsStart;
+    }
+    history.current = readable ? this.readVersion(relPath) : undefined;
+    history.currentSince = now;
+    history.currentIsStart = false;
+    this.histories.set(relPath, history);
+  }
+
+  /** Modified files whose latest change lies within the panic window: what `panic` would roll back. */
+  public getPanicFiles(now: number = Date.now()): string[] {
+    const cutoff = now - PANIC_WINDOW_MS;
+    return Array.from(this.modifiedFiles).filter((relPath) => {
+      if (this.isEnvFile(relPath)) return false;
+      return (this.histories.get(relPath)?.currentSince ?? Number.NEGATIVE_INFINITY) >= cutoff;
+    });
+  }
+
   /**
    * Processes a file write/delete event (`add`, `change`, `unlink`).
    * Can also be invoked directly in tests or by chokidar listeners.
@@ -427,50 +511,42 @@ export class RepoWatcher extends EventEmitter {
     this.loopDetector.setMaxEditsPerFilePerMinute(cfg.limits.maxEditsPerFilePerMinute);
 
     this.modifiedFiles.add(relPath);
+    this.trackChange(relPath, now);
 
-    // 1. Check protected file policy
+    // 1. Protected files: an alarm, never an automatic rollback
     if (this.configManager.isProtectedFile(relPath)) {
       const envFile = this.isEnvFile(relPath);
-      // Never read or overwrite .env* files — emit a warning alert only
-      const attempt =
-        !envFile && this.autoRollbackProtected ? this.performRollback(relPath) : null;
-      const rolledBack = attempt?.outcome.ok ?? false;
+      const verb = action === 'add' ? 'created' : action === 'unlink' ? 'deleted' : 'changed';
       const event = this.recordActivity({
         type: 'protected-file',
         filePath: relPath,
         action,
-        rolledBack,
         modifiedFilesCount: this.modifiedFiles.size,
         message: envFile
           ? `WARNING: Protected ENV file ${action} (${relPath}) — warn-only, secrets are never read or overwritten`
-          : `Protected file touched: ${relPath}${rolledBack ? (this.dryRun ? ' (auto-revert simulated)' : ' (auto-reverted)') : ''}`,
+          : `Protected file ${verb}: ${relPath} (revert restores the version before this change)`,
         severity: envFile ? 'warn' : 'critical',
         timestamp: now,
       });
-      if (attempt) this.reportRollback(relPath, attempt);
       this.emit('protected-file', event);
       return;
     }
 
-    // 2. Check Loop / Thrashing Detector
+    // 2. Thrashing: one alarm per series of edits, never an automatic rollback
     const loopResult = this.loopDetector.recordEdit(relPath, now);
-    if (loopResult.triggered && loopResult.alert) {
-      const attempt = this.autoRollbackOnLoop ? this.performRollback(relPath) : null;
-      const rolledBack = attempt?.outcome.ok ?? false;
+    if (loopResult.triggered && loopResult.firstTrip && loopResult.alert) {
+      const seconds = Math.round(loopResult.alert.windowMs / 1000);
       const event = this.recordActivity({
         type: 'loop-detected',
         filePath: relPath,
         action,
         editCount: loopResult.editCount,
-        rolledBack,
         modifiedFilesCount: this.modifiedFiles.size,
-        message: `Circuit Breaker! Thrashing on ${relPath} (${loopResult.editCount} edits/min > ${loopResult.limit})${rolledBack ? (this.dryRun ? ' — rollback simulated' : ' — file rolled back') : ''}`,
+        message: `Circuit breaker: ${relPath} changed ${loopResult.editCount} times within ${seconds} s (limit ${loopResult.limit}); revert restores the version before this series`,
         severity: 'critical',
         timestamp: now,
       });
-      if (attempt) this.reportRollback(relPath, attempt);
-      this.emit('loop-detected', { ...loopResult.alert, rolledBack, event } satisfies LoopAlert & {
-        rolledBack: boolean;
+      this.emit('loop-detected', { ...loopResult.alert, event } satisfies LoopAlert & {
         event: WatchActivityEvent;
       });
       return;
@@ -520,12 +596,13 @@ export class RepoWatcher extends EventEmitter {
   }
 
   /**
-   * Rolls back a single file to its state at session start.
+   * Rolls a single file back to its last stable version: the version it had before its latest
+   * series of changes (see STABLE_AFTER_MS), never anything older.
    *
    * Safety contract:
    * - only paths inside the watched repository, never ignored paths (`.git`, `node_modules`, ...)
    * - `.env*` files are never read, overwritten or deleted
-   * - a file is only removed if it was created during this session
+   * - a file is only removed if it did not exist before its latest series of changes
    * - the version being replaced is kept in a private temp directory first
    */
   public rollbackFile(filePath: string): boolean {
@@ -535,7 +612,10 @@ export class RepoWatcher extends EventEmitter {
   }
 
   /** Validates the path and restores the file, without writing to the activity log. */
-  private performRollback(filePath: string): { relPath: string | null; outcome: RestoreOutcome } {
+  private performRollback(
+    filePath: string,
+    now: number = Date.now(),
+  ): { relPath: string | null; outcome: RestoreOutcome } {
     const relPath = this.resolveInsideRoot(filePath);
     if (!relPath) {
       return {
@@ -547,8 +627,9 @@ export class RepoWatcher extends EventEmitter {
     if (this.isEnvFile(relPath)) {
       return { relPath, outcome: { ok: false, action: 'unchanged' } };
     }
-    const outcome = this.restoreFile(relPath);
-    if (outcome.ok) {
+    const outcome = this.restoreFile(relPath, now);
+    // A file restored to a version from the middle of the session still differs from the start
+    if (outcome.ok && outcome.backAtStart) {
       this.modifiedFiles.delete(relPath);
       this.lastLimitState = this.configManager.evaluateFileLimit(this.modifiedFiles.size);
     }
@@ -584,12 +665,14 @@ export class RepoWatcher extends EventEmitter {
     const kept = outcome.backupPath ? ` (replaced version kept: ${outcome.backupPath})` : '';
     const what =
       outcome.action === 'removed'
-        ? `Removed ${relPath} (created during this session)`
+        ? `Removed ${relPath} (it did not exist before its latest changes)`
         : outcome.action === 'simulated'
-          ? `Demo: would roll back ${relPath} to session checkpoint (no files touched)`
+          ? `Demo: would roll back ${relPath} to the version before its latest changes (no files touched)`
           : outcome.action === 'unchanged'
-            ? `${relPath} is already at its session checkpoint state`
-            : `Rolled back ${relPath} to session checkpoint`;
+            ? `${relPath} is already at the version before its latest changes`
+            : outcome.fromCheckpoint
+              ? `Rolled back ${relPath} to the version before its latest changes (from the session checkpoint)`
+              : `Rolled back ${relPath} to the version before its latest changes`;
     this.recordActivity({
       type: 'rollback',
       filePath: relPath,
@@ -601,57 +684,44 @@ export class RepoWatcher extends EventEmitter {
   }
 
   /**
-   * Panic Rollback: restores all modified files to the session checkpoint.
+   * Panic: rolls back the files changed within the last PANIC_WINDOW_MS, each to its last stable
+   * version. Older changes stay as they are: in a long session they are hours of good work.
    */
-  public panicRollbackAll(): PanicRollbackResult {
+  public panicRollbackAll(now: number = Date.now()): PanicRollbackResult {
+    const recent = this.getPanicFiles(now);
+    const keptFiles = Array.from(this.modifiedFiles).filter(
+      (relPath) => !this.isEnvFile(relPath) && !recent.includes(relPath),
+    );
     const restoredFiles: string[] = [];
     const skippedFiles: string[] = [];
-    const targets = new Set<string>([...this.modifiedFiles, ...this.initialSnapshot.keys()]);
 
-    for (const relPath of targets) {
-      if (this.isEnvFile(relPath)) continue;
-      if (this.dryRun) {
-        if (this.modifiedFiles.has(relPath)) restoredFiles.push(relPath);
-        continue;
-      }
-      const absPath = path.join(this.rootDir, relPath);
-
-      if (this.initialSnapshot.has(relPath)) {
-        const original = this.initialSnapshot.get(relPath)!;
-        let unchanged = false;
-        try {
-          unchanged = fs.existsSync(absPath) && fs.readFileSync(absPath).equals(original);
-        } catch {
-          unchanged = false;
-        }
-        if (unchanged) continue;
-      } else if (!this.modifiedFiles.has(relPath)) {
-        continue;
-      }
-
-      const outcome = this.restoreFile(relPath);
+    for (const relPath of recent) {
+      const outcome = this.restoreFile(relPath, now);
       if (outcome.ok) {
         restoredFiles.push(relPath);
+        if (outcome.backAtStart) this.modifiedFiles.delete(relPath);
       } else {
         skippedFiles.push(relPath);
       }
     }
 
-    this.modifiedFiles.clear();
     this.loopDetector.resetAll();
-    this.lastLimitState = 'ok';
+    this.lastLimitState = this.configManager.evaluateFileLimit(this.modifiedFiles.size);
 
-    const kept = this.discardDir ? ` — replaced versions kept in ${this.discardDir}` : '';
+    const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
+    const window = `in the last ${Math.round(PANIC_WINDOW_MS / 60_000)} minutes`;
+    const keptText = keptFiles.length > 0 ? `; ${plural(keptFiles.length, 'older change')} kept` : '';
     const skipped = skippedFiles.length
-      ? `, ${skippedFiles.length} skipped (no checkpoint copy)`
+      ? `; ${skippedFiles.length} skipped (no copy of their last stable version)`
       : '';
+    const dir = this.discardDir ? ` — replaced versions kept in ${this.discardDir}` : '';
     const event = this.recordActivity({
       type: 'panic-rollback',
       rolledBack: true,
-      modifiedFilesCount: 0,
+      modifiedFilesCount: this.modifiedFiles.size,
       message: this.dryRun
-        ? `Demo: PANIC ROLLBACK simulated for ${restoredFiles.length} file(s), no files touched`
-        : `PANIC ROLLBACK executed: ${restoredFiles.length} file(s) restored to checkpoint (${this.checkpoint?.ref ?? 'initial'})${skipped}${kept}`,
+        ? `Demo: PANIC simulated for ${plural(restoredFiles.length, 'file')} changed ${window}, no files touched`
+        : `PANIC: ${plural(restoredFiles.length, 'file')} changed ${window} rolled back to their last stable version${keptText}${skipped}${dir}`,
       severity: 'critical',
     });
     this.emit('panic-rollback', event);
@@ -660,73 +730,99 @@ export class RepoWatcher extends EventEmitter {
       restoredFiles,
       count: restoredFiles.length,
       skippedFiles,
+      keptFiles,
     };
   }
 
   /**
-   * Brings one file back to its session-start state. `relPath` must already be validated.
+   * Brings one file back to its last stable version. `relPath` must already be validated.
    */
-  private restoreFile(relPath: string): RestoreOutcome {
+  private restoreFile(relPath: string, now: number = Date.now()): RestoreOutcome {
     if (this.dryRun) {
-      return { ok: true, action: 'simulated' };
+      return { ok: true, action: 'simulated', backAtStart: true };
     }
 
     const absPath = path.join(this.rootDir, relPath);
-    const original = this.initialSnapshot.get(relPath);
+    const history = this.histories.get(relPath);
+    const target = history ? history.stable : this.initialVersion(relPath);
+    const targetIsStart = history ? history.stableIsStart : true;
+    const startCopy = this.initialSnapshot.get(relPath);
+    const backAtStart =
+      targetIsStart ||
+      (target instanceof Buffer && startCopy !== undefined && target.equals(startCopy)) ||
+      (target === null && !this.existedAtStart.has(relPath));
+    // After a rollback the restored version is the file's current one
+    const remember = (content: VersionContent) => {
+      if (!history) return;
+      history.current = content;
+      history.currentSince = now;
+      history.currentIsStart = targetIsStart;
+    };
 
     try {
-      if (original) {
+      if (target instanceof Buffer) {
         let current: Buffer | null = null;
         try {
           current = fs.readFileSync(absPath);
         } catch {
           current = null;
         }
-        if (current && current.equals(original)) {
-          return { ok: true, action: 'unchanged' };
+        if (current && current.equals(target)) {
+          remember(target);
+          return { ok: true, action: 'unchanged', backAtStart };
         }
         const backupPath = this.keepDiscardedCopy(relPath, absPath);
-        this.ownWrites.set(relPath, { expected: original, until: Date.now() + OWN_WRITE_WINDOW_MS });
+        this.ownWrites.set(relPath, { expected: target, until: Date.now() + OWN_WRITE_WINDOW_MS });
         fs.mkdirSync(path.dirname(absPath), { recursive: true });
-        fs.writeFileSync(absPath, original);
-        return { ok: true, action: 'restored', backupPath };
+        fs.writeFileSync(absPath, target);
+        remember(target);
+        return { ok: true, action: 'restored', backupPath, backAtStart };
       }
 
-      if (this.existedAtStart.has(relPath)) {
-        // The file was there at session start but we hold no copy (larger than the snapshot
-        // limit, unreadable, or a symlink). Git may still have it; otherwise leave it alone.
-        if (this.isGitRepo && this.checkpointSha && this.isInCheckpointCommit(relPath)) {
+      if (target === null) {
+        // The file did not exist before its latest series of changes: it was created in this session
+        if (fs.existsSync(absPath)) {
           const backupPath = this.keepDiscardedCopy(relPath, absPath);
-          try {
-            execFileSync(
-              'git',
-              ['restore', `--source=${this.checkpointSha}`, '--worktree', '--', relPath],
-              { cwd: this.rootDir, stdio: ['ignore', 'pipe', 'ignore'] },
-            );
-            this.ownWrites.set(relPath, {
-              expected: fs.readFileSync(absPath),
-              until: Date.now() + OWN_WRITE_WINDOW_MS,
-            });
-            return { ok: true, action: 'restored', backupPath };
-          } catch {
-            // Not tracked in the checkpoint commit: fall through and leave the file alone
-          }
+          this.ownWrites.set(relPath, { expected: null, until: Date.now() + OWN_WRITE_WINDOW_MS });
+          fs.unlinkSync(absPath);
+          remember(null);
+          return { ok: true, action: 'removed', backupPath, backAtStart };
         }
-        return {
-          ok: false,
-          reason: 'it existed at session start but no checkpoint copy is available, left untouched',
-        };
+        remember(null);
+        return { ok: true, action: 'unchanged', backAtStart };
       }
 
-      // Not present at session start: the file was created during this session.
-      if (fs.existsSync(absPath)) {
+      // No copy of the target version is held (larger than the snapshot limit, unreadable, or a
+      // symlink). Git can bring back the session-start version, but only when that is the last
+      // stable one: an older version would undo more than the latest series of changes.
+      if (
+        targetIsStart &&
+        this.existedAtStart.has(relPath) &&
+        this.isGitRepo &&
+        this.checkpointSha &&
+        this.isInCheckpointCommit(relPath)
+      ) {
         const backupPath = this.keepDiscardedCopy(relPath, absPath);
-        this.ownWrites.set(relPath, { expected: null, until: Date.now() + OWN_WRITE_WINDOW_MS });
-        fs.unlinkSync(absPath);
-        return { ok: true, action: 'removed', backupPath };
+        try {
+          execFileSync(
+            'git',
+            ['restore', `--source=${this.checkpointSha}`, '--worktree', '--', relPath],
+            { cwd: this.rootDir, stdio: ['ignore', 'pipe', 'ignore'] },
+          );
+          this.ownWrites.set(relPath, {
+            expected: fs.readFileSync(absPath),
+            until: Date.now() + OWN_WRITE_WINDOW_MS,
+          });
+          remember(undefined);
+          return { ok: true, action: 'restored', backupPath, backAtStart: true, fromCheckpoint: true };
+        } catch {
+          // Not tracked in the checkpoint commit: leave the file alone
+        }
       }
-      // Created and already gone again: that is the session-start state.
-      return { ok: true, action: 'unchanged' };
+      return {
+        ok: false,
+        reason: 'no copy of its last stable version is available (too large or unreadable), left untouched',
+      };
     } catch (err) {
       this.ownWrites.delete(relPath);
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };

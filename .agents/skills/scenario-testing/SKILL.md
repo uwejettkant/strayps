@@ -13,7 +13,7 @@ agent-leash kills processes and rewrites files. The processes on this machine ar
 
 - Destructive commands (`kill`, `panic`) and endpoints (`/api/kill/*`, `/api/panic`): only against `--demo`. Demo has its own fake process table and writes nothing.
 - Real mode (no `--demo`): only in a sandbox directory, and only file scenarios (edit, revert, thrash). Read the process list, never act on it.
-- Never watch a repository someone is working in with auto-rollback on.
+- Never confirm `revert` or `panic` on a repository someone is working in. (The watchdog itself never rolls back; builds before 19.11.2026 still do: never leave one running on a working repository.)
 
 ## 2. The gate
 
@@ -60,7 +60,7 @@ python3 scripts/scenarios/pty-drive.py --cols 120 --rows 30 --cwd "$SANDBOX" -- 
   node "$PWD/dist/cli.js" watch . --no-dashboard :: wait:8 screen:live type:exit key:enter
 ```
 
-While it waits, edit files in `$SANDBOX` from a second shell: one normal edit, `.env`, `docker-compose.yml`, six quick edits of one file. Expected: the edit appears; `.env` warns and stays changed; `docker-compose.yml` is reverted; the sixth edit trips the breaker and the file is back at its committed content. The exit summary names the directory with the kept copies; look into it.
+While it waits, edit files in `$SANDBOX` from a second shell: one normal edit, `.env`, `docker-compose.yml`, six quick edits of one file. Expected: the edit appears; `.env` warns and stays changed; `docker-compose.yml` raises a critical alarm and stays as written; the sixth edit trips the breaker with exactly one alarm, further edits raise none, the file stays as written. Then `revert docker-compose.yml` and `revert <file>` (each confirmed) restore the version before the latest series, and the breaker shows `armed` again. Edit a file, wait over a minute, edit it again, `revert` it: it must come back to the first edit, not to the committed content. The exit summary names the directory with the kept copies; look into it.
 
 Live configuration, same setup. From the second shell: `node dist/cli.js config set maxFilesWarn 30 -C "$SANDBOX"`, then save broken JSON into `$SANDBOX/.agentguard.json`, then a valid file with fewer `protectedFiles`; in the view type `mode strict`. Expected: a warning line `.agentguard.json reloaded: limits.maxFilesWarn … → 30` and the header shows `warn 30`; the broken save is reported once and changes nothing; the shorter list is reported as `no longer protected: …`; after `mode strict` the file has `"mode": "strict"` and still every value written by hand, and no second reload line follows. `node dist/cli.js config "$SANDBOX"` lists each value with `(file)` or `(default)`. With `--demo` instead, `mode yolo` must leave the file byte for byte unchanged.
 

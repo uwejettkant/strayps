@@ -127,8 +127,13 @@ describe('agent-leash CLI', () => {
     await run.waitFor(READY);
 
     await run.waitFor(/WARN {2}protected-file {5}WARNING: Protected ENV file change \(\.env\.local\)/);
-    await run.waitFor(/CRIT {2}loop-detected {6}Circuit Breaker! Thrashing on src\/auth\/session\.ts/);
-    await run.waitFor('rollback simulated');
+    await run.waitFor(/CRIT {2}loop-detected {6}Circuit breaker: src\/auth\/session\.ts changed 6 times within 60 s/);
+    // an alarm only: nothing is rolled back without a confirmed revert
+    expect(run.output()).not.toMatch(/rollback simulated|rolled back/i);
+    run.child.stdin.write('revert session.ts\n');
+    await run.waitFor('Type "yes" to confirm');
+    run.child.stdin.write('yes\n');
+    await run.waitFor('Demo: would roll back src/auth/session.ts to the version before its latest changes');
 
     run.child.stdin.write('status\n');
     await run.waitFor(/31877\s+STALE\s+ELSEWHERE/);
@@ -158,7 +163,7 @@ describe('agent-leash CLI', () => {
     }
   });
 
-  it('really guards a real directory: edits appear, protected files are reverted', async () => {
+  it('really guards a real directory: a protected file raises an alarm, revert restores it', async () => {
     const dir = makeTmpDir();
     writeFiles(dir, { 'docker-compose.yml': 'version: "3.8"\n', 'src/a.ts': 'a\n' });
     // --quiet: only alerts; the process list of this machine is read but never acted on
@@ -167,7 +172,15 @@ describe('agent-leash CLI', () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
 
     writeFiles(dir, { 'docker-compose.yml': 'version: "tampered"\n' });
-    await run.waitFor('Protected file touched: docker-compose.yml (auto-reverted)');
+    await run.waitFor('Protected file changed: docker-compose.yml (revert restores the version before this change)');
+    // no automatic rollback: the file stays as written until a person confirms a revert
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(read(dir, 'docker-compose.yml')).toBe('version: "tampered"\n');
+
+    run.child.stdin.write('revert docker-compose.yml\n');
+    await run.waitFor('Type "yes" to confirm');
+    run.child.stdin.write('yes\n');
+    await run.waitFor('Rolled back docker-compose.yml');
     expect(read(dir, 'docker-compose.yml')).toBe('version: "3.8"\n');
 
     run.child.stdin.write('exit\n');

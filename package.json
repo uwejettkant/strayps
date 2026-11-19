@@ -41,7 +41,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "check": "npm run typecheck && npm test && npm run build",
-    "dev": "tsx src/cli.ts watch --no-auto-rollback",
+    "dev": "tsx src/cli.ts watch",
     "demo": "tsx src/cli.ts watch --demo",
     "prepublishOnly": "npm run check"
   },

@@ -265,7 +265,8 @@ describe('dashboard page', () => {
     const { api, getElementById } = loadDashboard();
     api.renderStatus(
       stateWith({
-        modifiedFiles: ['a.ts', 'b.ts'],
+        modifiedFiles: ['a.ts', 'b.ts', 'old.ts'],
+        panicFiles: ['a.ts', 'b.ts'],
         processes: [
           { pid: 100, status: 'ACTIVE', category: 'agent', cmd: 'claude-code (opus)', memoryMb: 1, cpu: 1, inWatchedRepo: true, panicTarget: true },
           { pid: 300, status: 'ACTIVE', category: 'node', cmd: 'node tsx watch server.ts', memoryMb: 1, cpu: 1, inWatchedRepo: true, panicTarget: false },
@@ -279,7 +280,8 @@ describe('dashboard page', () => {
     expect(body).toContain('Sends SIGKILL to 1 process');
     expect(body).toContain('PID 100 claude-code (opus)');
     expect(body).not.toContain('PID 300');
-    expect(body).toContain('Reverts 2 modified files');
+    expect(body).toContain('Rolls back 2 files changed in the last 10 minutes');
+    expect(body).toContain('1 older change stays as it is');
   });
 
   it('sends the token with every state-changing request', async () => {

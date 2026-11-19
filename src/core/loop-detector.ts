@@ -15,6 +15,8 @@ export interface LoopAlert {
 
 export interface LoopCheckResult {
   triggered: boolean;
+  /** True only for the edit that trips the breaker; later edits of the same series are not new alarms. */
+  firstTrip?: boolean;
   editCount: number;
   limit: number;
   alert?: LoopAlert;
@@ -61,6 +63,12 @@ export class LoopDetector extends EventEmitter {
 
     const existing = this.editsByFile.get(normalizedPath) ?? [];
     const activeTimestamps = existing.filter((ts) => ts > cutoff);
+    // A full window without edits ends a series: the breaker re-arms for this file, so that
+    // thrashing hours later raises a new alarm instead of being swallowed by an old one
+    if (activeTimestamps.length === 0) {
+      this.trippedFiles.delete(normalizedPath);
+    }
+    const wasTripped = this.trippedFiles.has(normalizedPath);
     activeTimestamps.push(now);
     this.editsByFile.set(normalizedPath, activeTimestamps);
 
@@ -79,6 +87,7 @@ export class LoopDetector extends EventEmitter {
       this.emit('loop-detected', alert);
       return {
         triggered: true,
+        firstTrip: !wasTripped,
         editCount,
         limit: this.maxEditsPerFilePerMinute,
         alert,
@@ -110,8 +119,12 @@ export class LoopDetector extends EventEmitter {
     return this.trippedFiles.size > 0;
   }
 
-  public getTrippedFiles(): string[] {
-    return Array.from(this.trippedFiles);
+  /** Files whose current series tripped the breaker; a file drops out after a quiet window. */
+  public getTrippedFiles(now: number = Date.now()): string[] {
+    const cutoff = now - this.windowMs;
+    return Array.from(this.trippedFiles).filter((file) =>
+      (this.editsByFile.get(file) ?? []).some((ts) => ts > cutoff),
+    );
   }
 
   public resetFile(filePath: string): void {

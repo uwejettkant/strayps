@@ -237,13 +237,14 @@ describe('RepoWatcher protected files', () => {
     watcher.handleFileSystemEvent('change', 'src/secrets/not-protected.ts');
 
     expect(onProtected).toHaveBeenCalledTimes(2);
-    expect(read(repo, 'secrets/key.pem')).toBe('original key\n');
-    expect(read(repo, 'prisma/schema.prisma')).toBe('model A {}\n');
+    expect(onProtected.mock.calls.map((call) => call[0].filePath)).toEqual(['secrets/key.pem', 'prisma/schema.prisma']);
+    // an alarm, never an automatic rollback
+    expect(read(repo, 'secrets/key.pem')).toBe('tampered\n');
   });
 });
 
 describe('RepoWatcher rollback: bookkeeping', () => {
-  it('records the trigger before the rollback it caused', () => {
+  it('raises one alarm per series of edits, and revert restores the version before the series', () => {
     const repo = makeTmpDir();
     writeFiles(repo, { 'a.ts': 'original\n' });
     const configManager = new GuardConfigManager(repo, {
@@ -251,15 +252,40 @@ describe('RepoWatcher rollback: bookkeeping', () => {
     });
     const watcher = watcherFor(repo, { configManager, keepDiscarded: false });
 
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 5; i++) {
       writeFiles(repo, { 'a.ts': `edit ${i}\n` });
       watcher.handleFileSystemEvent('change', 'a.ts');
     }
+    expect(watcher.getRecentEvents().filter((e) => e.type === 'loop-detected')).toHaveLength(1);
+    expect(read(repo, 'a.ts')).toBe('edit 5\n');
 
-    // newest first
-    const types = watcher.getRecentEvents(2).map((e) => e.type);
-    expect(types).toEqual(['rollback', 'loop-detected']);
+    expect(watcher.rollbackFile('a.ts')).toBe(true);
     expect(read(repo, 'a.ts')).toBe('original\n');
+    // newest first
+    expect(watcher.getRecentEvents(2).map((e) => e.type)).toEqual(['rollback', 'file-edit']);
+  });
+
+  it('raises a new alarm for a new series after a quiet minute', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'original\n' });
+    const configManager = new GuardConfigManager(repo, {
+      limits: { maxFilesWarn: 15, maxFilesHardStop: 40, maxEditsPerFilePerMinute: 2, mcpSilenceTimeoutSec: 45 },
+    });
+    const watcher = watcherFor(repo, { configManager, keepDiscarded: false });
+    const t0 = Date.now() - 10 * 60_000;
+    const series = (start: number) => {
+      for (let i = 0; i < 3; i++) {
+        writeFiles(repo, { 'a.ts': `edit ${start + i}\n` });
+        watcher.handleFileSystemEvent('change', 'a.ts', start + i * 1000);
+      }
+    };
+
+    series(t0);
+    expect(watcher.loopDetector.getTrippedFiles(t0 + 3000)).toEqual(['a.ts']);
+    // a minute without edits re-arms the breaker
+    expect(watcher.loopDetector.getTrippedFiles(t0 + 2000 + 61_000)).toEqual([]);
+    series(t0 + 5 * 60_000);
+    expect(watcher.getRecentEvents().filter((e) => e.type === 'loop-detected')).toHaveLength(2);
   });
 
   it('treats the file system echo of its own rollback as its own, but not a new foreign edit', () => {
@@ -272,6 +298,9 @@ describe('RepoWatcher rollback: bookkeeping', () => {
     writeFiles(repo, { 'docker-compose.yml': 'tampered\n' });
     watcher.handleFileSystemEvent('change', 'docker-compose.yml');
     expect(onProtected).toHaveBeenCalledTimes(1);
+    // an alarm only; the revert is a person's decision
+    expect(read(repo, 'docker-compose.yml')).toBe('tampered\n');
+    expect(watcher.rollbackFile('docker-compose.yml')).toBe(true);
     expect(read(repo, 'docker-compose.yml')).toBe('version: "3.8"\n');
 
     // chokidar reports our own write, possibly late and more than once
@@ -283,7 +312,7 @@ describe('RepoWatcher rollback: bookkeeping', () => {
     writeFiles(repo, { 'docker-compose.yml': 'tampered again\n' });
     watcher.handleFileSystemEvent('change', 'docker-compose.yml');
     expect(onProtected).toHaveBeenCalledTimes(2);
-    expect(read(repo, 'docker-compose.yml')).toBe('version: "3.8"\n');
+    expect(read(repo, 'docker-compose.yml')).toBe('tampered again\n');
   });
 
   it('stops counting a file as modified once it is back at the checkpoint and re-arms the limits', () => {
@@ -366,7 +395,7 @@ describe('RepoWatcher dry run (demo mode)', () => {
     expect(read(repo, 'src/auth/session.ts')).toBe('uncommitted work during the demo\n');
     expect(watcher.getDiscardDir()).toBeNull();
     const messages = watcher.getRecentEvents().map((e) => e.message).join('\n');
-    expect(messages).toContain('rollback simulated');
+    expect(messages).toContain('Demo: would roll back src/auth/session.ts');
     expect(messages).toContain('no files touched');
     await watcher.stop();
   });

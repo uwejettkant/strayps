@@ -144,7 +144,7 @@ describe('WatchdogSession', () => {
   it('re-arms the circuit breaker for a file once it has been rolled back', () => {
     const h = createHarness({
       files: { 'a.ts': 'a\n' },
-      watcher: { keepDiscarded: false, autoRollbackOnLoop: false },
+      watcher: { keepDiscarded: false },
       config: { limits: { maxFilesWarn: 15, maxFilesHardStop: 40, maxEditsPerFilePerMinute: 2, mcpSilenceTimeoutSec: 45 } },
     });
     h.watcher.createCheckpoint();

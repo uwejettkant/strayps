@@ -114,7 +114,7 @@ describe('running commands against a session', () => {
     expect(kill.confirm?.prompt).not.toMatch(/stale|safe/i);
     const panic = runCommand(h.session, parseCommand('panic'));
     expect(panic.confirm?.prompt).toBe(
-      "PANIC: roll back 2 modified files and stop 1 process of this repo's agents (claude 100)?",
+      "PANIC: roll back 2 files changed in the last 10 min and stop 1 process of this repo's agents (claude 100)?",
     );
 
     // nothing happened yet
@@ -127,7 +127,7 @@ describe('running commands against a session', () => {
     expect(kill.confirm!.run().message).toBe('Sent SIGTERM to PID 300');
     expect(h.kills).toEqual([{ pid: 300, signal: 'SIGTERM' }]);
 
-    expect(panic.confirm!.run().message).toMatch(/^PANIC done: 1 file restored, 1 process killed$/);
+    expect(panic.confirm!.run().message).toMatch(/^PANIC done: 1 file rolled back, 1 process killed$/);
     expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGKILL' });
     expect(read(h.dir, 'src/api/client.ts')).toBe('client\n');
   });
@@ -147,7 +147,7 @@ describe('running commands against a session', () => {
     expect(runCommand(h.session, parseCommand('mode strict')).message).toBe('Guard mode is now STRICT');
     expect(h.session.getSnapshot().config.mode).toBe('strict');
     const panic = runCommand(h.session, parseCommand('panic'));
-    expect(panic.confirm?.prompt).toBe('PANIC: roll back 0 modified files (no agent of this repo is running)?');
+    expect(panic.confirm?.prompt).toBe('PANIC: roll back 0 files changed in the last 10 min (no agent of this repo is running)?');
     expect(runCommand(h.session, parseCommand('exit'))).toMatchObject({ exit: true });
     expect(runCommand(h.session, parseCommand('help'))).toMatchObject({ showHelp: true });
   });
@@ -280,7 +280,7 @@ describe('full-screen frame', () => {
   it('makes alarms unmissable: tripped breaker and hard stop', () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 41; i++) files[`f${i}.ts`] = 'x\n';
-    const h = createHarness({ files, watcher: { autoRollbackOnLoop: false } });
+    const h = createHarness({ files });
     h.watcher.createCheckpoint();
     for (let i = 0; i < 41; i++) h.watcher.handleFileSystemEvent('change', `f${i}.ts`);
     for (let i = 0; i < 6; i++) h.watcher.handleFileSystemEvent('change', 'f0.ts');
@@ -471,7 +471,7 @@ describe('interactive terminal view', () => {
     expect(tty.screen).toContain('Sent SIGTERM to PID 300');
 
     type('revert app\t\r');
-    expect(tty.screen).toContain('? Roll src/app.ts back to the session checkpoint?');
+    expect(tty.screen).toContain('? Roll src/app.ts back to the version before its latest changes?');
     type('Y');
     expect(read(h.dir, 'src/app.ts')).toBe('app\n');
     ui.stop();

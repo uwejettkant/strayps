@@ -65,7 +65,7 @@ describe('GuardConfigManager & RepoWatcher', () => {
     expect(manager.isProtectedFile('docker-compose.yml')).toBe(false);
   });
 
-  it('never reads or overwrites .env* files (warn-only), while auto-reverting non-env protected files like docker-compose.yml', () => {
+  it('never reads or overwrites .env* files (warn-only), and raises an alarm for other protected files like docker-compose.yml', () => {
     const envPath = path.join(tmpDir, '.env');
     const composePath = path.join(tmpDir, 'docker-compose.yml');
     const codePath = path.join(tmpDir, 'src', 'index.ts');
@@ -87,20 +87,22 @@ describe('GuardConfigManager & RepoWatcher', () => {
     watcher.handleFileSystemEvent('change', envPath);
 
     expect(onProtected).toHaveBeenCalledTimes(1);
-    expect(onProtected.mock.calls[0][0].rolledBack).toBe(false);
+    expect(onProtected.mock.calls[0][0].rolledBack).not.toBe(true);
     expect(onProtected.mock.calls[0][0].severity).toBe('warn');
     expect(fs.readFileSync(envPath, 'utf-8')).toBe('SECRET_KEY=updated-by-user-or-agent\n');
 
-    // 2. Touching docker-compose.yml emits critical event and auto-reverts it
+    // 2. Touching docker-compose.yml raises a critical alarm; only a revert restores it
     fs.writeFileSync(composePath, 'version: "corrupted"\n', 'utf-8');
     watcher.handleFileSystemEvent('change', composePath);
 
     expect(onProtected).toHaveBeenCalledTimes(2);
-    expect(onProtected.mock.calls[1][0].rolledBack).toBe(true);
+    expect(onProtected.mock.calls[1][0].severity).toBe('critical');
+    expect(fs.readFileSync(composePath, 'utf-8')).toBe('version: "corrupted"\n');
+    expect(watcher.rollbackFile('docker-compose.yml')).toBe(true);
     expect(fs.readFileSync(composePath, 'utf-8')).toBe('version: "3.8"\n');
   });
 
-  it('triggers the circuit breaker on file thrashing and rolls back the file to its initial snapshot', () => {
+  it('triggers the circuit breaker on file thrashing, and revert restores the version before the series', () => {
     const targetFile = path.join(tmpDir, 'src', 'thrash.ts');
     fs.mkdirSync(path.dirname(targetFile), { recursive: true });
     fs.writeFileSync(targetFile, 'export const stable = true;\n', 'utf-8');
@@ -117,7 +119,6 @@ describe('GuardConfigManager & RepoWatcher', () => {
     const watcher = new RepoWatcher({
       rootDir: tmpDir,
       configManager,
-      autoRollbackOnLoop: true,
     });
     watcher.createCheckpoint();
 
@@ -136,6 +137,8 @@ describe('GuardConfigManager & RepoWatcher', () => {
     watcher.handleFileSystemEvent('change', targetFile, baseTime + 500);
 
     expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(targetFile, 'utf-8')).toBe('export const stable = "corrupted-loop";\n');
+    expect(watcher.rollbackFile('src/thrash.ts')).toBe(true);
     expect(fs.readFileSync(targetFile, 'utf-8')).toBe('export const stable = true;\n');
   });
 

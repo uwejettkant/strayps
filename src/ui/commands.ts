@@ -1,6 +1,7 @@
 import { type GuardMode, parseMode } from '../core/guard-config.js';
 import type { MonitoredProcess } from '../core/process-monitor.js';
 import type { WatchdogSession } from '../core/session.js';
+import { PANIC_WINDOW_MS } from '../core/watcher.js';
 import { sanitize } from './format.js';
 
 export type LeashCommand =
@@ -32,9 +33,9 @@ export const COMMAND_NAMES = ['help', 'status', 'mode', 'revert', 'kill', 'panic
 export const HELP_LINES: Array<[string, string]> = [
   ['exit, quit, q', 'stop the watchdog (Ctrl+C works too)'],
   ['mode <strict|balanced|yolo>', 'switch the guard mode'],
-  ['revert <file>', 'roll one modified file back to the session checkpoint'],
+  ['revert <file>', 'roll one file back to the version before its latest changes'],
   ['kill <pid>', 'terminate one monitored process (SIGTERM, then SIGKILL)'],
-  ['panic', 'stop the agents of this repo and roll back all files'],
+  ['panic', 'stop the agents of this repo, roll back what changed in the last 10 min'],
   ['status', 'list all monitored processes'],
   ['help, ?', 'show this list'],
 ];
@@ -169,7 +170,7 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `Roll ${sanitize(file)} back to the session checkpoint?`,
+          prompt: `Roll ${sanitize(file)} back to the version before its latest changes?`,
           run: () =>
             session.rollbackFile(file)
               ? { message: `Rolled back ${sanitize(file)}`, level: 'info' }
@@ -208,9 +209,13 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
     case 'panic': {
       const snapshot = session.getSnapshot();
       const targets = session.getPanicTargets();
-      const files = snapshot.modifiedFiles.length;
+      const files = snapshot.panicFiles.length;
+      const older = snapshot.modifiedFiles.filter(
+        (f) => !snapshot.panicFiles.includes(f) && !session.watcher.isEnvFile(f),
+      ).length;
+      const minutes = Math.round(PANIC_WINDOW_MS / 60_000);
       // Both counts first: a narrow terminal cuts the end of the line, and the list can take that
-      const fileText = `roll back ${files} modified file${files === 1 ? '' : 's'}`;
+      const fileText = `roll back ${files} file${files === 1 ? '' : 's'} changed in the last ${minutes} min${older > 0 ? ` (${older} older kept)` : ''}`;
       const stopText =
         targets.length > 0
           ? ` and stop ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents (${describeProcesses(targets)})`
@@ -225,8 +230,9 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
             const skipped = result.skippedFiles.length
               ? `, ${result.skippedFiles.length} skipped`
               : '';
+            const kept = result.keptFiles.length ? `, ${result.keptFiles.length} older kept` : '';
             return {
-              message: `PANIC done: ${result.restoredCount} file${result.restoredCount === 1 ? '' : 's'} restored${skipped}, ${result.killedPids.length} process${result.killedPids.length === 1 ? '' : 'es'} killed`,
+              message: `PANIC done: ${result.restoredCount} file${result.restoredCount === 1 ? '' : 's'} rolled back${skipped}${kept}, ${result.killedPids.length} process${result.killedPids.length === 1 ? '' : 'es'} killed`,
               level: 'warn',
             };
           },

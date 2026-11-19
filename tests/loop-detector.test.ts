@@ -32,8 +32,16 @@ describe('LoopDetector (Thrashing & Circuit Breaker)', () => {
     expect(sixth.alert).toBeDefined();
     expect(sixth.alert?.filePath).toBe('src/app.ts');
     expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(sixth.firstTrip).toBe(true);
     expect(detector.isTripped('src/app.ts')).toBe(true);
-    expect(detector.getTrippedFiles()).toContain('src/app.ts');
+    expect(detector.getTrippedFiles(start + 3000)).toContain('src/app.ts');
+
+    // further edits of the same series are no new alarm
+    expect(detector.recordEdit('src/app.ts', start + 3500)).toMatchObject({ triggered: true, firstTrip: false });
+    // after a full window without edits the breaker re-arms
+    expect(detector.getTrippedFiles(start + 3500 + 60_001)).toEqual([]);
+    expect(detector.recordEdit('src/app.ts', start + 3500 + 60_001)).toMatchObject({ triggered: false, editCount: 1 });
+    expect(detector.isTripped('src/app.ts')).toBe(false);
   });
 
   it('expires edits older than the 60-second sliding window', () => {

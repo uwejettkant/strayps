@@ -41,7 +41,6 @@ export class CliError extends Error {}
 interface WatchOptions {
   port?: string;
   mode?: string;
-  autoRollback?: boolean;
   demo?: boolean;
   tui?: boolean;
   dashboard?: boolean;
@@ -207,13 +206,12 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     maxEditsPerFilePerMinute: cfg.limits.maxEditsPerFilePerMinute,
   });
 
+  // No automatic rollback: protected files and thrashing raise an alarm, revert/panic restore
   const watcher = new RepoWatcher({
     rootDir,
     configManager,
     loopDetector,
     dryRun: demo,
-    autoRollbackOnLoop: options.autoRollback !== false,
-    autoRollbackProtected: options.autoRollback !== false,
   });
 
   let demoProcesses = demo ? createDemoProcesses(watcher.rootDir) : [];
@@ -540,7 +538,6 @@ export function createCliProgram(): Command {
     .argument('[dir]', 'Target repository directory', '.')
     .option('-p, --port <port>', `Port for the local web dashboard (default: ${DEFAULT_PORT}, next free port if taken)`)
     .option('-m, --mode <mode>', 'Override guard mode (strict | balanced | yolo)')
-    .option('--no-auto-rollback', 'Only alert: never roll files back automatically')
     .option('--no-tui', 'Plain log output instead of the full-screen terminal view')
     .option('--no-dashboard', 'Do not start the local web dashboard')
     .option('-q, --quiet', 'Plain output only: print warnings and critical events, not every edit')

@@ -268,7 +268,7 @@
       <span id="panic-dialog-heading">Confirm Panic</span>
     </h2>
     <p id="panic-dialog-body" class="text-xs text-[#C9D6CE] mt-2 leading-relaxed">
-      This will immediately revert all modified files in the working tree back to the session checkpoint and send SIGKILL to the agent &amp; MCP processes of this repository. Sessions in other repositories are not touched.
+      Stops the agents of this repository and rolls back what they changed in the last 10 minutes. Nothing happens before you confirm.
     </p>
     <form method="dialog" class="mt-5 flex items-center justify-end gap-3">
       <button
@@ -292,9 +292,9 @@
 
   <script nonce="__LEASH_NONCE__">
     const modeDescriptions = {
-      strict: 'Hard stops on unusual file volume, loops & protected files',
-      balanced: 'Warns on mass edits · blocks loops & protected files',
-      yolo: 'File count limits disabled · keeps .env guard & loop breaker',
+      strict: 'Hard-stop alarm on unusual file volume · alarms on loops & protected files',
+      balanced: 'Warns on mass edits · alarms on loops & protected files',
+      yolo: 'File count limits disabled · keeps .env guard & loop alarm',
     };
 
     const leashToken = document.querySelector('meta[name="leash-token"]')?.content || '';
@@ -422,7 +422,8 @@
     if (panicOpenBtn) {
       panicOpenBtn.addEventListener('click', () => {
         const targets = ((lastStatus && lastStatus.processes) || []).filter((p) => p.panicTarget);
-        const files = ((lastStatus && lastStatus.modifiedFiles) || []).length;
+        const files = ((lastStatus && lastStatus.panicFiles) || []).length;
+        const older = ((lastStatus && lastStatus.modifiedFiles) || []).length - files;
         const listed = targets
           .slice(0, 5)
           .map((p) => 'PID ' + p.pid + ' ' + p.cmd)
@@ -436,7 +437,8 @@
           heading: 'Confirm Panic',
           body:
             stop +
-            'Reverts ' + files + ' modified file' + (files === 1 ? '' : 's') + ' to the session checkpoint. ' +
+            'Rolls back ' + files + ' file' + (files === 1 ? '' : 's') + ' changed in the last 10 minutes to the version before their latest changes' +
+            (older > 0 ? '; ' + older + ' older change' + (older === 1 ? ' stays' : 's stay') + ' as ' + (older === 1 ? 'it is' : 'they are') : '') + '. ' +
             'Dev servers, editors and sessions in other repositories are not touched.',
           confirmLabel: 'Execute Panic',
           run: triggerPanic,
@@ -468,7 +470,7 @@
         confirmAction({
           heading: 'Roll back ' + filePath + '?',
           body:
-            'Restores ' + filePath + ' to the session checkpoint. The version it replaces is kept in a private temp directory (shown in the activity log).',
+            'Restores the version ' + filePath + ' had before its latest changes, never anything older. The version it replaces is kept in a private temp directory (shown in the activity log).',
           confirmLabel: 'Roll back',
           run: () => rollbackFile(filePath),
         });
