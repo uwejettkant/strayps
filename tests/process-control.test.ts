@@ -156,12 +156,31 @@ describe('ProcessMonitor classification (production rules)', () => {
   });
 
   it('calls a quiet process frozen only when its parent is gone', async () => {
-    const { monitor } = setup([mcp(70, 1, { etime: '01:00:00' })]);
+    // Its process group (that of the agent that started it) has no leader any more
+    const { monitor } = setup([mcp(70, 1, { pgid: 69, etime: '01:00:00' })]);
     const t0 = Date.now();
     await monitor.scan(t0);
     const [orphan] = await monitor.scan(t0 + 46_000);
     expect(orphan.status).toBe('FROZEN');
     expect(orphan.reason).toContain('its parent is gone');
+  });
+
+  it('does not take an app started from the Dock or Finder for an orphan', async () => {
+    // On macOS launchd (PID 1) is the parent of every app it starts, and makes each one the
+    // leader of its own process group. A process whose parent died keeps its old group.
+    const t0 = Date.now();
+    const { monitor } = setup([
+      { pid: 80, ppid: 1, pgid: 80, name: 'Chromium', cmd: '/Applications/Chromium.app/Contents/MacOS/Chromium', cpu: 0, etime: '05:00:00' },
+      // without a process group (fallback lister) there is no evidence that the parent is gone
+      mcp(81, 1, { etime: '05:00:00' }),
+    ]);
+    for (const t of [t0, t0 + 46_000, t0 + 3_600_000]) {
+      const list = await monitor.scan(t);
+      expect(list.map((p) => [p.pid, p.status]).sort()).toEqual([
+        [80, 'IDLE'],
+        [81, 'IDLE'],
+      ]);
+    }
   });
 
   it('marks tool processes started by an agent of the watched repo as belonging to it', async () => {

@@ -18,6 +18,8 @@ export type AgentDetection = 'name' | 'setting' | 'mcp-client';
 export interface RawProcessInfo {
   pid: number;
   ppid?: number;
+  /** Process group. Unknown when the fallback lister is used. */
+  pgid?: number;
   name: string;
   cmd?: string;
   cpu?: number;
@@ -340,7 +342,7 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   try {
     const { stdout } = await execFileAsync(
       'ps',
-      ['-Ao', 'pid,ppid,rss,pcpu,pmem,etime,comm,args'],
+      ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,comm,args'],
       { maxBuffer: 16 * 1024 * 1024 },
     );
     const lines = stdout.trim().split('\n').slice(1);
@@ -349,17 +351,18 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
     for (const line of lines) {
       const match = line
         .trim()
-        .match(/^(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+(.*)$/);
+        .match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+(.*)$/);
       if (!match) continue;
       results.push({
         pid: Number(match[1]),
         ppid: Number(match[2]),
-        rssKb: Number(match[3]) || 0,
-        cpu: Number(match[4]) || 0,
-        memory: Number(match[5]) || 0,
-        etime: match[6],
-        name: match[7],
-        cmd: match[8],
+        pgid: Number(match[3]),
+        rssKb: Number(match[4]) || 0,
+        cpu: Number(match[5]) || 0,
+        memory: Number(match[6]) || 0,
+        etime: match[7],
+        name: match[8],
+        cmd: match[9],
       });
     }
     return results;
@@ -709,7 +712,12 @@ export class ProcessMonitor extends EventEmitter {
       const hostNote = host && host !== 'detached' ? `, attached to ${host}` : '';
 
       const isStaleByAge = elapsedSec >= this.staleSessionSec;
-      const isOrphaned = raw.ppid === 1 && category !== 'agent';
+      // PPID 1 alone does not mean the parent is gone: on macOS launchd is the parent of every app
+      // started from the Dock or Finder, and makes each one the leader of its own process group.
+      // A process whose parent died keeps the group it was started in. Without a known group
+      // there is no evidence, so nothing is called orphaned.
+      const isOrphaned =
+        raw.ppid === 1 && raw.pgid !== undefined && raw.pgid !== raw.pid && category !== 'agent';
       const rawCmdLower = (raw.cmd ?? '').toLowerCase();
       const isDevServer =
         rawCmdLower.includes('next dev') ||

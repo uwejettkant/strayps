@@ -30,7 +30,7 @@ agent-leash keeps no list of AI products. A process is a coding agent when one o
 | 1 | dev server pattern, not in another repo | `ACTIVE` |
 | 2 | working directory in another repo, older than `staleSessionHours` (6 h) | `STALE` |
 | 3 | MCP process, no resolvable working directory, not part of the watched session, older than `staleSessionHours`, CPU below 0.5 % | `STALE` |
-| 4 | parent is PID 1, not an agent, 0 % CPU, older than the silence timeout | `FROZEN` |
+| 4 | orphaned: parent is PID 1 **and** not the leader of its own process group, not an agent, 0 % CPU, older than the silence timeout | `FROZEN` |
 | 5 | MCP process, 0 % CPU, parent alive | `STANDBY` |
 | 6 | agent that belongs to the watched repository | `ACTIVE` / `IDLE`, never stale or frozen |
 | 7 | no CPU and no file activity for the silence timeout (45 s) | `IDLE`, reason "Quiet …": quiet is not frozen |
@@ -51,13 +51,14 @@ Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `l
 - **Its MCP server too.** The same session's MCP server was still marked `STALE` after 6 h when its working directory was not inside the repository (rule 3 ran before rule 5). Fix: `inWatchedRepo` through the process tree.
 - **Different rules in tests.** The classification had branches that only ran with the real process lister, so the tests exercised other rules than production. Fix: one rule set; the lister and the working-directory lookup are injected separately.
 - **Quiet is not frozen.** Every tracked process without CPU and file activity for 45 s was `FROZEN`: a resting `tsx watch` server, a browser, a young session in another repository waiting for its user (audit D-02). Fix: `FROZEN` only for orphans (rule 4); rule 7 now only says the process is quiet.
+- **An app is not an orphan.** On macOS launchd (PID 1) is the parent of every app started from the Dock or Finder, so an idle browser app was called orphaned. launchd makes each one the leader of its own process group; a process whose parent died keeps the group it was started in. Measured on 19.11.2026: 727 of 732 PPID-1 processes led their own group, the other 5 were real orphans whose group leader was gone. Fix: rule 4 needs `pgid !== pid`; without a known group (fallback lister) nothing is called orphaned.
 - **An agent nobody listed.** On 17.11.2026 the Antigravity CLI (`agy`) worked in the watched repository and did not appear at all; only its MCP server did. The emergency brake would have stopped the Claude session next to it, but not `agy`. Fix: rule 3 of section 1, without adding `agy` to any list.
 
 ## 4. Known weak spots (not decided yet)
 
 - Rule 2 looks at age only. A session in another repository that is attached to an open editor window, or even busy, counts as stale after 6 hours.
-- Rule 4 takes PPID 1 for "parent is gone". On macOS an app started from the Dock or Finder also has PPID 1 (launchd), so an idle browser app can be called orphaned although nothing is wrong with it.
 - CPU activity comes from `ps %cpu`: a decaying average on macOS, the lifetime average on Linux, where it says nothing about now.
+- A process that detached itself (its own process group, e.g. a daemonized server) and then lost its parent is not recognized as orphaned. On Linux an orphan may be adopted by a subreaper instead of PID 1 (unverified).
 - MCP servers, browsers and node processes are still matched by substring (`mcp`, `chromium`, `node` …) and catch unrelated programs; an agent without MCP and without a known name stays invisible until it is named in `agents`.
 - An app that is not in `HOST_PATTERNS` and starts MCP servers (Docker Desktop, a launcher utility) is taken for an agent by rule 3 of section 1.
 

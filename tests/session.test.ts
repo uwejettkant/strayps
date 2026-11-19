@@ -76,7 +76,7 @@ describe('WatchdogSession', () => {
       procs: [
         { pid: 100, name: 'claude', cmd: 'claude', cwd: '<repo>', cpu: 2, etime: '08:00:00' },
         { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' },
-        { pid: 301, ppid: 1, name: 'node', cmd: 'node some-mcp-server', cpu: 0, etime: '01:00:00' },
+        { pid: 301, ppid: 1, pgid: 290, name: 'node', cmd: 'node some-mcp-server', cpu: 0, etime: '01:00:00' },
       ],
     });
     h.procs[0].cwd = h.dir;

@@ -57,6 +57,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
       {
         pid: 5001,
         ppid: 1,
+        pgid: 5000,
         name: 'node',
         cmd: 'npx @playwright/mcp@latest',
         cpu: 0,
@@ -116,6 +117,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
       {
         pid: 6001,
         ppid: 1,
+        pgid: 6000,
         name: 'playwright',
         cmd: 'playwright test --headed',
         cpu: 0,
