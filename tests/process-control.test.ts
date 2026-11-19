@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  parseCpuTime,
   parseLsofCwdOutput,
   ProcessMonitor,
+  STALE_QUIET_SEC,
   type RawProcessInfo,
   resolveProcessCwds,
 } from '../src/core/process-monitor.js';
@@ -112,25 +114,64 @@ describe('ProcessMonitor classification (production rules)', () => {
     expect(onFrozen).not.toHaveBeenCalled();
   });
 
-  it('flags an old session in another repository as STALE and names what it is attached to', async () => {
-    const { monitor } = setup([
+  it('flags an old session in another repository as STALE once it has used no CPU time for the quiet window', async () => {
+    const { monitor, procs } = setup([
       { pid: 500, ppid: 1, name: 'Code', cmd: '/Applications/Visual Studio Code.app/Contents/MacOS/Code' },
       { pid: 501, ppid: 500, name: 'Code Helper (Plugin)', cmd: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)' },
-      agent(502, OTHER, { ppid: 501, etime: '02-15:40:05' }),
-      mcp(503, 502, { cwd: OTHER, etime: '02-15:40:01' }),
+      // ps %cpu still shows a decaying average; the CPU time does not move
+      agent(502, OTHER, { ppid: 501, etime: '02-15:40:05', cpu: 0.3, cpuTimeSec: 812.4 }),
+      mcp(503, 502, { cwd: OTHER, etime: '02-15:40:01', cpuTimeSec: 3.1 }),
     ]);
+    const t0 = Date.now();
+    const at = async (offsetSec: number) => (await monitor.scan(t0 + offsetSec * 1000)).find((p) => p.pid === 502)!;
 
-    const list = await monitor.scan(1_000);
-    const session = list.find((p) => p.pid === 502)!;
+    // agent-leash has only just started watching: no evidence of inactivity yet
+    expect((await at(0)).status).not.toBe('STALE');
+    expect((await at(STALE_QUIET_SEC - 1)).status).not.toBe('STALE');
+
+    // idle is not zero: timers and housekeeping use a little CPU time
+    procs.find((p) => p.pid === 502)!.cpuTimeSec = 812.45;
+    const session = await at(STALE_QUIET_SEC);
     expect(session.status).toBe('STALE');
     expect(session.host).toBe('VS Code');
-    expect(session.reason).toBe('Session in /work/other-repo, running for 2d 15h, attached to VS Code');
+    expect(session.reason).toBe(
+      'Session in /work/other-repo, running for 2d 15h, idle: 0.05 s CPU time in the last 10m, attached to VS Code',
+    );
     // an observation, not a verdict: age alone has been wrong about sessions still in use
     expect(session.reason).not.toMatch(/safe to kill/i);
     expect(session.inWatchedRepo).toBe(false);
     expect(session.pauseTarget).toBe(false);
     // the editor itself is not an agent process
-    expect(list.map((p) => p.pid).sort()).toEqual([502, 503]);
+    expect((await monitor.scan(t0 + STALE_QUIET_SEC * 1000)).map((p) => p.pid).sort()).toEqual([502, 503]);
+
+    // as soon as it works again, it is no longer stale
+    procs.find((p) => p.pid === 502)!.cpuTimeSec = 813.0;
+    const working = await at(STALE_QUIET_SEC + 2);
+    expect(working.status).toBe('ACTIVE');
+    expect(working.reason).toContain('in use: 0.60 s CPU time in the last 10m');
+  });
+
+  it('never calls an old session in another repository stale while it keeps using CPU time', async () => {
+    // Audit D-01: a two-day-old session at an open editor window was called stale by age alone
+    const { monitor, procs } = setup([agent(502, OTHER, { etime: '02-15:40:05', cpuTimeSec: 100 })]);
+    const t0 = Date.now();
+    for (let minute = 0; minute <= 60; minute += 5) {
+      // a session at an open editor that is used now and then: 0.6 s of CPU time per minute
+      procs[0].cpuTimeSec = 100 + minute * 0.6;
+      const [session] = await monitor.scan(t0 + minute * 60_000);
+      expect(session.status, `minute ${minute}`).not.toBe('STALE');
+    }
+  });
+
+  it('never calls a session stale when its CPU time cannot be read', async () => {
+    const { monitor } = setup([agent(502, OTHER, { etime: '13-00:00:00', cpu: 0 })]);
+    const t0 = Date.now();
+    for (const offset of [0, STALE_QUIET_SEC, 24 * 3600]) {
+      const [session] = await monitor.scan(t0 + offset * 1000);
+      expect(session.status).not.toBe('STALE');
+    }
+    const [session] = await monitor.scan(t0 + 1000);
+    expect(session.reason).toContain('its CPU time cannot be read, so it is never called stale');
   });
 
   it('does not call a quiet process frozen while its parent is alive, however long it is quiet', async () => {
@@ -489,6 +530,18 @@ describe('ProcessMonitor termination', () => {
     expect(monitor.killProcess(process.ppid)).toBe(false);
     expect(takeBlockedKills()).toEqual([{ pid: process.ppid, signal: 'SIGTERM' }]);
     monitor.stop();
+  });
+});
+
+describe('CPU time from ps', () => {
+  it('reads the macOS and the Linux format, and nothing else', () => {
+    expect(parseCpuTime('0:00.45')).toBeCloseTo(0.45);
+    expect(parseCpuTime('240:42.31')).toBeCloseTo(240 * 60 + 42.31);
+    expect(parseCpuTime('00:01:23')).toBe(83);
+    expect(parseCpuTime('2-03:04:05')).toBe(2 * 86400 + 3 * 3600 + 4 * 60 + 5);
+    expect(parseCpuTime('')).toBeUndefined();
+    expect(parseCpuTime('-')).toBeUndefined();
+    expect(parseCpuTime('abc')).toBeUndefined();
   });
 });
 

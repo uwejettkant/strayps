@@ -78,7 +78,7 @@ export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
   'limits.maxFilesHardStop': 'files modified in this session before the hard-stop alarm',
   'limits.maxEditsPerFilePerMinute': 'edits to one file within 60 s before the circuit breaker raises an alarm',
   'limits.mcpSilenceTimeoutSec': 'seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen',
-  'limits.staleSessionHours': 'hours after which a session in another repository counts as stale',
+  'limits.staleSessionHours': 'hours after which a session in another repository counts as stale, if it is also measured idle for ten minutes',
   protectedFiles: 'globs; a change to a match raises an alarm (revert restores it); .env* contents are never read',
   agents:
     'more program names to treat as coding agents (exact name, e.g. vibe); agents that start MCP servers are found without this',

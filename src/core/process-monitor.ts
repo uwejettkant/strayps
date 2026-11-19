@@ -26,6 +26,8 @@ export interface RawProcessInfo {
   memory?: number;
   rssKb?: number;
   etime?: string;
+  /** CPU time used since the process started. Unknown when the fallback lister is used. */
+  cpuTimeSec?: number;
   cwd?: string;
 }
 
@@ -43,6 +45,8 @@ export interface MonitoredProcess {
   elapsedSec: number;
   firstSeenAt: number;
   lastActiveAt: number;
+  /** CPU time used since the process started, if the lister can read it. */
+  cpuTimeSec?: number;
   silenceSec: number;
   /**
    * What the process looks like right now. STALE and FROZEN are observations, not a verdict:
@@ -71,6 +75,8 @@ export interface ProcessMonitorOptions {
   rootDir?: string;
   pollIntervalMs?: number;
   mcpSilenceTimeoutSec?: number;
+  /** Window for measured inactivity before STALE (default STALE_QUIET_SEC); tests use 0. */
+  staleQuietSec?: number;
   staleSessionHours?: number;
   agentActive?: boolean;
   selfPid?: number;
@@ -201,6 +207,49 @@ const HOST_PATTERNS: Array<[RegExp, string]> = [
     'terminal',
   ],
 ];
+
+/** CPU time below this between two scans is measurement noise, not work. */
+const CPU_TIME_TICK_SEC = 0.005;
+
+/**
+ * A session in another repository is called stale only after agent-leash has watched it for this
+ * long and it used less than STALE_CPU_BUDGET_SEC of CPU time in that window. A freshly started
+ * watchdog therefore calls nothing stale for this long.
+ */
+export const STALE_QUIET_SEC = 10 * 60;
+/**
+ * Idle is not zero: measured on 19.11.2026, idle agent processes used 0.00 to 0.2 s of CPU time
+ * per 2 minutes (timers, housekeeping), working ones 2 to 17 s.
+ */
+export const STALE_CPU_BUDGET_SEC = 0.5;
+/** Spacing of the CPU time samples kept per process for the window. */
+const CPU_SAMPLE_SPACING_MS = 30_000;
+
+function formatCpu(sec: number): string {
+  return `${sec.toFixed(2)} s`;
+}
+
+function formatDuration(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
+
+/**
+ * Parses the CPU time a process has used so far, as `ps -o time` prints it: `mmm:ss.cc` on macOS,
+ * `[dd-]hh:mm:ss` on Linux. Returns undefined for anything else, so a misread column never
+ * passes for "no CPU used".
+ */
+export function parseCpuTime(time?: string): number | undefined {
+  const match = time?.trim().match(/^(?:(\d+)-)?(\d+):(\d+)(?::(\d+))?(?:\.(\d+))?$/);
+  if (!match) return undefined;
+  const [, days, a, b, c, fraction] = match;
+  const whole =
+    c === undefined
+      ? Number(a) * 60 + Number(b)
+      : Number(days ?? 0) * 86400 + Number(a) * 3600 + Number(b) * 60 + Number(c);
+  return fraction === undefined ? whole : whole + Number(`0.${fraction}`);
+}
 
 /**
  * Parses POSIX `ps` elapsed time (`[[dd-]hh:]mm:ss`) into seconds and a compact human label.
@@ -342,7 +391,7 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   try {
     const { stdout } = await execFileAsync(
       'ps',
-      ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,comm,args'],
+      ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,comm,args'],
       { maxBuffer: 16 * 1024 * 1024 },
     );
     const lines = stdout.trim().split('\n').slice(1);
@@ -351,7 +400,7 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
     for (const line of lines) {
       const match = line
         .trim()
-        .match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+(.*)$/);
+        .match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$/);
       if (!match) continue;
       results.push({
         pid: Number(match[1]),
@@ -361,8 +410,9 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
         cpu: Number(match[5]) || 0,
         memory: Number(match[6]) || 0,
         etime: match[7],
-        name: match[8],
-        cmd: match[9],
+        cpuTimeSec: parseCpuTime(match[8]),
+        name: match[9],
+        cmd: match[10],
       });
     }
     return results;
@@ -409,6 +459,7 @@ export class ProcessMonitor extends EventEmitter {
   private pollIntervalMs: number;
   private mcpSilenceTimeoutSec: number;
   private staleSessionSec: number;
+  private staleQuietSec: number;
   private agentActive: boolean;
   private selfPid: number;
   private killGraceMs: number;
@@ -422,6 +473,8 @@ export class ProcessMonitor extends EventEmitter {
   private tracked: Map<number, MonitoredProcess> = new Map();
   private paused: Set<number> = new Set();
   private alertedPids: Set<number> = new Set();
+  /** CPU time samples per PID, oldest first, spaced CPU_SAMPLE_SPACING_MS apart. */
+  private cpuSamples: Map<number, Array<{ at: number; cpuTimeSec: number }>> = new Map();
   private lastFileActivityAt: number = Date.now();
   private scanInFlight: Promise<MonitoredProcess[]> | null = null;
   /** PIDs that received SIGTERM and are inside their grace period. */
@@ -439,6 +492,7 @@ export class ProcessMonitor extends EventEmitter {
     this.pollIntervalMs = options.pollIntervalMs ?? 2000;
     this.mcpSilenceTimeoutSec = options.mcpSilenceTimeoutSec ?? 45;
     this.staleSessionSec = (options.staleSessionHours ?? 6) * 3600;
+    this.staleQuietSec = options.staleQuietSec ?? STALE_QUIET_SEC;
     this.agentActive = options.agentActive ?? true;
     this.selfPid = options.selfPid ?? process.pid;
     this.killGraceMs = options.killGraceMs ?? 3000;
@@ -681,7 +735,20 @@ export class ProcessMonitor extends EventEmitter {
           : Number((memory * 16).toFixed(1));
 
       const existing = this.tracked.get(raw.pid);
-      const hasCpuActivity = cpu > 0;
+      // Measured activity: did the process use CPU time since the last scan? `ps %cpu` is a
+      // decaying average on macOS and the lifetime average on Linux, so it says little about now.
+      // It is the fallback only for the first scan and for a lister without CPU time.
+      const cpuTimeSec = raw.cpuTimeSec;
+      const usedCpuSinceLastScan =
+        cpuTimeSec !== undefined && existing?.cpuTimeSec !== undefined
+          ? cpuTimeSec - existing.cpuTimeSec > CPU_TIME_TICK_SEC
+          : undefined;
+      const hasCpuActivity = usedCpuSinceLastScan ?? cpu > 0;
+      // CPU time used over the last STALE_QUIET_SEC, as far as this monitor has seen it.
+      // Undefined when the CPU time is unknown or the process has not been watched that long:
+      // then there is no evidence of inactivity at all.
+      const usedInWindowSec = this.cpuUsedInWindow(raw.pid, cpuTimeSec, now);
+      const quietLongEnough = usedInWindowSec !== undefined && usedInWindowSec < STALE_CPU_BUDGET_SEC;
       const lastActiveAt = existing
         ? hasCpuActivity
           ? now
@@ -742,14 +809,23 @@ export class ProcessMonitor extends EventEmitter {
       if (!isOtherRepo && isDevServer) {
         status = 'ACTIVE';
         reason = `Running dev server in current repository (${formattedUptime})`;
-      } else if (isOtherRepo && isStaleByAge) {
-        // Process belongs to a DIFFERENT repository and has exceeded the stale age threshold
+      } else if (isOtherRepo && isStaleByAge && quietLongEnough) {
+        // Age alone called sessions stale that were still in use at an open editor (audit D-01):
+        // a session in another repository is stale only when it is old AND has used no CPU time
+        // for a measured window.
         status = 'STALE';
-        reason = `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}`;
-      } else if (!belongsToWatchedRepo && !rawCwd && isStaleByAge && cpu < 0.5 && category === 'mcp') {
+        reason = `Session in ${displayCwd}, running for ${formattedUptime}, idle: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}${hostNote}`;
+      } else if (isOtherRepo && isStaleByAge) {
+        reason =
+          cpuTimeSec === undefined
+            ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; its CPU time cannot be read, so it is never called stale`
+            : usedInWindowSec === undefined
+              ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; watching for ${formatDuration(this.staleQuietSec)} whether it is still in use`
+              : `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; in use: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
+      } else if (!belongsToWatchedRepo && !rawCwd && isStaleByAge && quietLongEnough && category === 'mcp') {
         // Detached MCP process without a repository cwd, older than staleSessionHours
         status = 'STALE';
-        reason = `MCP process without a working directory, running for ${formattedUptime}${hostNote}`;
+        reason = `MCP process without a working directory, running for ${formattedUptime}, idle: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}${hostNote}`;
       } else if (isOrphaned && !hasCpuActivity && elapsedSec >= this.mcpSilenceTimeoutSec) {
         status = 'FROZEN';
         reason = `Orphaned: its parent is gone (PPID 1), running for ${formattedUptime}`;
@@ -802,6 +878,7 @@ export class ProcessMonitor extends EventEmitter {
         elapsedSec,
         firstSeenAt: existing?.firstSeenAt ?? now,
         lastActiveAt,
+        cpuTimeSec,
         silenceSec,
         status,
         reason,
@@ -829,12 +906,38 @@ export class ProcessMonitor extends EventEmitter {
         this.tracked.delete(pid);
         this.paused.delete(pid);
         this.alertedPids.delete(pid);
+        this.cpuSamples.delete(pid);
       }
     }
 
     const processes = this.getProcesses();
     this.emit('scan-complete', processes);
     return processes;
+  }
+
+  /**
+   * Records a CPU time sample and returns the CPU time used over the last staleQuietSec, or
+   * undefined when the CPU time is unknown or the process has not been watched that long.
+   */
+  private cpuUsedInWindow(pid: number, cpuTimeSec: number | undefined, now: number): number | undefined {
+    if (cpuTimeSec === undefined) {
+      this.cpuSamples.delete(pid);
+      return undefined;
+    }
+    const samples = this.cpuSamples.get(pid) ?? [];
+    const last = samples[samples.length - 1];
+    // a lower value means the PID was reused by another process: start over
+    if (last && cpuTimeSec < last.cpuTimeSec) samples.length = 0;
+    if (samples.length === 0 || now - samples[samples.length - 1].at >= CPU_SAMPLE_SPACING_MS) {
+      samples.push({ at: now, cpuTimeSec });
+    }
+    const windowStart = now - this.staleQuietSec * 1000;
+    // keep the newest sample at or before the window start as its anchor, drop the older ones
+    while (samples.length > 1 && samples[1].at <= windowStart) samples.shift();
+    this.cpuSamples.set(pid, samples);
+    const anchor = samples[0];
+    if (anchor.at > windowStart) return undefined;
+    return Math.max(0, cpuTimeSec - anchor.cpuTimeSec);
   }
 
   public getProcesses(): MonitoredProcess[] {

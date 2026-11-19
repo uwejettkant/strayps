@@ -99,7 +99,7 @@ agent-leash keeps no list of AI products, and it does not care which model an ag
 
 `pause` holds the agents of the watched repository and the processes they started. Your dev server, your editor and the sessions in other repositories keep running.
 
-The process list marks old sessions in other repositories as `STALE` and processes whose parent is gone as `FROZEN` (an app that macOS started from the Dock or Finder is not counted as one). Those are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. You end a process with `kill <pid>` after a confirmation, or from its row in the dashboard.
+The process list marks old sessions in other repositories as `STALE` once it has watched them for ten minutes and they used less than half a second of CPU time in that window, and processes whose parent is gone as `FROZEN` (an app that macOS started from the Dock or Finder is not counted as one). Those are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. You end a process with `kill <pid>` after a confirmation, or from its row in the dashboard.
 
 ---
 
@@ -145,7 +145,7 @@ flowchart LR
 
 1. **Dual-Layer Session Checkpoint (`git stash create` + Memory Snapshot, Zero-Secret-Access for `.env*`)**: On startup, `agent-leash` creates an invisible Git commit object without touching your working tree or stash reflog, paired with an in-memory snapshot for code files. `.env*` files are strictly metadata-monitored (warn-only): their contents are **never** read into memory or overwritten on disk.
 2. **Rollbacks That Lose Nothing**: agent-leash never rolls a file back on its own. For every changed file it keeps the version from before its latest series of changes, and `revert` restores exactly that one, never anything older. Before a rollback overwrites or removes a file, the version being replaced is copied to a private temp directory (the path is in the log and in the exit summary). A rollback only touches files inside the watched repository, and only deletes a file that did not exist before its latest changes. `agent-leash` recognizes the file system echo of its own rollback by content, so the rollback never triggers a second alert.
-3. **Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen, even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB) and uptime (`etime`) to tell **standby MCP children** (`STANDBY`) from **old sessions in other repos** (`STALE`) and **orphaned processes whose parent is gone** (`FROZEN`); a process that is merely quiet is not frozen. The tree also tells which agent started which process, so `pause` holds exactly the agents of the watched repository and what they started.
+3. **Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen, even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB), uptime (`etime`) and the CPU time used between scans (`time`, not the `%cpu` average) to tell **standby MCP children** (`STANDBY`) from **old sessions in other repos** (`STALE`) and **orphaned processes whose parent is gone** (`FROZEN`); a process that is merely quiet is not frozen. The tree also tells which agent started which process, so `pause` holds exactly the agents of the watched repository and what they started.
 
 ---
 
@@ -198,7 +198,7 @@ npx agent-leash init                         # or write a file with every defaul
 | `limits.maxFilesHardStop` | `40` | Files modified in this session before the hard-stop alarm |
 | `limits.maxEditsPerFilePerMinute` | `5` | Edits to one file within 60 seconds before the circuit breaker raises an alarm |
 | `limits.mcpSilenceTimeoutSec` | `45` | Seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen |
-| `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale |
+| `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale, if it is also measured idle for ten minutes |
 | `protectedFiles` | `.env*`, `docker-compose*.yml`, `.git/**` | Globs relative to the repository root. Your list replaces the default one, so keep `.env*` in it if you want those warnings |
 | `agents` | none | More program names to treat as coding agents, e.g. `vibe`. Not needed for agents that start MCP servers, nor for Claude Code, Codex and Aider ([how agents are recognized](#which-agents-it-recognizes)) |
 
@@ -310,7 +310,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 182 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 185 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

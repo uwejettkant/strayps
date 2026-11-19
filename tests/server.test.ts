@@ -149,7 +149,7 @@ describe('dashboard API: what the actions do', () => {
 
   it('has no route that terminates processes in bulk because of their status', async () => {
     const h = createHarness({
-      procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: '/work/other-repo', etime: '03-00:00:00' }],
+      procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: '/work/other-repo', etime: '03-00:00:00', cpuTimeSec: 1.5 }],
     });
     await h.monitor.scan();
     expect(h.session.getSnapshot().processes[0].status).toBe('STALE');

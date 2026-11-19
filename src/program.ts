@@ -122,13 +122,17 @@ function createDemoProcesses(rootDir: string): RawProcessInfo[] {
       name: 'claude',
       cmd: 'claude --model claude-sonnet-5-5',
       cwd: otherRepo,
-      cpu: 0.1,
+      cpu: 0,
+      // its CPU time does not move: after ten minutes of the demo it is called stale
+      cpuTimeSec: 95.2,
       rssKb: 128_500,
       etime: '11-19:42:10',
     },
     {
       pid: 31902,
       ppid: 1,
+      // its process group lost its leader: an orphan, not an app started by launchd
+      pgid: 31890,
       name: 'node',
       cmd: 'node /Users/demo/.npm/_npx/15c8/node_modules/.bin/dataforseo-mcp-server',
       cpu: 0,

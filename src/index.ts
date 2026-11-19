@@ -37,6 +37,7 @@ export {
   defaultProcessKiller,
   defaultProcessLister,
   type MonitoredProcess,
+  parseCpuTime,
   parseElapsedTime,
   type ProcessCategory,
   type ProcessHealthStatus,

@@ -28,14 +28,16 @@ agent-leash keeps no list of AI products. A process is a coding agent when one o
 | # | Condition | Result |
 | :--- | :--- | :--- |
 | 1 | dev server pattern, not in another repo | `ACTIVE` |
-| 2 | working directory in another repo, older than `staleSessionHours` (6 h) | `STALE` |
-| 3 | MCP process, no resolvable working directory, not part of the watched session, older than `staleSessionHours`, CPU below 0.5 % | `STALE` |
+| 2 | working directory in another repo, older than `staleSessionHours` (6 h), **and** measured idle: watched for 10 min (`STALE_QUIET_SEC`) and used less than 0.5 s CPU time in that window (`STALE_CPU_BUDGET_SEC`) | `STALE` |
+| 3 | MCP process, no resolvable working directory, not part of the watched session, older than `staleSessionHours`, measured idle as in rule 2 | `STALE` |
 | 4 | orphaned: parent is PID 1 **and** not the leader of its own process group, not an agent, 0 % CPU, older than the silence timeout | `FROZEN` |
 | 5 | MCP process, 0 % CPU, parent alive | `STANDBY` |
 | 6 | agent that belongs to the watched repository | `ACTIVE` / `IDLE`, never stale or frozen |
 | 7 | no CPU and no file activity for the silence timeout (45 s) | `IDLE`, reason "Quiet …": quiet is not frozen |
 
 `STALE` and `FROZEN` are observations shown to the user, with the reason. They never lead to a termination by themselves.
+
+Activity is measured, not read from `ps %cpu`: the lister reads the CPU time a process has used (`ps -o time`, `parseCpuTime`), and the monitor compares it between scans (ACTIVE/IDLE) and over a sliding window (rules 2 and 3, samples every 30 s). Idle is not zero, which is why rule 2 has a budget instead of "no CPU at all". When the CPU time cannot be read, nothing is called stale; `ps %cpu` remains the fallback only for ACTIVE/IDLE on the first scan.
 
 "Belongs to the watched repository" (`inWatchedRepo`) means: its own working directory is inside the repository, **or** one of its ancestors in the process tree is such a process. MCP servers often run in `/` or in their install directory; only the tree tells whose they are.
 
@@ -52,12 +54,12 @@ Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `l
 - **Different rules in tests.** The classification had branches that only ran with the real process lister, so the tests exercised other rules than production. Fix: one rule set; the lister and the working-directory lookup are injected separately.
 - **Quiet is not frozen.** Every tracked process without CPU and file activity for 45 s was `FROZEN`: a resting `tsx watch` server, a browser, a young session in another repository waiting for its user (audit D-02). Fix: `FROZEN` only for orphans (rule 4); rule 7 now only says the process is quiet.
 - **An app is not an orphan.** On macOS launchd (PID 1) is the parent of every app started from the Dock or Finder, so an idle browser app was called orphaned. launchd makes each one the leader of its own process group; a process whose parent died keeps the group it was started in. Measured on 19.11.2026: 727 of 732 PPID-1 processes led their own group, the other 5 were real orphans whose group leader was gone. Fix: rule 4 needs `pgid !== pid`; without a known group (fallback lister) nothing is called orphaned.
+- **Busy, but stale by age.** A session in another repository counted as stale after 6 hours whatever it was doing, even at an open VS Code window (audit D-01). Measured on 19.11.2026 over 2 minutes: idle agent and MCP processes used 0.00 to 0.2 s of CPU time, working sessions 2 to 17 s. Fix: rule 2 and 3 need measured inactivity below a budget over a 10-minute window.
 - **An agent nobody listed.** On 17.11.2026 the Antigravity CLI (`agy`) worked in the watched repository and did not appear at all; only its MCP server did. The emergency brake would have stopped the Claude session next to it, but not `agy`. Fix: rule 3 of section 1, without adding `agy` to any list.
 
 ## 4. Known weak spots (not decided yet)
 
-- Rule 2 looks at age only. A session in another repository that is attached to an open editor window, or even busy, counts as stale after 6 hours.
-- CPU activity comes from `ps %cpu`: a decaying average on macOS, the lifetime average on Linux, where it says nothing about now.
+- Rule 2 cannot tell a session nobody will come back to from one at an open editor window that is merely idle for 10 minutes: both use almost no CPU. It only rules out sessions that are working.
 - A process that detached itself (its own process group, e.g. a daemonized server) and then lost its parent is not recognized as orphaned. On Linux an orphan may be adopted by a subreaper instead of PID 1 (unverified).
 - MCP servers, browsers and node processes are still matched by substring (`mcp`, `chromium`, `node` …) and catch unrelated programs; an agent without MCP and without a known name stays invisible until it is named in `agents`.
 - An app that is not in `HOST_PATTERNS` and starts MCP servers (Docker Desktop, a launcher utility) is taken for an agent by rule 3 of section 1.

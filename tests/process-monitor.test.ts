@@ -217,6 +217,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
         cwd: '/Users/dev/projects/old-app',
         rssKb: 69308,
         etime: '13-19:48:03',
+        cpuTimeSec: 42.5,
         cpu: 0.1,
         memory: 0.4,
       },
@@ -236,6 +237,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
       rootDir: '/Users/dev/projects/current-app',
       mcpSilenceTimeoutSec: 45,
       selfPid: 1000,
+      staleQuietSec: 0,
       processLister: async () => mockProcesses,
     });
 

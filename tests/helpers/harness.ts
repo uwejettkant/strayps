@@ -94,6 +94,8 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   const monitor = new ProcessMonitor({
     rootDir: dir,
     selfPid: 999_999,
+    // front-end tests need a STALE row at once; the window itself is tested in process-control
+    staleQuietSec: 0,
     killGraceMs: options.killGraceMs ?? 3000,
     processLister: async () => procs.map((p) => ({ ...p })),
     processKiller: (pid, signal) => {

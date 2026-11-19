@@ -135,7 +135,9 @@ describe('agent-leash CLI', () => {
     await run.waitFor('Demo: would roll back src/auth/session.ts to the version before its latest changes');
 
     run.child.stdin.write('status\n');
-    await run.waitFor(/31877\s+STALE\s+ELSEWHERE/);
+    // old and idle, but watched for less than ten minutes: not called stale yet
+    await run.waitFor(/31877\s+IDLE\s+ELSEWHERE/);
+    await run.waitFor(/31902\s+FROZEN/);
     run.child.stdin.write('kill 31877\n');
     await run.waitFor('Type "yes"');
     run.child.stdin.write('yes\n');

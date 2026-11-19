@@ -13,7 +13,7 @@ describe('WatchdogSession', () => {
   it('gives every front end one merged, newest-first view of file, process and session events', async () => {
     const h = createHarness({
       files: { 'a.ts': 'a\n' },
-      procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', rssKb: 100_000 }],
+      procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', rssKb: 100_000, cpuTimeSec: 1.5 }],
     });
     h.watcher.createCheckpoint();
 
@@ -54,7 +54,7 @@ describe('WatchdogSession', () => {
 
   it('terminates only monitored processes and says why it refuses', async () => {
     const h = createHarness({
-      procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' }],
+      procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', cpuTimeSec: 1.5 }],
     });
     await h.monitor.scan();
 
@@ -75,7 +75,7 @@ describe('WatchdogSession', () => {
     const h = createHarness({
       procs: [
         { pid: 100, name: 'claude', cmd: 'claude', cwd: '<repo>', cpu: 2, etime: '08:00:00' },
-        { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' },
+        { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', cpuTimeSec: 1.5 },
         { pid: 301, ppid: 1, pgid: 290, name: 'node', cmd: 'node some-mcp-server', cpu: 0, etime: '01:00:00' },
       ],
     });

@@ -34,7 +34,7 @@ async function busyHarness(): Promise<Harness> {
     watcher: { keepDiscarded: false },
     procs: [
       { pid: 100, name: 'claude', cmd: 'claude --model claude-sonnet-5-5', cpu: 4, rssKb: 220_000, etime: '12:31' },
-      { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, rssKb: 128_000, etime: '11-19:42:10' },
+      { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, rssKb: 128_000, etime: '11-19:42:10', cpuTimeSec: 1.5 },
     ],
   });
   h.procs[0].cwd = h.dir;
