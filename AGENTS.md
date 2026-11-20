@@ -1,4 +1,4 @@
-# AGENTS.md — rules for coding agents working on agent-leash
+# AGENTS.md — rules for coding agents working on strayps
 
 > **One source for every agent.** This file applies to every coding agent (Claude Code, Codex, Gemini, Cursor …). `.claude/CLAUDE.md` only imports it. Rules are changed here, nowhere else.
 
@@ -9,31 +9,31 @@
 
 ## 1. What this is
 
-`agent-leash` is a TypeScript CLI that lists the coding agents and MCP servers running on a machine, shows which ones look left behind, and ends one process or one agent session when a person confirms it. It can also pause the agents of the repository it was started in. The same state is shown in a full-screen terminal view, in plain log output, and in a read-only local web dashboard. It does not watch files: that was cut after the tag `v0.1-full-guard`.
+`strayps` is a TypeScript CLI that lists the coding agents and MCP servers running on a machine, shows which ones look left behind, and ends one process or one agent session when a person confirms it. It can also pause the agents of the repository it was started in. The same state is shown in a full-screen terminal view, in plain log output, and in a read-only local web dashboard. It does not watch files: that was cut after the tag `v0.1-full-guard`, when the tool was still called agent-leash and read `.agentguard.json`.
 
 It is a safety tool. People install it so that less goes wrong. Every change is judged by one question first: **can this make the tool destroy something the user did not ask it to destroy?**
 
 ## 2. Non-negotiable rules
 
-1. **Never aim the real kill path at the real process table.** agent-leash terminates processes; while you develop it, the processes on this machine are the user's live agent sessions, including yours.
+1. **Never aim the real kill path at the real process table.** strayps terminates processes; while you develop it, the processes on this machine are the user's live agent sessions, including yours.
    - Tests and experiments use a fake process table: `createHarness()` in `tests/helpers/harness.ts`, or `--demo`.
    - Never send `kill` or `pause` to an instance that runs without `--demo`. Builds up to the tag `v0.1-full-guard` also answer `POST /api/kill/*` and `/api/pause`: never call those either.
-   - `agent-leash status` is read-only and fine against the real machine.
+   - `strayps status` is read-only and fine against the real machine.
    - Safety nets, not excuses: `tests/setup.ts` blocks `process.kill` inside the test suite; `scripts/agents/leash-guard.mjs` (Claude Code hook) asks the user before a kill or pause endpoint of an older build is called.
-2. **Do not run an older build on a repository someone is working in.** Builds up to the tag `v0.1-full-guard` watch files and roll one back on a confirmed `revert`. The current build reads no file but `.agentguard.json`. Scenario runs that need a config file to edit go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
+2. **Do not run an older build on a repository someone is working in.** Builds up to the tag `v0.1-full-guard` watch files and roll one back on a confirmed `revert`. The current build reads no file but `.strayps.json`. Scenario runs that need a config file to edit go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
 3. **Product safety invariants.** Each one has tests. If a change breaks one of those tests, the change is wrong, not the test.
-   - *Files*: the only file agent-leash reads in a repository is `.agentguard.json`, never through a symbolic or hard link, and its contents never appear in a message. It writes that file only on `init`, `config set` and `config unset`. No other file is read, written, restored or deleted.
+   - *Files*: the only file strayps reads in a repository is `.strayps.json`, never through a symbolic or hard link, and its contents never appear in a message. It writes that file only on `init`, `config set` and `config unset`. No other file is read, written, restored or deleted.
    - *Kill* only reaches PIDs from the monitored list: one process, or one agent with the monitored processes it started (through `agentPid`, never by status; an agent it started counts only in the same directory, never in the home directory or `/`), and only those the confirmation listed, each matched by PID and `firstSeenAt`, the named process too. Nothing is ended in bulk across sessions. SIGTERM first, SIGKILL after the grace period.
-   - *Pause, not stop*: the emergency brake holds (SIGSTOP) only the coding agents of the watched repository and the processes they started; never a dev server the user started, an editor or another session. Nothing is terminated, no file is touched, and every held process is continued (SIGCONT) by `resume` and when agent-leash exits: normally, on SIGINT, SIGTERM, SIGHUP or SIGQUIT, or after an uncaught exception. SIGKILL and a fatal V8 error cannot be handled; the README says so.
+   - *Pause, not stop*: the emergency brake holds (SIGSTOP) only the coding agents of the watched repository and the processes they started; never a dev server the user started, an editor or another session. Nothing is terminated, no file is touched, and every held process is continued (SIGCONT) by `resume` and when strayps exits: normally, on SIGINT, SIGTERM, SIGHUP or SIGQUIT, or after an uncaught exception. SIGKILL and a fatal V8 error cannot be handled; the README says so.
    - *No verdicts on processes*: `STALE` and `FROZEN` are observations. Nothing is labeled safe to kill, and nothing is terminated in bulk because of its status, until the classification is proven on sessions still in use (it has been wrong twice).
    - *Agent recognition without a product list*: an agent is the client of an MCP server, a built-in name (`claude`, `codex`, `aider`, exact program name) or a name from the `agents` setting. Editors, desktop apps and terminals are never agents. Adding a product name to the code needs a real case that the other two ways miss.
-   - *Listed by origin, not by name*: besides agents and MCP servers, only what an agent started is listed (`child`, through the process tree, at least 5 s old), never agent-leash itself or the wrappers that started it. A process is never listed because its command line says `node`, `chromium` or the like.
+   - *Listed by origin, not by name*: besides agents and MCP servers, only what an agent started is listed (`child`, through the process tree, at least 5 s old), never strayps itself or the wrappers that started it. A process is never listed because its command line says `node`, `chromium` or the like.
    - *Server*: binds to loopback; answers only when addressed as this machine (Host allowlist); read-only: every request that is not GET or HEAD gets 405, no route changes anything, and the page holds no token. The event stream refuses other sites.
    - *Untrusted text*: command lines, working directories, reasons and config values come from the processes being watched. In the dashboard they go through `esc()`, in the terminal through `sanitize()`. No inline event handlers, no generated JavaScript.
    - *Asking first*: every action a person triggers that changes something (kill, pause) asks for confirmation, in both terminal front ends, whatever the process looks like. The dashboard triggers nothing.
-   - *Demo mode* changes nothing: it writes no file (not even `.agentguard.json`) and reaches no real process. The only file it reads is `.agentguard.json`.
-   - *Config reloads*: an `.agentguard.json` that is not valid changes nothing in a running watchdog. Every applied reload is logged as a warning, because the agent being watched can write the file too.
-4. **One path for state and actions.** Front ends read `WatchdogSession.getSnapshot()` and act through session methods. A new action goes into the session first, then into the terminal command (`src/ui/commands.ts`, shared by both terminal front ends), with a test at session level and one per front end. The dashboard shows state and gets no action.
+   - *Demo mode* changes nothing: it writes no file (not even `.strayps.json`) and reaches no real process. The only file it reads is `.strayps.json`.
+   - *Config reloads*: a `.strayps.json` that is not valid changes nothing in a running strayps. Every applied reload is logged as a warning, because the agent being watched can write the file too.
+4. **One path for state and actions.** Front ends read `MonitorSession.getSnapshot()` and act through session methods. A new action goes into the session first, then into the terminal command (`src/ui/commands.ts`, shared by both terminal front ends), with a test at session level and one per front end. The dashboard shows state and gets no action.
 5. **One source per fact.** The version lives in `package.json` (`getVersion()`). Numbers in the README (tests, bundle size) are copied from command output, never estimated.
 6. **Git and publishing.** Work on `feature/<topic>` or `fix/<topic>`, Conventional Commits, one commit per finished block. No push, no tag, no `npm publish`, no GitHub release without the maintainer's explicit go-ahead.
 7. **Gate before every commit:** `npm run check`. Report failures as they are; do not explain them away, and do not skip a test to get green.
@@ -66,11 +66,11 @@ scripts/scenarios/package-check.sh     # build, pack, install the tarball, impor
 ## 4. Architecture
 
 ```text
-            GuardConfigManager                          ProcessMonitor
-            (.agentguard.json, limits,                  (ps + cwd lookup every 2 s,
+            ConfigManager                          ProcessMonitor
+            (.strayps.json, limits,                  (ps + cwd lookup every 2 s,
              extra agent names)                          classification, termination, pause)
                       \                                         /
-                       +--------------  WatchdogSession  -------+
+                       +--------------  MonitorSession  -------+
                           one snapshot · one set of actions · events:
                           'event' (each log entry), 'update' (coalesced)
                          /                    |                    \
@@ -81,20 +81,20 @@ scripts/scenarios/package-check.sh     # build, pack, install the tarball, impor
 
 | Module | Responsibility |
 | :--- | :--- |
-| `src/core/guard-config.ts` | `.agentguard.json`: the limits (`mcpSilenceTimeoutSec`, `staleSessionHours`) and extra agent names, defaults, validation with warnings. Keys of older versions (`mode`, `protectedFiles`, file limits) are ignored with a notice. `reload` applies a changed file only when all of it is valid; `writeConfigValue` changes one key for `agent-leash config`; `getSources` says where each value comes from. |
+| `src/core/config.ts` | `.strayps.json`: the limits (`mcpSilenceTimeoutSec`, `staleSessionHours`) and extra agent names, defaults, validation with warnings. Keys of older versions (`mode`, `protectedFiles`, file limits) are ignored with a notice. `reload` applies a changed file only when all of it is valid; `writeConfigValue` changes one key for `strayps config`; `getSources` says where each value comes from. |
 | `src/core/events.ts` | `ActivityEventType` and `ActivityEvent`: what can appear in the activity log. |
 | `src/core/process-monitor.ts` | Process list, working directories (`/proc` on Linux, `lsof` elsewhere), agent recognition (`programNames` for exact names, `findMcpClient` for agents of any name), what agents started (`child`, through the tree), classification (`ACTIVE`, `IDLE`, `STANDBY`, `STALE`, `FROZEN`), `inWatchedRepo` and `agentPid` via the process tree, `pauseTarget`, `host` (what a session is attached to), memory (`memoryReader`: macOS `footprint` every 15 s with the real lister only, RSS marked `rss` otherwise), graceful termination. |
-| `src/core/session.ts` | The only place where config and monitor meet. Snapshot, actions (`getKillPlan`, `killProcess`, `getPauseTargets`, `pause`, `resume`), event log, coalesced updates, live config (`watchConfigFile` polls `.agentguard.json`, `reloadConfig` applies it to the monitor). |
-| `src/server.ts` | Read-only Hono app: request guards (Host; every method but GET and HEAD gets 405), `/api/status`, SSE, page delivery with nonce and CSP, `listenWatchdogServer` (loopback, port fallback). |
+| `src/core/session.ts` | The only place where config and monitor meet. Snapshot, actions (`getKillPlan`, `killProcess`, `getPauseTargets`, `pause`, `resume`), event log, coalesced updates, live config (`watchConfigFile` polls `.strayps.json`, `reloadConfig` applies it to the monitor). |
+| `src/server.ts` | Read-only Hono app: request guards (Host; every method but GET and HEAD gets 405), `/api/status`, SSE, page delivery with nonce and CSP, `listenDashboardServer` (loopback, port fallback). |
 | `src/ui/commands.ts` | Command language shared by both terminal front ends: parse, run (destructive commands return a confirmation step), tab completion. |
 | `src/ui/terminal.ts` | `renderFrame` (pure: state in, lines out) and `TerminalUI` (raw-mode input, alternate screen, restore on exit). |
 | `src/ui/plain.ts` | Line output for pipes, logs, background jobs and `--no-tui`. |
 | `src/ui/format.ts` | `sanitize`, truncation, colors (honors `NO_COLOR`), shared tables. |
-| `src/ui/public/index.html` | The dashboard page. Its styles are `dashboard.css` next to it, generated by `npm run build:css` (part of `npm run build`) from the Tailwind classes in the page and committed; the page loads nothing from another host. After changing classes, run the build and commit both files. A view only: no buttons, no dialogs, no requests but GET. Placeholders `__LEASH_VERSION__`, `__LEASH_NONCE__` are filled by the server. |
+| `src/ui/public/index.html` | The dashboard page. Its styles are `dashboard.css` next to it, generated by `npm run build:css` (part of `npm run build`) from the Tailwind classes in the page and committed; the page loads nothing from another host. After changing classes, run the build and commit both files. A view only: no buttons, no dialogs, no requests but GET. Placeholders `__STRAYPS_VERSION__`, `__STRAYPS_NONCE__` are filled by the server. |
 | `src/program.ts` | The CLI: commands (`watch`, `status`, `init`, `config show/set/unset`), argument validation, wiring, choice between full-screen and plain output, shutdown (continues paused processes). |
 | `src/cli.ts` / `src/index.ts` | Binary entry / library entry. Importing the library never starts anything. |
 
-How the CLI picks its output: full-screen view when stdin and stdout are a terminal and the process is in the foreground; plain lines otherwise (pipe, file, background job, `--no-tui`). In plain mode commands are read from stdin; the end of stdin does not stop the watchdog.
+How the CLI picks its output: full-screen view when stdin and stdout are a terminal and the process is in the foreground; plain lines otherwise (pipe, file, background job, `--no-tui`). In plain mode commands are read from stdin; the end of stdin does not stop strayps.
 
 ## 5. Conventions
 
@@ -102,7 +102,7 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 - English for code, comments, commit messages and documentation in this repository.
 - Comments say why, not what. A safety rule in code names the failure it prevents.
 - A new event type is added to `ActivityEventType` in `src/core/events.ts`; front ends color by `severity`, so they need no change.
-- A new setting goes into `GuardLimits` (or `GuardConfig`), `CONFIG_KEY_INFO` and the settings table in the README in the same change; `agent-leash config` lists it from there.
+- A new setting goes into `ConfigLimits` (or `StraypsConfig`), `CONFIG_KEY_INFO` and the settings table in the README in the same change; `strayps config` lists it from there.
 - No new runtime dependency without a reason that fits in one sentence. Runtime dependencies today: `commander`, `hono`, `@hono/node-server`, `ps-list`.
 - User-facing wording is plain and literal: say what will happen to which process.
 

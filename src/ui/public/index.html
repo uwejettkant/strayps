@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <!-- MANDATORY: Declare support for both light and dark themes -->
   <meta name="color-scheme" content="light dark" />
-  <title>agent-leash — AI Agent &amp; MCP Watchdog</title>
+  <title>strayps — agent and MCP processes</title>
   <link rel="stylesheet" href="/dashboard.css" />
-  <style nonce="__LEASH_NONCE__">
+  <style nonce="__STRAYPS_NONCE__">
     :root {
       --bg-light: #f4f7f5;
       --bg-dark: #080B09;
@@ -109,7 +109,7 @@
           <span class="w-2.5 h-2.5 rounded-full bg-[#2A3A31] inline-block"></span>
           <span class="w-2.5 h-2.5 rounded-full bg-[#2A3A31] inline-block"></span>
           <span class="w-2.5 h-2.5 rounded-full bg-[#2A3A31] inline-block"></span>
-          <span class="ml-2 text-[#B4C3BA]">~/agent-leash — watchdog</span>
+          <span class="ml-2 text-[#B4C3BA]">~/strayps — read-only view</span>
         </div>
         <div class="flex items-center gap-3">
           <span id="connection-badge" class="inline-flex items-center gap-1.5 text-[#5BE49B]">
@@ -122,10 +122,10 @@
       <div class="p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
         <div>
           <p class="text-xs text-[#8FA197] mb-1">
-            <span class="text-[#5BE49B]">$</span> npx agent-leash watch <span id="repo-path" class="text-[#B4C3BA]">.</span>
+            <span class="text-[#5BE49B]">$</span> npx strayps watch <span id="repo-path" class="text-[#B4C3BA]">.</span>
           </p>
           <h1 class="text-2xl sm:text-3xl font-semibold text-[#F2F7F4] tracking-tight">
-            agent-leash <span class="text-[#5BE49B] font-normal text-lg">v__LEASH_VERSION__</span>
+            strayps <span class="text-[#5BE49B] font-normal text-lg">v__STRAYPS_VERSION__</span>
           </h1>
           <p class="text-xs sm:text-sm text-[#8FA197] mt-1">
             Agent and MCP processes of this machine · what is left behind · read-only view
@@ -223,7 +223,7 @@
     </footer>
   </div>
 
-  <script nonce="__LEASH_NONCE__">
+  <script nonce="__STRAYPS_NONCE__">
     // Everything shown here comes from command lines, working directories and reasons, i.e. from
     // the very processes this page shows. Never insert it as markup.
     function esc(value) {

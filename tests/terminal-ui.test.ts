@@ -269,7 +269,7 @@ describe('full-screen frame', () => {
     const screen = frame.lines.join('\n');
 
     expect(frame.lines).toHaveLength(34);
-    expect(screen).toContain('agent-leash v9.9.9');
+    expect(screen).toContain('strayps v9.9.9');
     expect(screen).not.toMatch(/\bmode\b|balanced|modified|uncommitted|breaker|checkpoint/i);
     expect(screen).toContain('dashboard http://localhost:4321');
     expect(screen).toMatch(/AGENTS\s+2 sessions\s+340 MB/);
@@ -422,7 +422,7 @@ describe('interactive terminal view', () => {
     expect(tty.rawMode).toBe(true);
     expect(tty.paused).toBe(false);
     expect(tty.written[0]).toBe('\u001b[?1049h\u001b[?7l\u001b[2J\u001b[H');
-    expect(tty.screen).toContain('agent-leash v9.9.9');
+    expect(tty.screen).toContain('strayps v9.9.9');
 
     ui.stop();
     expect(tty.rawMode).toBe(false);

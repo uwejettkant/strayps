@@ -1,7 +1,7 @@
 /**
- * Programmatic API of agent-leash. Importing this module never starts the CLI.
+ * Programmatic API of strayps. Importing this module never starts the CLI.
  *
- *   import { GuardConfigManager, ProcessMonitor, WatchdogSession, listenWatchdogServer } from 'agent-leash';
+ *   import { ConfigManager, ProcessMonitor, MonitorSession, listenDashboardServer } from 'strayps';
  */
 export {
   CONFIG_FILENAME,
@@ -10,18 +10,18 @@ export {
   type ConfigKey,
   type ConfigReloadResult,
   type ConfigSource,
-  DEFAULT_GUARD_CONFIG,
-  type GuardConfig,
-  GuardConfigManager,
-  type GuardConfigManagerOptions,
-  type GuardConfigOverrides,
-  type GuardLimits,
+  DEFAULT_CONFIG,
+  type StraypsConfig,
+  ConfigManager,
+  type ConfigManagerOptions,
+  type ConfigOverrides,
+  type ConfigLimits,
   type ParsedConfigValue,
   parseConfigValue,
   resolveConfigKey,
   type WriteConfigValueResult,
   writeConfigValue,
-} from './core/guard-config.js';
+} from './core/config.js';
 export type { ActivityEvent, ActivityEventType } from './core/events.js';
 export {
   type AgentDetection,
@@ -48,21 +48,21 @@ export {
   type KillResult,
   type PauseResult,
   type StatusSnapshot,
-  WatchdogSession,
-  type WatchdogSessionDeps,
+  MonitorSession,
+  type MonitorSessionDeps,
 } from './core/session.js';
 export { CliError, createCliProgram, runCli } from './program.js';
 export {
-  createWatchdogApp,
+  createDashboardApp,
   type DashboardStatusSnapshot,
   DEFAULT_HOSTNAME,
   DEFAULT_PORT,
   type ListenServerOptions,
-  listenWatchdogServer,
-  type RunningWatchdogServer,
+  listenDashboardServer,
+  type RunningDashboardServer,
   type StartServerOptions,
-  startWatchdogServer,
-  type WatchdogServerDeps,
+  startDashboardServer,
+  type DashboardServerDeps,
 } from './server.js';
 export { PlainReporter, type PlainReporterOptions } from './ui/plain.js';
 export {

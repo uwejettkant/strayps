@@ -3,11 +3,11 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createWatchdogApp, listenWatchdogServer, type RunningWatchdogServer } from '../src/server.js';
+import { createDashboardApp, listenDashboardServer, type RunningDashboardServer } from '../src/server.js';
 import { getVersion } from '../src/version.js';
 import { cleanupTmpDirs, createHarness, type Harness, makeTmpDir, writeFiles } from './helpers/harness.js';
 
-const running: RunningWatchdogServer[] = [];
+const running: RunningDashboardServer[] = [];
 const blockers: http.Server[] = [];
 
 afterEach(async () => {
@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 function appFor(h: Harness) {
-  return createWatchdogApp({
+  return createDashboardApp({
     rootDir: h.dir,
     configManager: h.configManager,
     processMonitor: h.monitor,
@@ -93,7 +93,7 @@ describe('dashboard page', () => {
     const res = await app.request('/');
     const html = await res.text();
     expect(res.status).toBe(200);
-    expect(html).not.toContain('__LEASH_');
+    expect(html).not.toContain('__STRAYPS_');
     expect(html).not.toContain('leash-token');
     expect(html).toContain(`v${getVersion()}`);
 
@@ -217,7 +217,7 @@ describe('listening', () => {
 
   it('binds to the loopback interface and serves real HTTP requests', async () => {
     const h = createHarness();
-    const server = await listenWatchdogServer({ ...deps(h), port: 0 });
+    const server = await listenDashboardServer({ ...deps(h), port: 0 });
     running.push(server);
 
     expect((server.server.address() as AddressInfo).address).toBe('127.0.0.1');
@@ -233,7 +233,7 @@ describe('listening', () => {
   it('moves to the next port when the preferred one is taken', async () => {
     const taken = await blockPort();
     const h = createHarness();
-    const server = await listenWatchdogServer({ ...deps(h), port: taken, maxPortAttempts: 30 });
+    const server = await listenDashboardServer({ ...deps(h), port: taken, maxPortAttempts: 30 });
     running.push(server);
 
     expect(server.port).toBeGreaterThan(taken);
@@ -243,14 +243,14 @@ describe('listening', () => {
   it('fails with a readable message when the port was chosen explicitly', async () => {
     const taken = await blockPort();
     const h = createHarness();
-    await expect(listenWatchdogServer({ ...deps(h), port: taken, strictPort: true })).rejects.toThrow(
+    await expect(listenDashboardServer({ ...deps(h), port: taken, strictPort: true })).rejects.toThrow(
       `Port ${taken} is already in use`,
     );
   });
 
   it('closes promptly even while a dashboard is connected to the event stream', async () => {
     const h = createHarness();
-    const server = await listenWatchdogServer({ ...deps(h), port: 0 });
+    const server = await listenDashboardServer({ ...deps(h), port: 0 });
     const controller = new AbortController();
     const stream = await fetch(`http://127.0.0.1:${server.port}/api/events`, { signal: controller.signal });
     await stream.body!.getReader().read();

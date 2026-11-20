@@ -1,6 +1,6 @@
 ---
 name: process-classification
-description: Rules and procedure for changing how agent-leash recognizes coding agents, classifies processes (ACTIVE, IDLE, STANDBY, STALE, FROZEN) and decides what pause holds. Use before touching src/core/process-monitor.ts (agent recognition, the keyword, launcher and host lists, the stale or silence thresholds, pause targets) or the wording of process labels.
+description: Rules and procedure for changing how strayps recognizes coding agents, classifies processes (ACTIVE, IDLE, STANDBY, STALE, FROZEN) and decides what pause holds. Use before touching src/core/process-monitor.ts (agent recognition, the keyword, launcher and host lists, the stale or silence thresholds, pause targets) or the wording of process labels.
 ---
 
 # Changing process recognition and classification
@@ -9,12 +9,12 @@ A wrong label here once ended with a user clicking "Clean up" and losing a sessi
 
 ## 1. Which processes are agents
 
-agent-leash keeps no list of AI products. A process is a coding agent when one of these holds, in this order:
+strayps keeps no list of AI products. A process is a coding agent when one of these holds, in this order:
 
 | # | How | `detectedBy` |
 | :--- | :--- | :--- |
 | 1 | Its program name is built in: `claude`, `codex`, `aider` (`BUILT_IN_AGENT_NAMES`), or its path is a Claude Code install (`/claude-code/`, `anthropic.claude-code`, `/native-binary/claude`) | `name` |
-| 2 | Its program name is in the `agents` setting of `.agentguard.json` | `setting` |
+| 2 | Its program name is in the `agents` setting of `.strayps.json` | `setting` |
 | 3 | It started an MCP server: the server's first ancestor that is not a launcher (shell, npm, npx, uvx, …) and not another MCP process | `mcp-client` |
 
 - Names are matched exactly (`programNames`: the executable and, for an interpreter such as node or python, the script or `-m` module), never as a substring: "codex-mcp-server" is an MCP server, "aider-stats.js" is a script.
@@ -25,7 +25,7 @@ agent-leash keeps no list of AI products. A process is a coding agent when one o
 
 Besides agents, a process is listed when its command line names MCP (`mcp`, `modelcontextprotocol`: category `mcp`), or when an agent started it (category `child`): a dev server, a test watcher, a browser its MCP server opened. `child` is decided by the process tree alone, never by name:
 
-- an agent is among its ancestors, and agent-leash itself is not (its `ps` and `lsof` calls, and the wrappers that started it, are never listed);
+- an agent is among its ancestors, and strayps itself is not (its `ps` and `lsof` calls, and the wrappers that started it, are never listed);
 - it is at least `CHILD_MIN_AGE_SEC` (5 s) old by `ps etime`, so the shells, `git` and `rg` calls of a tool call do not flicker through the list; without a known age it is not listed;
 - a launcher (`LAUNCHER_NAMES`: shell, npm, npx, uvx …) with a process under it is only that process's wrapper and is not listed.
 
@@ -47,15 +47,15 @@ A child has an `agentPid`, so it ends with its agent's session and is held by `p
 
 `STALE` and `FROZEN` are observations shown to the user, with the reason. They never lead to a termination by themselves.
 
-Activity is measured, not read from `ps %cpu`: the lister reads the CPU time a process has used (`ps -o time`, `parseCpuTime`), and the monitor compares it between scans (ACTIVE/IDLE) and over a sliding window (rules 2 and 3, samples every 30 s). Idle is not zero, which is why rule 2 has a budget instead of "no CPU at all". CPU time alone does not separate idle from working (idle claude sessions tick up to 6.5 s per 10 minutes, light work starts at about 4 s); the main sign of work is a new child process: a tool call starts a shell, `git`, `rg` or tests, and no idle session started any. The monitor remembers the descendants of each process (`trackChildren`); the ones there when watching starts, such as an agent's MCP servers, are not new, and agent-leash's own subtree (its `ps` calls) is left out. When the CPU time cannot be read, nothing is called stale; `ps %cpu` remains the fallback only for ACTIVE/IDLE on the first scan.
+Activity is measured, not read from `ps %cpu`: the lister reads the CPU time a process has used (`ps -o time`, `parseCpuTime`), and the monitor compares it between scans (ACTIVE/IDLE) and over a sliding window (rules 2 and 3, samples every 30 s). Idle is not zero, which is why rule 2 has a budget instead of "no CPU at all". CPU time alone does not separate idle from working (idle claude sessions tick up to 6.5 s per 10 minutes, light work starts at about 4 s); the main sign of work is a new child process: a tool call starts a shell, `git`, `rg` or tests, and no idle session started any. The monitor remembers the descendants of each process (`trackChildren`); the ones there when watching starts, such as an agent's MCP servers, are not new, and its own subtree (its `ps` calls) is left out. When the CPU time cannot be read, nothing is called stale; `ps %cpu` remains the fallback only for ACTIVE/IDLE on the first scan.
 
 "Belongs to the watched repository" (`inWatchedRepo`) means: its own working directory is inside the repository, **or** one of its ancestors in the process tree is such a process. MCP servers often run in `/` or in their install directory; only the tree tells whose they are.
 
-`agentPid` is the nearest monitored agent a process descends from. It also decides what ends with an agent (`WatchdogSession.getKillPlan`): every monitored process whose `agentPid` chain leads to it. A mistake in `agentPid` therefore changes what `kill` on an agent ends, not only what `pause` holds. `pauseTarget` is true for the agents of the watched repository and for the processes they started; `pause` holds exactly those (SIGSTOP) and `resume` continues them. A dev server started from the user's terminal, an editor and its MCP servers, and every session in another repository are never paused. A held process is never reported `STALE` or `FROZEN`.
+`agentPid` is the nearest monitored agent a process descends from. It also decides what ends with an agent (`MonitorSession.getKillPlan`): every monitored process whose `agentPid` chain leads to it. A mistake in `agentPid` therefore changes what `kill` on an agent ends, not only what `pause` holds. `pauseTarget` is true for the agents of the watched repository and for the processes they started; `pause` holds exactly those (SIGSTOP) and `resume` continues them. A dev server started from the user's terminal, an editor and its MCP servers, and every session in another repository are never paused. A held process is never reported `STALE` or `FROZEN`.
 
 `host` names the application a process tree hangs off (VS Code, Claude Desktop, a terminal …). It is shown to the user, keeps rule 3 of section 1 away from apps, and keeps rule 3 of section 2 away from MCP servers of an app that is still running. It changes nothing else in the classification.
 
-Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `limits.mcpSilenceTimeoutSec` (default 45) in `.agentguard.json`, applied to a running monitor by `setStaleSessionHours` / `setSilenceTimeoutSec` when the file changes; `agents` likewise by `setAgentNames`. A lower threshold makes more processes look stale, so a rule uses the configured value (`staleSessionSec`, `mcpSilenceTimeoutSec`), never the default as a literal.
+Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `limits.mcpSilenceTimeoutSec` (default 45) in `.strayps.json`, applied to a running monitor by `setStaleSessionHours` / `setSilenceTimeoutSec` when the file changes; `agents` likewise by `setAgentNames`. A lower threshold makes more processes look stale, so a rule uses the configured value (`staleSessionSec`, `mcpSilenceTimeoutSec`), never the default as a literal.
 
 ## 3. Incidents (each has a regression test in `tests/process-control.test.ts`)
 

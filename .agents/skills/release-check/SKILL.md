@@ -1,6 +1,6 @@
 ---
 name: release-check
-description: Checks whether agent-leash is ready to be published to npm and GitHub, and prepares a release without publishing it. Verifies the gate, the packed tarball, version and README facts, open it.todo items and package metadata. Use when the maintainer asks for a release, a version bump, or an assessment of release readiness. Never pushes, tags or publishes.
+description: Checks whether strayps is ready to be published to npm and GitHub, and prepares a release without publishing it. Verifies the gate, the packed tarball, version and README facts, open it.todo items and package metadata. Use when the maintainer asks for a release, a version bump, or an assessment of release readiness. Never pushes, tags or publishes.
 ---
 
 # Release check

@@ -131,7 +131,7 @@ describe('ProcessMonitor classification (production rules)', () => {
     const t0 = Date.now();
     const at = async (offsetSec: number) => (await monitor.scan(t0 + offsetSec * 1000)).find((p) => p.pid === 502)!;
 
-    // agent-leash has only just started watching: no evidence of inactivity yet
+    // strayps has only just started watching: no evidence of inactivity yet
     expect((await at(0)).status).not.toBe('STALE');
     expect((await at(STALE_QUIET_SEC - 1)).status).not.toBe('STALE');
 
@@ -190,12 +190,12 @@ describe('ProcessMonitor classification (production rules)', () => {
     }
   });
 
-  it('does not count the processes agent-leash starts itself as work of the agent that started it', async () => {
-    // agent-leash runs ps every 2 s; started from an agent's shell, that agent looked busy forever
+  it('does not count the processes strayps starts itself as work of the agent that started it', async () => {
+    // strayps runs ps every 2 s; started from an agent's shell, that agent looked busy forever
     const { monitor, procs, alive } = setup(
       [
         agent(502, OTHER, { etime: '02-15:40:05', cpuTimeSec: 100 }),
-        { pid: 600, ppid: 502, name: 'node', cmd: 'node agent-leash watch' },
+        { pid: 600, ppid: 502, name: 'node', cmd: 'node strayps watch' },
       ],
       { selfPid: 600 },
     );
@@ -343,7 +343,7 @@ describe('ProcessMonitor classification (production rules)', () => {
     expect(byPid.has(110)).toBe(false);
   });
 
-  it('does not list the wrappers that launched the watchdog itself', async () => {
+  it('does not list the wrappers that launched strayps itself', async () => {
     const { monitor } = setup(
       [
         { pid: 10, ppid: 1, name: 'zsh', cmd: '-zsh' },
@@ -549,7 +549,7 @@ describe('ProcessMonitor: what an agent started', () => {
   });
 
   it('no longer knows whose a process was once its agent is gone', async () => {
-    // A known limit (README, "What agent-leash cannot see"): no memory of where a process came from
+    // A known limit (README, "What strayps cannot see"): no memory of where a process came from
     const { monitor, procs, alive } = setup(tree());
     const t0 = Date.now();
     await monitor.scan(t0);
@@ -562,8 +562,8 @@ describe('ProcessMonitor: what an agent started', () => {
     expect(list.some((p) => p.pid === 110)).toBe(false);
   });
 
-  it('never lists agent-leash itself, the wrappers that started it or what it runs', async () => {
-    // started from an agent's shell: ending that agent's session must not end agent-leash
+  it('never lists strayps itself, the wrappers that started it or what it runs', async () => {
+    // started from an agent's shell: ending that agent's session must not end strayps
     const { monitor } = setup(
       [
         agent(100, REPO, { cpu: 1 }),
@@ -692,7 +692,7 @@ describe('ProcessMonitor termination', () => {
     expect(monitor.getPausedPids()).toEqual([]);
   });
 
-  it('never leaves an agent held when the watchdog stops', async () => {
+  it('never leaves an agent held when strayps stops', async () => {
     const { monitor, kills } = setup([agent(100, REPO, { cpu: 1 })]);
     await monitor.scan(1_000);
     monitor.pauseTargets();
@@ -711,7 +711,7 @@ describe('ProcessMonitor termination', () => {
     for (const proc of list) {
       expect(proc.paused).toBe(true);
       expect(['IDLE', 'STANDBY', 'ACTIVE']).toContain(proc.status);
-      expect(proc.reason).toBe('Paused by agent-leash; resume continues it');
+      expect(proc.reason).toBe('Paused by strayps; resume continues it');
     }
     expect(onFrozen).not.toHaveBeenCalled();
   });
@@ -732,7 +732,7 @@ describe('ProcessMonitor termination', () => {
 });
 
 describe('ProcessMonitor pause and exit', () => {
-  it('continues the processes it holds when agent-leash exits in any way, also by a crash', async () => {
+  it('continues the processes it holds when strayps exits in any way, also by a crash', async () => {
     // The shutdown path resumed them, but a crash ended the process with them still stopped
     const { monitor, kills } = setup([agent(100, REPO, { cpu: 1 }), mcp(101, 100, { cwd: '/' })]);
     await monitor.scan(1_000);

@@ -1,7 +1,7 @@
 {
-  "name": "agent-leash",
+  "name": "strayps",
   "version": "0.1.0",
-  "description": "The AI Agent & MCP Watchdog for local repositories — circuit breaker for file thrashing, .env guard, and zombie MCP killer",
+  "description": "See every AI coding agent and MCP server on your machine, find the ones left behind, and end them one session at a time",
   "license": "MIT",
   "author": "Uwe Jettkant",
   "keywords": [
@@ -10,14 +10,14 @@
     "mcp-server",
     "model-context-protocol",
     "claude-code",
-    "watchdog",
-    "circuit-breaker",
+    "process-monitor",
+    "orphan-processes",
     "coding-agents",
     "developer-tools",
     "cli"
   ],
   "bin": {
-    "agent-leash": "./dist/cli.js"
+    "strayps": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

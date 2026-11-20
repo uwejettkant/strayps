@@ -1,5 +1,5 @@
 import { formatMemory, type MonitoredProcess, sumMemory } from '../core/process-monitor.js';
-import type { WatchdogSession } from '../core/session.js';
+import type { MonitorSession } from '../core/session.js';
 import { sanitize } from './format.js';
 
 export type LeashCommand =
@@ -15,7 +15,7 @@ export type LeashCommand =
 export interface CommandResult {
   message: string;
   level: 'info' | 'warn' | 'error';
-  /** The watchdog should shut down. */
+  /** strayps should shut down. */
   exit?: boolean;
   /** The front end should show its help. */
   showHelp?: boolean;
@@ -92,10 +92,10 @@ export function parseCommand(line: string): LeashCommand {
   }
 
   if (word === 'mode' || word === 'm' || ['strict', 'balanced', 'yolo'].includes(word)) {
-    // The modes were removed: agent-leash always watches by the settings in .agentguard.json
+    // The modes were removed: strayps always watches by the settings in .strayps.json
     return {
       kind: 'invalid',
-      message: 'There are no modes any more: agent-leash watches by your settings (agent-leash config).',
+      message: 'There are no modes any more: strayps watches by your settings (strayps config).',
     };
   }
 
@@ -121,7 +121,7 @@ export function parseCommand(line: string): LeashCommand {
  * Executes a parsed command against the session. Destructive commands do nothing yet:
  * they return a `confirm` step that the front end must put to the user first.
  */
-export function runCommand(session: WatchdogSession, command: LeashCommand): CommandResult {
+export function runCommand(session: MonitorSession, command: LeashCommand): CommandResult {
   switch (command.kind) {
     case 'empty':
       return { message: '', level: 'info' };
@@ -225,7 +225,7 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
     }
 
     case 'resume': {
-      // Continuing what agent-leash itself held is not destructive: no confirmation
+      // Continuing what strayps itself held is not destructive: no confirmation
       const { pids } = session.resume();
       return pids.length > 0
         ? { message: `Resumed ${pids.length} process${pids.length === 1 ? '' : 'es'}`, level: 'info' }
@@ -253,7 +253,7 @@ function commonPrefix(values: string[]): string {
 }
 
 /** Tab completion: command names and monitored PIDs. */
-export function completeInput(session: WatchdogSession, input: string): Completion {
+export function completeInput(session: MonitorSession, input: string): Completion {
   const spaceAt = input.search(/\s/);
   let head = '';
   let partial = input;

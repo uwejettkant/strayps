@@ -1,5 +1,5 @@
 import { formatMemory, sumMemory } from '../core/process-monitor.js';
-import type { StatusSnapshot, WatchdogSession } from '../core/session.js';
+import type { StatusSnapshot, MonitorSession } from '../core/session.js';
 import { completeInput, HELP_LINES, parseCommand, runCommand } from './commands.js';
 import {
   createPalette,
@@ -273,7 +273,7 @@ export function renderFrame(view: FrameView): Frame {
   // --- Header ---
   const clock: Seg[] = [seg(`${formatClock(view.now)} `, p.dim)];
   const titleStart: Seg[] = [
-    seg(` agent-leash v${view.version}`, p.accent),
+    seg(` strayps v${view.version}`, p.accent),
     view.demo ? seg('  DEMO — simulated, nothing is touched', p.warn) : seg(''),
     seg('  watching ', p.dim),
   ];
@@ -303,7 +303,7 @@ export function renderFrame(view: FrameView): Frame {
       view.notice.level === 'error' ? p.danger : view.notice.level === 'warn' ? p.warn : p.ok;
     noticeLine = [seg(` ${view.notice.text}`, style)];
   } else {
-    noticeLine = [seg(' Type a command and press Enter — help lists them, exit stops the watchdog.', p.dim)];
+    noticeLine = [seg(' Type a command and press Enter — help lists them, exit stops strayps.', p.dim)];
   }
   const prompt = ' › ';
   const hint = 'help · exit · Ctrl+C ';
@@ -419,7 +419,7 @@ export interface TtyOutput {
 }
 
 export interface TerminalUIOptions {
-  session: WatchdogSession;
+  session: MonitorSession;
   stdin: TtyInput;
   stdout: TtyOutput;
   version: string;
@@ -437,11 +437,11 @@ const LEAVE_SCREEN = `${ESC}[?7h${ESC}[?25h${ESC}[?1049l`;
 const RENDER_INTERVAL_MS = 40;
 
 /**
- * Full-screen live view of the watchdog with a command line at the bottom.
+ * Full-screen live view of strayps with a command line at the bottom.
  * Shows what the web dashboard shows and offers the same actions, from the same session.
  */
 export class TerminalUI {
-  private readonly session: WatchdogSession;
+  private readonly session: MonitorSession;
   private readonly stdin: TtyInput;
   private readonly stdout: TtyOutput;
   private readonly palette: Palette;

@@ -8,16 +8,16 @@ import {
   CONFIG_KEY_INFO,
   CONFIG_KEYS,
   type ConfigKey,
-  GuardConfigManager,
-  type GuardLimits,
+  ConfigManager,
+  type ConfigLimits,
   parseConfigValue,
   resolveConfigKey,
   writeConfigValue,
-} from './core/guard-config.js';
+} from './core/config.js';
 import type { ActivityEventType } from './core/events.js';
 import { ProcessMonitor, type RawProcessInfo } from './core/process-monitor.js';
-import { WatchdogSession } from './core/session.js';
-import { DEFAULT_PORT, listenWatchdogServer, type RunningWatchdogServer } from './server.js';
+import { MonitorSession } from './core/session.js';
+import { DEFAULT_PORT, listenDashboardServer, type RunningDashboardServer } from './server.js';
 import {
   createPalette,
   formatClock,
@@ -142,7 +142,7 @@ function createDemoProcesses(rootDir: string): RawProcessInfo[] {
 }
 
 function summaryLines(
-  session: WatchdogSession,
+  session: MonitorSession,
   startedAt: number,
   palette: Palette,
 ): string[] {
@@ -157,7 +157,7 @@ function summaryLines(
         : `${seconds}s`;
   const snapshot = session.getSnapshot();
   const lines = [
-    `${palette.accent('agent-leash')} stopped after ${duration} — ${sanitize(tildify(session.rootDir))}`,
+    `${palette.accent('strayps')} stopped after ${duration} — ${sanitize(tildify(session.rootDir))}`,
     `  ${n('process-alert')} process alerts · ${n('process-killed')} processes terminated`,
   ];
   const alerts = snapshot.events.filter((e) => e.severity !== 'info').slice(0, 5).reverse();
@@ -178,7 +178,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   const startedAt = Date.now();
 
   // The demo never writes, not even the config file
-  const configManager = new GuardConfigManager(rootDir, undefined, { readOnly: demo });
+  const configManager = new ConfigManager(rootDir, undefined, { readOnly: demo });
   const cfg = configManager.getConfig();
 
   let demoProcesses = demo ? createDemoProcesses(rootDir) : [];
@@ -212,16 +212,16 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
       : {}),
   });
 
-  const session = new WatchdogSession({ rootDir, configManager, processMonitor });
+  const session = new MonitorSession({ rootDir, configManager, processMonitor });
   session.addEvent({ type: 'monitor-started', message: `Watching the agent and MCP processes of this machine; current repository ${tildify(rootDir)}`, severity: 'info' });
   processMonitor.start();
-  // Edits to .agentguard.json apply to the running watchdog
+  // Edits to .strayps.json apply while strayps runs
   session.watchConfigFile();
 
-  let running: RunningWatchdogServer | null = null;
+  let running: RunningDashboardServer | null = null;
   if (options.dashboard !== false) {
     try {
-      running = await listenWatchdogServer({
+      running = await listenDashboardServer({
         rootDir,
         configManager,
         processMonitor,
@@ -260,7 +260,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     ui?.stop();
     reporter?.stop();
     if (!interactive) {
-      process.stdout.write(`\nShutting down agent-leash watchdog (${reason})...\n`);
+      process.stdout.write(`\nShutting down strayps (${reason})...\n`);
     }
     processMonitor.stop();
     const within = <T>(work: Promise<T>, ms: number) =>
@@ -284,7 +284,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   process.on('exit', () => ui?.stop());
   const crash = (err: unknown) => {
     ui?.stop();
-    process.stderr.write(`agent-leash crashed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+    process.stderr.write(`strayps crashed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
     process.exit(1);
   };
   process.on('uncaughtException', crash);
@@ -315,7 +315,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   const out = (line: string) => process.stdout.write(`${line}\n`);
 
   out('');
-  out(`${palette.accent(`agent-leash v${getVersion()}`)} — AI Agent & MCP Watchdog${demo ? palette.warn('  [DEMO: simulated, nothing is touched]') : ''}`);
+  out(`${palette.accent(`strayps v${getVersion()}`)} — agent and MCP processes, and what they leave behind${demo ? palette.warn('  [DEMO: simulated, nothing is touched]') : ''}`);
   out(`  Repo:        ${sanitize(rootDir)}`);
   out(`  Dashboard:   ${running ? running.url : 'off (--no-dashboard)'}`);
   out(`  Limits:      stale after ${cfg.limits.staleSessionHours}h idle in another repository, frozen after ${cfg.limits.mcpSilenceTimeoutSec}s as an orphan`);
@@ -329,7 +329,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   if (wantsTui && !foreground) {
     out(palette.dim('  Running as a background job: live view and commands are off, stop with "kill -TERM".'));
   } else if (readsInput) {
-    out(palette.dim('  Commands:    type "help" and press Enter; "exit" stops the watchdog.'));
+    out(palette.dim('  Commands:    type "help" and press Enter; "exit" stops strayps.'));
   }
   out('');
 
@@ -347,7 +347,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
 
 async function runStatus(dir: string): Promise<void> {
   const rootDir = resolveTargetDir(dir);
-  const configManager = new GuardConfigManager(rootDir, undefined, { readOnly: true });
+  const configManager = new ConfigManager(rootDir, undefined, { readOnly: true });
   const { limits, agents } = configManager.getConfig();
   const processMonitor = new ProcessMonitor({
     rootDir,
@@ -355,7 +355,7 @@ async function runStatus(dir: string): Promise<void> {
     staleSessionHours: limits.staleSessionHours,
     agentNames: agents,
   });
-  const session = new WatchdogSession({ rootDir, configManager, processMonitor });
+  const session = new MonitorSession({ rootDir, configManager, processMonitor });
   await processMonitor.scan();
 
   const palette = createPalette(shouldUseColor(process.stdout), supportsTruecolor());
@@ -363,30 +363,30 @@ async function runStatus(dir: string): Promise<void> {
   const width = process.stdout.columns ?? 120;
   const report = formatStatusReport(snapshot, palette, width);
 
-  process.stdout.write(`\n${palette.accent('agent-leash status')}\n${report.join('\n')}\n\n`);
+  process.stdout.write(`\n${palette.accent('strayps status')}\n${report.join('\n')}\n\n`);
   session.dispose();
 }
 
-/** A value for the terminal; it may come from `.agentguard.json`, so it is untrusted text. */
+/** A value for the terminal; it may come from `.strayps.json`, so it is untrusted text. */
 function displayValue(value: unknown): string {
   return sanitize(Array.isArray(value) ? value.join(', ') : String(value));
 }
 
-function effectiveValue(manager: GuardConfigManager, key: ConfigKey): string {
+function effectiveValue(manager: ConfigManager, key: ConfigKey): string {
   const config = manager.getConfig();
   const list = (values: string[]) => (values.length > 0 ? values.join(', ') : 'none');
   if (key === 'agents') return list(config.agents);
-  return String(config.limits[key.slice('limits.'.length) as keyof GuardLimits]);
+  return String(config.limits[key.slice('limits.'.length) as keyof ConfigLimits]);
 }
 
 function runConfigShow(dir: string): void {
   const rootDir = resolveTargetDir(dir);
-  const manager = new GuardConfigManager(rootDir, undefined, { readOnly: true });
+  const manager = new ConfigManager(rootDir, undefined, { readOnly: true });
   const palette = createPalette(shouldUseColor(process.stdout), supportsTruecolor());
   const sources = manager.getSources();
   const lines: string[] = [
     '',
-    `${palette.accent('agent-leash config')} — ${sanitize(tildify(rootDir))}`,
+    `${palette.accent('strayps config')} — ${sanitize(tildify(rootDir))}`,
     manager.hasConfigFile()
       ? `  ${CONFIG_FILENAME} found; values marked (file) come from it, all others are built-in defaults.`
       : `  No ${CONFIG_FILENAME} here; every value is a built-in default.`,
@@ -405,9 +405,9 @@ function runConfigShow(dir: string): void {
   }
   lines.push(
     '',
-    `  Change a value:    agent-leash config set staleSessionHours 12`,
-    `  Back to default:   agent-leash config unset staleSessionHours`,
-    `  Edits to the file, by hand or with these commands, apply to a running agent-leash within a second.`,
+    `  Change a value:    strayps config set staleSessionHours 12`,
+    `  Back to default:   strayps config unset staleSessionHours`,
+    `  Edits to the file, by hand or with these commands, apply to a running strayps within a second.`,
     '',
   );
   process.stdout.write(`${lines.join('\n')}\n`);
@@ -430,7 +430,7 @@ function writeOrFail(rootDir: string, key: ConfigKey, value: number | string[] |
 }
 
 function reportConfigProblems(rootDir: string): void {
-  const warnings = new GuardConfigManager(rootDir, undefined, { readOnly: true }).getWarnings();
+  const warnings = new ConfigManager(rootDir, undefined, { readOnly: true }).getWarnings();
   for (const warning of warnings) {
     process.stdout.write(`  Note: ${sanitize(warning)}\n`);
   }
@@ -449,14 +449,14 @@ function runConfigSet(rawKey: string, rawValue: string, dir: string): void {
     `${result.created ? 'Created' : 'Updated'} ${tildify(result.filePath)}: ${key} = ${displayValue(parsed.value)}${was}\n`,
   );
   reportConfigProblems(rootDir);
-  process.stdout.write('A running agent-leash picks this up within a second.\n');
+  process.stdout.write('A running strayps picks this up within a second.\n');
 }
 
 function runConfigUnset(rawKey: string, dir: string): void {
   const rootDir = resolveTargetDir(dir);
   const key = requireConfigKey(rawKey);
   const result = writeOrFail(rootDir, key, undefined);
-  const fallback = sanitize(effectiveValue(new GuardConfigManager(rootDir, undefined, { readOnly: true }), key));
+  const fallback = sanitize(effectiveValue(new ConfigManager(rootDir, undefined, { readOnly: true }), key));
   if (!result.changed) {
     process.stdout.write(`${key} is not set in ${CONFIG_FILENAME}; the default (${fallback}) already applies.\n`);
     return;
@@ -474,7 +474,7 @@ function runInit(dir: string, options: { force?: boolean }): void {
   if (options.force && fs.existsSync(target)) {
     fs.rmSync(target);
   }
-  const manager = new GuardConfigManager(rootDir);
+  const manager = new ConfigManager(rootDir);
   const writtenPath = manager.saveConfig();
   process.stdout.write(`Created ${writtenPath} with the default settings.\n`);
 }
@@ -483,8 +483,8 @@ export function createCliProgram(): Command {
   const program = new Command();
 
   program
-    .name('agent-leash')
-    .description('The AI Agent & MCP Watchdog for local repositories')
+    .name('strayps')
+    .description('See every AI coding agent and MCP server on this machine, and end the ones left behind')
     .version(getVersion());
 
   program
@@ -506,14 +506,14 @@ export function createCliProgram(): Command {
 
   program
     .command('init')
-    .description('Create a default .agentguard.json configuration file in the target repository')
+    .description('Create a default .strayps.json configuration file in the target repository')
     .argument('[dir]', 'Target repository directory', '.')
-    .option('-f, --force', 'Replace an existing .agentguard.json')
+    .option('-f, --force', 'Replace an existing .strayps.json')
     .action((dir: string, options: { force?: boolean }) => runInit(dir, options));
 
   const config = program
     .command('config')
-    .description('Show or change the settings in .agentguard.json');
+    .description('Show or change the settings in .strayps.json');
 
   config
     .command('show', { isDefault: true })
@@ -523,7 +523,7 @@ export function createCliProgram(): Command {
 
   config
     .command('set')
-    .description('Set one value in .agentguard.json (the file is created if missing)')
+    .description('Set one value in .strayps.json (the file is created if missing)')
     .argument('<key>', 'Setting, e.g. limits.staleSessionHours, staleSessionHours or agents')
     .argument('<value>', 'New value; agents takes program names separated by commas')
     .option('-C, --dir <dir>', 'Target repository directory', '.')
@@ -531,7 +531,7 @@ export function createCliProgram(): Command {
 
   config
     .command('unset')
-    .description('Remove one value from .agentguard.json, so the built-in default applies')
+    .description('Remove one value from .strayps.json, so the built-in default applies')
     .argument('<key>', 'Setting, e.g. limits.staleSessionHours')
     .option('-C, --dir <dir>', 'Target repository directory', '.')
     .action((key: string, options: { dir: string }) => runConfigUnset(key, options.dir));
@@ -539,17 +539,17 @@ export function createCliProgram(): Command {
   return program;
 }
 
-/** Entry point of the `agent-leash` binary. */
+/** Entry point of the `strayps` binary. */
 export async function runCli(argv: string[] = process.argv): Promise<void> {
   try {
     await createCliProgram().parseAsync(argv);
   } catch (err) {
     if (err instanceof CliError) {
-      // Messages can quote .agentguard.json (V8 parse errors include its text): untrusted
-      process.stderr.write(`agent-leash: ${sanitize(err.message)}\n`);
+      // Messages can quote .strayps.json (V8 parse errors include its text): untrusted
+      process.stderr.write(`strayps: ${sanitize(err.message)}\n`);
     } else {
       process.stderr.write(
-        `agent-leash error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+        `strayps error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
       );
     }
     process.exit(1);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drives a command inside a real pseudo-terminal and shows what a user would see.
 
-The full-screen view of agent-leash only exists on a real terminal. This script gives it one,
+The full-screen view of strayps only exists on a real terminal. This script gives it one,
 types into it, and prints the screen as text, so the view can be checked without a human
 (used by the scenario-testing skill, see .agents/skills/scenario-testing/SKILL.md).
 

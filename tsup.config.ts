@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  // index: the library (`import ... from 'agent-leash'`); cli: the `agent-leash` binary
+  // index: the library (`import ... from 'strayps'`); cli: the `strayps` binary
   entry: ['src/index.ts', 'src/cli.ts'],
   format: ['cjs'],
   target: 'node20',

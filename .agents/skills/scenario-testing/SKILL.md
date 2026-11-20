@@ -1,15 +1,15 @@
 ---
 name: scenario-testing
-description: Verifies agent-leash end to end without endangering the machine it runs on. Covers the automated gate, the full-screen terminal view in a real pseudo-terminal, the web dashboard, the packed npm tarball and a read-only check against the real process table. Use after changes to the terminal view, dashboard, CLI or process handling, and before a release. Produces a findings list with evidence.
+description: Verifies strayps end to end without endangering the machine it runs on. Covers the automated gate, the full-screen terminal view in a real pseudo-terminal, the web dashboard, the packed npm tarball and a read-only check against the real process table. Use after changes to the terminal view, dashboard, CLI or process handling, and before a release. Produces a findings list with evidence.
 ---
 
-# Testing agent-leash end to end
+# Testing strayps end to end
 
 The unit tests prove the parts. This pass proves what a user sees. Result: a findings list.
 
 ## 1. The one rule
 
-agent-leash ends and pauses processes. The processes on this machine are live agent sessions, yours included.
+strayps ends and pauses processes. The processes on this machine are live agent sessions, yours included.
 
 - Commands that act on processes (`kill`, `pause`): only against `--demo`. Demo has its own fake process table and writes nothing.
 - Real mode (no `--demo`): read the process list, never act on it. Run it in a sandbox directory (`scripts/scenarios/make-sandbox.sh`) when you need a config file to edit.
@@ -62,7 +62,7 @@ python3 scripts/scenarios/pty-drive.py --cols 120 --rows 30 --cwd "$SANDBOX" -- 
 
 The list shows the agents and MCP servers of this machine; your own session is marked `THIS REPO` only if it runs in the sandbox. Type nothing that ends or pauses.
 
-Live configuration, same setup. From a second shell: `node dist/cli.js config set staleSessionHours 12 -C "$SANDBOX"`, then save broken JSON into `$SANDBOX/.agentguard.json`, then a valid file with `"agents": ["vibe"]`. Expected: a warning line `.agentguard.json reloaded: limits.staleSessionHours … → 12` in the activity list; the broken save is reported once and changes nothing; the agent list change is reported. `node dist/cli.js config "$SANDBOX"` lists each value with `(file)` or `(default)`. A file with an old `"mode"` or `"protectedFiles"` key still loads, with a notice that the key is ignored. With `--demo` instead, the file must stay byte for byte unchanged.
+Live configuration, same setup. From a second shell: `node dist/cli.js config set staleSessionHours 12 -C "$SANDBOX"`, then save broken JSON into `$SANDBOX/.strayps.json`, then a valid file with `"agents": ["vibe"]`. Expected: a warning line `.strayps.json reloaded: limits.staleSessionHours … → 12` in the activity list; the broken save is reported once and changes nothing; the agent list change is reported. `node dist/cli.js config "$SANDBOX"` lists each value with `(file)` or `(default)`. A file with an old `"mode"` or `"protectedFiles"` key still loads, with a notice that the key is ignored. With `--demo` instead, the file must stay byte for byte unchanged.
 
 ## 4. Plain output
 

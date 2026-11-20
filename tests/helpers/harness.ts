@@ -2,14 +2,14 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { GuardConfigManager, type GuardConfigOverrides } from '../../src/core/guard-config.js';
+import { ConfigManager, type ConfigOverrides } from '../../src/core/config.js';
 import { ProcessMonitor, type RawProcessInfo } from '../../src/core/process-monitor.js';
-import { WatchdogSession } from '../../src/core/session.js';
+import { MonitorSession } from '../../src/core/session.js';
 
 const created: string[] = [];
 
 /** A fresh temp directory (real path, so it compares equal to what the monitor resolves). */
-export function makeTmpDir(prefix = 'agent-leash-test-'): string {
+export function makeTmpDir(prefix = 'strayps-test-'): string {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   created.push(dir);
   return dir;
@@ -55,9 +55,9 @@ export function commitAll(dir: string, message = 'init'): void {
 
 export interface Harness {
   dir: string;
-  configManager: GuardConfigManager;
+  configManager: ConfigManager;
   monitor: ProcessMonitor;
-  session: WatchdogSession;
+  session: MonitorSession;
   /** Every signal the fake killer received, in order. */
   kills: Array<{ pid: number; signal: NodeJS.Signals | undefined }>;
   /** The fake process table. Mutate it to change what the next scan sees. */
@@ -69,7 +69,7 @@ export interface Harness {
 export interface HarnessOptions {
   dir?: string;
   files?: Record<string, string | Buffer>;
-  config?: GuardConfigOverrides;
+  config?: ConfigOverrides;
   procs?: RawProcessInfo[];
   killGraceMs?: number;
 }
@@ -82,7 +82,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   const dir = options.dir ?? makeTmpDir();
   if (options.files) writeFiles(dir, options.files);
 
-  const configManager = new GuardConfigManager(dir, options.config);
+  const configManager = new ConfigManager(dir, options.config);
   const kills: Harness['kills'] = [];
   const procs: RawProcessInfo[] = [...(options.procs ?? [])];
   const stubborn = new Set<number>();
@@ -111,7 +111,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
       new Map(procs.filter((p) => pids.includes(p.pid) && p.rssKb !== undefined).map((p) => [p.pid, p.rssKb! * 1024])),
   });
 
-  const session = new WatchdogSession({ rootDir: dir, configManager, processMonitor: monitor });
+  const session = new MonitorSession({ rootDir: dir, configManager, processMonitor: monitor });
   return { dir, configManager, monitor, session, kills, procs, stubborn };
 }
 

@@ -6,20 +6,20 @@ import path from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { GuardConfigManager } from './core/guard-config.js';
+import { ConfigManager } from './core/config.js';
 import { ProcessMonitor } from './core/process-monitor.js';
-import { type StatusSnapshot, WatchdogSession } from './core/session.js';
+import { type StatusSnapshot, MonitorSession } from './core/session.js';
 import { getVersion } from './version.js';
 
 /** Dashboard tabs that may stream at the same time. */
 const MAX_EVENT_STREAMS = 16;
 
-export interface WatchdogServerDeps {
+export interface DashboardServerDeps {
   rootDir: string;
-  configManager: GuardConfigManager;
+  configManager: ConfigManager;
   processMonitor: ProcessMonitor;
   /** Shared session. Pass the one the terminal UI uses so both views stay in sync. */
-  session?: WatchdogSession;
+  session?: MonitorSession;
   /** Additional host name accepted in the `Host` header besides the loopback names. */
   hostname?: string;
 }
@@ -66,7 +66,7 @@ function loadDashboardAsset(name: string): string | null {
 function loadDashboardHtml(): string {
   const html = loadDashboardAsset('index.html');
   if (html !== null) return html;
-  return `<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8"><meta name="color-scheme" content="light dark"><title>agent-leash</title></head><body><h1>agent-leash watchdog</h1><p>Dashboard assets are missing from this installation. The terminal view and the API still work.</p></body></html>`;
+  return `<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8"><meta name="color-scheme" content="light dark"><title>strayps</title></head><body><h1>strayps</h1><p>Dashboard assets are missing from this installation. The terminal view and the API still work.</p></body></html>`;
 }
 
 /** `localhost:4321` -> `localhost`, `[::1]:4321` -> `[::1]` */
@@ -80,9 +80,9 @@ function hostnameOf(hostHeader: string): string {
   return colon === -1 ? value : value.slice(0, colon);
 }
 
-export function createWatchdogApp(deps: WatchdogServerDeps) {
+export function createDashboardApp(deps: DashboardServerDeps) {
   const { rootDir, configManager, processMonitor } = deps;
-  const session = deps.session ?? new WatchdogSession({ rootDir, configManager, processMonitor });
+  const session = deps.session ?? new MonitorSession({ rootDir, configManager, processMonitor });
   const allowedHosts = new Set(LOOPBACK_HOSTS);
   if (deps.hostname) {
     allowedHosts.add(deps.hostname.toLowerCase());
@@ -119,8 +119,8 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
   app.get('/', (c) => {
     const nonce = randomBytes(16).toString('base64');
     const html = loadDashboardHtml()
-      .replaceAll('__LEASH_VERSION__', getVersion())
-      .replaceAll('__LEASH_NONCE__', nonce);
+      .replaceAll('__STRAYPS_VERSION__', getVersion())
+      .replaceAll('__STRAYPS_NONCE__', nonce);
     c.header(
       'Content-Security-Policy',
       [
@@ -219,14 +219,14 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
   return { app, getStatusSnapshot, session };
 }
 
-export interface StartServerOptions extends WatchdogServerDeps {
+export interface StartServerOptions extends DashboardServerDeps {
   port?: number;
 }
 
-export interface RunningWatchdogServer {
+export interface RunningDashboardServer {
   app: Hono;
   server: Server;
-  session: WatchdogSession;
+  session: MonitorSession;
   port: number;
   hostname: string;
   url: string;
@@ -250,11 +250,11 @@ function closeServer(server: Server): Promise<void> {
  * Starts the dashboard server and returns immediately.
  *
  * Binds to the loopback interface unless `hostname` says otherwise. Port conflicts surface as an
- * `error` event on the returned server; use `listenWatchdogServer` to await readiness and get
+ * `error` event on the returned server; use `listenDashboardServer` to await readiness and get
  * automatic fallback to the next free port.
  */
-export function startWatchdogServer(options: StartServerOptions) {
-  const { app, session } = createWatchdogApp(options);
+export function startDashboardServer(options: StartServerOptions) {
+  const { app, session } = createDashboardApp(options);
   const port = options.port ?? DEFAULT_PORT;
   const hostname = options.hostname ?? DEFAULT_HOSTNAME;
 
@@ -282,10 +282,10 @@ export interface ListenServerOptions extends StartServerOptions {
  * Starts the dashboard server and resolves once it is accepting connections.
  * If the port is taken, the next ports are tried unless `strictPort` is set.
  */
-export async function listenWatchdogServer(
+export async function listenDashboardServer(
   options: ListenServerOptions,
-): Promise<RunningWatchdogServer> {
-  const { app, session } = createWatchdogApp(options);
+): Promise<RunningDashboardServer> {
+  const { app, session } = createDashboardApp(options);
   const hostname = options.hostname ?? DEFAULT_HOSTNAME;
   const firstPort = options.port ?? DEFAULT_PORT;
   const attempts = options.strictPort || firstPort === 0 ? 1 : (options.maxPortAttempts ?? 20);
@@ -303,7 +303,7 @@ export async function listenWatchdogServer(
           resolve(candidate);
         });
       });
-      // From here on a server error must not take the watchdog down
+      // From here on a server error must not take strayps down
       server.on('error', () => {});
       const actualPort = (server.address() as AddressInfo | null)?.port ?? port;
       return {

@@ -33,7 +33,7 @@ describe('ProcessMonitor', () => {
 
     const t0 = 1_000_000;
     const monitor = new ProcessMonitor({
-      rootDir: '/Users/dev/projects/agent-leash',
+      rootDir: '/Users/dev/projects/strayps',
       mcpSilenceTimeoutSec: 45,
       selfPid: 1000,
       processLister: async () => mockProcesses,
@@ -65,7 +65,7 @@ describe('ProcessMonitor', () => {
 
     const t0 = 2_000_000;
     const monitor = new ProcessMonitor({
-      rootDir: '/Users/dev/projects/agent-leash',
+      rootDir: '/Users/dev/projects/strayps',
       mcpSilenceTimeoutSec: 45,
       agentActive: true,
       selfPid: 1000,

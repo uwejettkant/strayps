@@ -166,7 +166,7 @@ export function formatEventLine(event: ActivityEvent, palette: Palette): string 
   return `${palette.dim(formatClock(event.timestamp))}  ${style(padEnd(level, 4))}  ${padEnd(event.type, 18)} ${sanitize(event.message)}`;
 }
 
-/** The process table as plain lines, used by `agent-leash status` and the `status` command. */
+/** The process table as plain lines, used by `strayps status` and the `status` command. */
 export function formatProcessTable(
   processes: MonitoredProcess[],
   palette: Palette,

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="100%" height="100%" role="img" aria-label="agent-leash — The AI Agent and MCP Watchdog for local repositories">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="100%" height="100%" role="img" aria-label="strayps — every AI coding agent and MCP server on your machine, in view">
   <defs>
     <radialGradient id="glow" cx="20%" cy="0%" r="75%">
       <stop offset="0%" stop-color="#5BE49B" stop-opacity="0.12" />
@@ -29,19 +29,19 @@
   <circle cx="56" cy="48" r="5.5" fill="#2A3A31" />
   <circle cx="74" cy="48" r="5.5" fill="#2A3A31" />
   <circle cx="92" cy="48" r="5.5" fill="#2A3A31" />
-  <text x="114" y="52" class="mono" font-size="13" fill="#8FA197">~/repo — npx agent-leash</text>
+  <text x="114" y="52" class="mono" font-size="13" fill="#8FA197">~/repo — npx strayps</text>
 
   <!-- Live Status Chip -->
   <circle cx="1050" cy="48" r="4.5" fill="#5BE49B" />
-  <text x="1064" y="52" class="mono" font-size="12" font-weight="600" fill="#5BE49B">WATCHDOG ACTIVE</text>
+  <text x="1064" y="52" class="mono" font-size="12" font-weight="600" fill="#5BE49B">MONITORING</text>
 
   <!-- Prompt Line -->
   <text x="64" y="112" class="mono" font-size="15" fill="#5BE49B">$</text>
-  <text x="82" y="112" class="mono" font-size="15" fill="#8FA197">npx agent-leash</text>
+  <text x="82" y="112" class="mono" font-size="15" fill="#8FA197">npx strayps</text>
 
   <!-- Main Headline -->
   <text x="64" y="176" class="mono" font-size="56" font-weight="700" fill="#F2F7F4" letter-spacing="-1.5">
-    agent-leash<tspan fill="#5BE49B" class="cursor">_</tspan>
+    strayps<tspan fill="#5BE49B" class="cursor">_</tspan>
   </text>
 
   <!-- Subtitle -->
@@ -57,7 +57,7 @@
 
     <rect x="266" y="0" width="246" height="36" rx="8" fill="#0B0F0D" stroke="#2E4237" />
     <circle cx="284" cy="18" r="4" fill="#5BE49B" />
-    <text x="298" y="23" class="mono" font-size="13" fill="#E4ECE7">Edit-Loop &amp; .env Alarms</text>
+    <text x="298" y="23" class="mono" font-size="13" fill="#E4ECE7">What Agents Left Behind</text>
 
     <rect x="528" y="0" width="256" height="36" rx="8" fill="#0B0F0D" stroke="#2E4237" />
     <circle cx="546" cy="18" r="4" fill="#5BE49B" />

@@ -74,7 +74,7 @@ function runCli(args: string[], options: { cwd?: string } = {}): Run {
 
 const READY = 'Limits:';
 
-describe('agent-leash CLI', () => {
+describe('strayps CLI', () => {
   it('reports the version from package.json', async () => {
     const run = runCli(['--version']);
     expect(await run.exit).toEqual({ code: 0, signal: null });
@@ -97,7 +97,7 @@ describe('agent-leash CLI', () => {
     cases.forEach(([args, message], index) => {
       const output = runs[index].output();
       expect(results[index], args.join(' ')).toEqual({ code: 1, signal: null });
-      expect(output).toContain(`agent-leash: ${message}`);
+      expect(output).toContain(`strayps: ${message}`);
       expect(output, 'no stack trace').not.toMatch(/\n\s+at /);
       expect(output.trim().split('\n')).toHaveLength(1);
     });
@@ -109,14 +109,14 @@ describe('agent-leash CLI', () => {
     await run.waitFor(READY);
     expect(run.output()).toContain('DEMO');
     expect(run.output()).toContain('Dashboard:   off');
-    expect(run.output()).toContain('"exit" stops the watchdog');
+    expect(run.output()).toContain('"exit" stops strayps');
 
     await run.waitFor('process-alert');
     run.child.stdin.write('exit\n');
 
     expect(await run.exit).toEqual({ code: 0, signal: null });
-    expect(run.output()).toContain('Shutting down agent-leash watchdog (command)');
-    expect(run.output()).toMatch(/agent-leash stopped after \d+s/);
+    expect(run.output()).toContain('Shutting down strayps (command)');
+    expect(run.output()).toMatch(/strayps stopped after \d+s/);
     expect(run.output()).toMatch(/\d+ process alerts · \d+ processes terminated/);
     expect(run.output()).not.toMatch(/file edits|protected-file|checkpoint/);
   });
@@ -161,8 +161,8 @@ describe('agent-leash CLI', () => {
 
       run.child.kill(signal);
       expect(await run.exit, signal).toEqual({ code: 0, signal: null });
-      expect(run.output()).toContain(`Shutting down agent-leash watchdog (${signal})`);
-      expect(run.output()).toContain('agent-leash stopped after');
+      expect(run.output()).toContain(`Shutting down strayps (${signal})`);
+      expect(run.output()).toContain('strayps stopped after');
     }
   });
 
@@ -175,7 +175,7 @@ describe('agent-leash CLI', () => {
 
     const strict = runCli(['watch', dir, '--demo', '--port', String(taken)]);
     expect(await strict.exit).toEqual({ code: 1, signal: null });
-    expect(strict.output()).toContain(`agent-leash: Port ${taken} is already in use`);
+    expect(strict.output()).toContain(`strayps: Port ${taken} is already in use`);
     expect(strict.output()).not.toMatch(/\n\s+at /);
   });
 
@@ -200,22 +200,22 @@ describe('agent-leash CLI', () => {
     const first = runCli(['init', dir]);
     expect((await first.exit).code).toBe(0);
     const defaults = { agents: [], limits: { mcpSilenceTimeoutSec: 45, staleSessionHours: 6 } };
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual(defaults);
+    expect(JSON.parse(read(dir, '.strayps.json'))).toEqual(defaults);
 
-    writeFiles(dir, { '.agentguard.json': '{"agents":["vibe"]}\n' });
+    writeFiles(dir, { '.strayps.json': '{"agents":["vibe"]}\n' });
     const second = runCli(['init', dir]);
     expect((await second.exit).code).toBe(1);
     expect(second.output()).toContain('already exists');
-    expect(read(dir, '.agentguard.json')).toContain('vibe');
+    expect(read(dir, '.strayps.json')).toContain('vibe');
 
     const forced = runCli(['init', dir, '--force']);
     expect((await forced.exit).code).toBe(0);
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual(defaults);
+    expect(JSON.parse(read(dir, '.strayps.json'))).toEqual(defaults);
   });
 
   it('tells the user about problems in the config file at startup', async () => {
     const dir = makeTmpDir();
-    writeFiles(dir, { '.agentguard.json': '{"mode":"turbo","protectedFiles":[".env*"],"limits":{"staleSessionHours":-1}}' });
+    writeFiles(dir, { '.strayps.json': '{"mode":"turbo","protectedFiles":[".env*"],"limits":{"staleSessionHours":-1}}' });
     const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
     await run.waitFor(READY);
     await run.waitFor('"mode" no longer exists and is ignored');
@@ -227,23 +227,23 @@ describe('agent-leash CLI', () => {
   });
 });
 
-describe('agent-leash config', () => {
-  const configFile = (dir: string) => path.join(dir, '.agentguard.json');
+describe('strayps config', () => {
+  const configFile = (dir: string) => path.join(dir, '.strayps.json');
 
   it('shows every setting with its value and where it comes from, without creating a file', async () => {
     const dir = makeTmpDir();
     const bare = runCli(['config', dir]);
     expect(await bare.exit).toEqual({ code: 0, signal: null });
-    expect(bare.output()).toContain('No .agentguard.json here; every value is a built-in default.');
+    expect(bare.output()).toContain('No .strayps.json here; every value is a built-in default.');
     expect(bare.output()).toMatch(/limits\.mcpSilenceTimeoutSec = 45 {2}\(default\)/);
     expect(bare.output()).toMatch(/limits\.staleSessionHours = 6 {2}\(default\)/);
     expect(bare.output()).not.toMatch(/maxFiles|maxEdits|protectedFiles/);
     expect(fs.existsSync(configFile(dir)), 'showing never creates the file').toBe(false);
 
-    writeFiles(dir, { '.agentguard.json': '{"agents":["vibe"],"limits":{"staleSessionHours":20,"maxFilesWarn":3}}' });
+    writeFiles(dir, { '.strayps.json': '{"agents":["vibe"],"limits":{"staleSessionHours":20,"maxFilesWarn":3}}' });
     const withFile = runCli(['config', 'show', dir]);
     expect(await withFile.exit).toEqual({ code: 0, signal: null });
-    expect(withFile.output()).toContain('.agentguard.json found');
+    expect(withFile.output()).toContain('.strayps.json found');
     expect(withFile.output()).toMatch(/agents = vibe {2}\(file\)/);
     expect(withFile.output()).toMatch(/limits\.staleSessionHours = 20 {2}\(file\)/);
     expect(withFile.output()).toMatch(/limits\.mcpSilenceTimeoutSec = 45 {2}\(default\)/);
@@ -261,25 +261,25 @@ describe('agent-leash config', () => {
     const created = await run('set', 'staleSessionHours', '20');
     expect(created).toContain('Created');
     expect(created).toContain('limits.staleSessionHours = 20');
-    expect(created).toContain('A running agent-leash picks this up within a second.');
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ limits: { staleSessionHours: 20 } });
+    expect(created).toContain('A running strayps picks this up within a second.');
+    expect(JSON.parse(read(dir, '.strayps.json'))).toEqual({ limits: { staleSessionHours: 20 } });
 
     await run('set', 'AGENTS', 'vibe, opencode');
     expect(await run('set', 'limits.staleSessionHours', '25')).toContain('Updated');
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ agents: ['vibe', 'opencode'], limits: { staleSessionHours: 25 } });
+    expect(JSON.parse(read(dir, '.strayps.json'))).toEqual({ agents: ['vibe', 'opencode'], limits: { staleSessionHours: 25 } });
 
     expect(await run('unset', 'staleSessionHours')).toContain('Removed limits.staleSessionHours');
     // an empty "limits" object is removed with its last key
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ agents: ['vibe', 'opencode'] });
+    expect(JSON.parse(read(dir, '.strayps.json'))).toEqual({ agents: ['vibe', 'opencode'] });
     expect(await run('unset', 'staleSessionHours')).toContain(
-      'limits.staleSessionHours is not set in .agentguard.json; the default (6) already applies.',
+      'limits.staleSessionHours is not set in .strayps.json; the default (6) already applies.',
     );
   }, 30_000);
 
   it('refuses unknown settings, invalid values and a broken file with a one-line error, changing nothing', async () => {
     const dir = makeTmpDir();
     const broken = path.join(dir, 'broken');
-    writeFiles(dir, { 'broken/.agentguard.json': '{ "agents": ' });
+    writeFiles(dir, { 'broken/.strayps.json': '{ "agents": ' });
     const cases: Array<[string[], string]> = [
       [['config', 'set', 'staleSesionHours', '3', '-C', dir], 'Unknown setting "staleSesionHours". Known settings: limits.mcpSilenceTimeoutSec'],
       [['config', 'set', 'staleSessionHours', '0', '-C', dir], 'limits.staleSessionHours must be a whole number >= 1 (got "0")'],
@@ -297,25 +297,25 @@ describe('agent-leash config', () => {
     cases.forEach(([args, message], index) => {
       const output = runs[index].output();
       expect(results[index], args.join(' ')).toEqual({ code: 1, signal: null });
-      expect(output).toContain('agent-leash: ');
+      expect(output).toContain('strayps: ');
       expect(output).toContain(message);
       expect(output, 'no stack trace').not.toMatch(/\n\s+at /);
       expect(output.trim().split('\n')).toHaveLength(1);
     });
     expect(fs.existsSync(configFile(dir)), 'no file for a refused value').toBe(false);
-    expect(read(broken, '.agentguard.json')).toBe('{ "agents": ');
+    expect(read(broken, '.strayps.json')).toBe('{ "agents": ');
   });
 
-  it('never prints control characters from .agentguard.json to the terminal', async () => {
+  it('never prints control characters from .strayps.json to the terminal', async () => {
     // The watched agent can write this file: its keys, values and broken JSON are untrusted text
     const hostile = '\u001b]0;pwned\u0007\u001b[2J';
     const dir = makeTmpDir();
     writeFiles(dir, {
-      '.agentguard.json': JSON.stringify({ [`x${hostile}`]: 1, limits: { staleSessionHours: `20${hostile}` } }),
+      '.strayps.json': JSON.stringify({ [`x${hostile}`]: 1, limits: { staleSessionHours: `20${hostile}` } }),
     });
     const broken = makeTmpDir();
     // V8 quotes the start of the text in this parse error, control characters included
-    writeFiles(broken, { '.agentguard.json': `{"agents": a${hostile}}` });
+    writeFiles(broken, { '.strayps.json': `{"agents": a${hostile}}` });
 
     const set = runCli(['config', 'set', 'staleSessionHours', '25', '-C', dir]);
     const refused = runCli(['config', 'set', 'agents', 'vibe', '-C', broken]);
@@ -334,24 +334,24 @@ describe('agent-leash config', () => {
     }
   }, 30_000);
 
-  it('applies edits to .agentguard.json while watching', async () => {
+  it('applies edits to .strayps.json while watching', async () => {
     const dir = makeTmpDir();
-    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":6}}\n' });
+    writeFiles(dir, { '.strayps.json': '{"limits":{"staleSessionHours":6}}\n' });
     // the process list of this machine is read but never acted on
     const run = runCli(['watch', dir, '--no-dashboard']);
     await run.waitFor(READY);
     expect(run.output()).toContain('stale after 6h');
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":9}}\n' });
-    await run.waitFor(/WARN {2}config-reload +\.agentguard\.json reloaded: limits\.staleSessionHours 6 → 9/);
+    writeFiles(dir, { '.strayps.json': '{"limits":{"staleSessionHours":9}}\n' });
+    await run.waitFor(/WARN {2}config-reload +\.strayps\.json reloaded: limits\.staleSessionHours 6 → 9/);
 
-    // a broken save is not applied and does not stop the watchdog
-    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":' });
-    await run.waitFor('.agentguard.json changed but was not applied, previous settings kept');
+    // a broken save is not applied and does not stop strayps
+    writeFiles(dir, { '.strayps.json': '{"limits":{"staleSessionHours":' });
+    await run.waitFor('.strayps.json changed but was not applied, previous settings kept');
 
     // saving the same values again is no change worth reporting
-    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":9}}\n' });
+    writeFiles(dir, { '.strayps.json': '{"limits":{"staleSessionHours":9}}\n' });
     await new Promise((resolve) => setTimeout(resolve, 1200));
     expect(run.output().match(/reloaded:/g)).toHaveLength(1);
 
@@ -362,7 +362,7 @@ describe('agent-leash config', () => {
   it('never writes the config file in the demo', async () => {
     const dir = makeTmpDir();
     const original = '{\n  "limits": { "staleSessionHours": 9 }\n}\n';
-    writeFiles(dir, { '.agentguard.json': original });
+    writeFiles(dir, { '.strayps.json': original });
     const withFile = runCli(['watch', dir, '--demo', '--no-dashboard']);
     await withFile.waitFor(READY);
     await withFile.waitFor('process-alert');
@@ -370,7 +370,7 @@ describe('agent-leash config', () => {
     await withFile.waitFor('Resumed');
     withFile.child.stdin.write('exit\n');
     expect((await withFile.exit).code).toBe(0);
-    expect(read(dir, '.agentguard.json')).toBe(original);
+    expect(read(dir, '.strayps.json')).toBe(original);
 
     const bare = makeTmpDir();
     const withoutFile = runCli(['watch', bare, '--demo', '--no-dashboard']);
@@ -381,15 +381,15 @@ describe('agent-leash config', () => {
   }, 30_000);
 });
 
-describe('agent-leash as a library', () => {
+describe('strayps as a library', () => {
   it('can be imported without starting anything', () => {
     for (const name of [
-      'GuardConfigManager',
+      'ConfigManager',
       'ProcessMonitor',
-      'WatchdogSession',
-      'createWatchdogApp',
-      'startWatchdogServer',
-      'listenWatchdogServer',
+      'MonitorSession',
+      'createDashboardApp',
+      'startDashboardServer',
+      'listenDashboardServer',
       'createCliProgram',
       'runCli',
       'TerminalUI',

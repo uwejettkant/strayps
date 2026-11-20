@@ -4,9 +4,9 @@ import os from 'node:os';
 import {
   CONFIG_FILENAME,
   type ConfigReloadResult,
-  type GuardConfig,
-  GuardConfigManager,
-} from './guard-config.js';
+  type StraypsConfig,
+  ConfigManager,
+} from './config.js';
 import type { ActivityEvent, ActivityEventType } from './events.js';
 import {
   formatMemory,
@@ -15,17 +15,17 @@ import {
   ProcessMonitor,
 } from './process-monitor.js';
 
-export interface WatchdogSessionDeps {
+export interface MonitorSessionDeps {
   /** The current repository: its agents are the ones `pause` holds and the list marks as "this repo". */
   rootDir: string;
-  configManager: GuardConfigManager;
+  configManager: ConfigManager;
   processMonitor: ProcessMonitor;
 }
 
 /** One consistent view of the monitor state. The dashboard and the terminal UI both render this. */
 export interface StatusSnapshot {
   rootDir: string;
-  config: GuardConfig;
+  config: StraypsConfig;
   events: ActivityEvent[];
   processes: MonitoredProcess[];
   timestamp: number;
@@ -37,7 +37,7 @@ export interface PauseResult {
 }
 
 /**
- * One process a person confirmed for ending, as it was shown: PID and the time agent-leash first
+ * One process a person confirmed for ending, as it was shown: PID and the time strayps first
  * saw it. A PID that exited and was reused by another process while the question was open has a
  * different `firstSeenAt` and is not ended.
  */
@@ -95,9 +95,9 @@ const CONFIG_SETTLE_MS = 150;
  * - `event`  (ActivityEvent): one entry was added to the activity log
  * - `update` (StatusSnapshot): state changed; coalesced to at most one per 80 ms
  */
-export class WatchdogSession extends EventEmitter {
+export class MonitorSession extends EventEmitter {
   public readonly rootDir: string;
-  public readonly configManager: GuardConfigManager;
+  public readonly configManager: ConfigManager;
   public readonly processMonitor: ProcessMonitor;
 
   private sessionEvents: ActivityEvent[] = [];
@@ -111,7 +111,7 @@ export class WatchdogSession extends EventEmitter {
   private configReloadTimer: NodeJS.Timeout | null = null;
   private lastConfigProblem: string | null = null;
 
-  constructor(deps: WatchdogSessionDeps) {
+  constructor(deps: MonitorSessionDeps) {
     super();
     this.rootDir = deps.rootDir;
     this.configManager = deps.configManager;
@@ -186,7 +186,7 @@ export class WatchdogSession extends EventEmitter {
   }
 
   /**
-   * Re-reads `.agentguard.json` and applies it when it is valid. An invalid file changes nothing:
+   * Re-reads `.strayps.json` and applies it when it is valid. An invalid file changes nothing:
    * the previous settings stay and the activity log says why (once per distinct problem).
    */
   public reloadConfig(): ConfigReloadResult {
@@ -206,7 +206,7 @@ export class WatchdogSession extends EventEmitter {
 
     if (result.changes.length > 0) {
       this.applyLimits(this.configManager.getConfig());
-      // A warning, not an info line: the change alters what the watchdog does, and the agent being
+      // A warning, not an info line: the change alters what strayps does, and the agent being
       // watched can write this file as easily as the user can. It has to show up with --quiet too.
       this.addEvent({
         type: 'config-reload',
@@ -223,7 +223,7 @@ export class WatchdogSession extends EventEmitter {
   }
 
   /**
-   * Starts applying changes to `.agentguard.json` while the watchdog runs (polling; works with
+   * Starts applying changes to `.strayps.json` while strayps runs (polling; works with
    * editors that save by replacing the file, and notices when the file is created or deleted).
    */
   public watchConfigFile(intervalMs: number = 500): void {
@@ -414,7 +414,7 @@ export class WatchdogSession extends EventEmitter {
   }
 
   /** Pushes limits that live outside the config manager into the parts that use them. */
-  private applyLimits(config: GuardConfig): void {
+  private applyLimits(config: StraypsConfig): void {
     this.processMonitor.setSilenceTimeoutSec(config.limits.mcpSilenceTimeoutSec);
     this.processMonitor.setStaleSessionHours(config.limits.staleSessionHours);
     this.processMonitor.setAgentNames(config.agents);

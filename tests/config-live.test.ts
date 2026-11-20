@@ -6,12 +6,12 @@ import {
   CONFIG_FILENAME,
   CONFIG_KEY_INFO,
   CONFIG_KEYS,
-  DEFAULT_GUARD_CONFIG,
-  GuardConfigManager,
+  DEFAULT_CONFIG,
+  ConfigManager,
   parseConfigValue,
   resolveConfigKey,
   writeConfigValue,
-} from '../src/core/guard-config.js';
+} from '../src/core/config.js';
 import type { ActivityEvent } from '../src/core/events.js';
 import { cleanupTmpDirs, createHarness, makeTmpDir, writeFiles } from './helpers/harness.js';
 
@@ -37,11 +37,11 @@ describe('old files', () => {
   it('still loads an old file with "mode", ignores the key and says so', () => {
     const dir = makeTmpDir();
     writeJson(dir, { mode: 'yolo', limits: { staleSessionHours: 20 } });
-    const manager = new GuardConfigManager(dir);
+    const manager = new ConfigManager(dir);
 
-    expect(manager.getConfig()).toEqual({ ...DEFAULT_GUARD_CONFIG, limits: { ...DEFAULT_GUARD_CONFIG.limits, staleSessionHours: 20 } });
+    expect(manager.getConfig()).toEqual({ ...DEFAULT_CONFIG, limits: { ...DEFAULT_CONFIG.limits, staleSessionHours: 20 } });
     expect(manager.getWarnings()).toEqual([
-      '"mode" no longer exists and is ignored: agent-leash always watches by the settings in this file',
+      '"mode" no longer exists and is ignored: strayps always watches by the settings in this file',
     ]);
   });
 
@@ -49,7 +49,7 @@ describe('old files', () => {
     const dir = makeTmpDir();
     writeJson(dir, { limits: { staleSessionHours: 20 } });
     const before = sha(dir);
-    const manager = new GuardConfigManager(dir, undefined, { readOnly: true });
+    const manager = new ConfigManager(dir, undefined, { readOnly: true });
 
     expect(manager.isReadOnly()).toBe(true);
     expect(() => manager.saveConfig()).toThrow('read-only');
@@ -61,7 +61,7 @@ describe('reloading a changed file', () => {
   it('applies a valid change and says what changed', () => {
     const dir = makeTmpDir();
     writeJson(dir, { limits: { staleSessionHours: 6 } });
-    const manager = new GuardConfigManager(dir);
+    const manager = new ConfigManager(dir);
 
     writeJson(dir, { limits: { staleSessionHours: 24, mcpSilenceTimeoutSec: 90 }, agents: ['vibe'] });
     const result = manager.reload();
@@ -75,7 +75,7 @@ describe('reloading a changed file', () => {
   it('keeps the previous settings when the edit is not valid, and says why', () => {
     const dir = makeTmpDir();
     writeJson(dir, { limits: { staleSessionHours: 20 } });
-    const manager = new GuardConfigManager(dir);
+    const manager = new ConfigManager(dir);
     const before = manager.getConfig();
 
     writeJson(dir, '{ "limits": { "staleSessionHours": 2');
@@ -94,7 +94,7 @@ describe('reloading a changed file', () => {
 
   it('applies the file but points out keys it does not know (typos)', () => {
     const dir = makeTmpDir();
-    const manager = new GuardConfigManager(dir);
+    const manager = new ConfigManager(dir);
     writeJson(dir, { limits: { staleSessionHour: 3, mcpSilenceTimeoutSec: 50 }, modes: 'strict' });
 
     const result = manager.reload();
@@ -109,19 +109,19 @@ describe('reloading a changed file', () => {
   it('goes back to the defaults when the file is deleted', () => {
     const dir = makeTmpDir();
     writeJson(dir, { limits: { staleSessionHours: 3 } });
-    const manager = new GuardConfigManager(dir);
+    const manager = new ConfigManager(dir);
     fs.rmSync(configPath(dir));
 
     const result = manager.reload();
     expect(result.applied).toBe(true);
-    expect(manager.getConfig()).toEqual(DEFAULT_GUARD_CONFIG);
+    expect(manager.getConfig()).toEqual(DEFAULT_CONFIG);
     expect(result.changes).toContain('limits.staleSessionHours 3 → 6');
   });
 
   it('tells where every value comes from', () => {
     const dir = makeTmpDir();
     writeJson(dir, { limits: { staleSessionHours: 20 } });
-    const manager = new GuardConfigManager(dir, { limits: { mcpSilenceTimeoutSec: 30 } });
+    const manager = new ConfigManager(dir, { limits: { mcpSilenceTimeoutSec: 30 } });
 
     const sources = manager.getSources();
     expect(Object.keys(sources).sort()).toEqual([...CONFIG_KEYS].sort());
@@ -131,7 +131,7 @@ describe('reloading a changed file', () => {
   });
 });
 
-describe('changing single values (agent-leash config set / unset)', () => {
+describe('changing single values (strayps config set / unset)', () => {
   it('knows every setting and describes it', () => {
     for (const key of CONFIG_KEYS) {
       expect(CONFIG_KEY_INFO[key].length).toBeGreaterThan(10);
@@ -159,7 +159,7 @@ describe('changing single values (agent-leash config set / unset)', () => {
   it('reads agent names from the file and refuses anything that is not a program name', () => {
     const dir = makeTmpDir();
     writeJson(dir, { agents: ['vibe', 'my agent', 42, '/bin/opencode'] });
-    const manager = new GuardConfigManager(dir);
+    const manager = new ConfigManager(dir);
     expect(manager.getConfig().agents).toEqual(['vibe']);
     expect(manager.getWarnings()).toEqual([
       'agents contains entries that are not program names (a name like "vibe", no path, no spaces), they were ignored',
@@ -221,7 +221,7 @@ describe('a running session', () => {
     const [event] = configEvents(h.session.getSnapshot().events);
     // the agent being watched can write this file too: a reload must be visible with --quiet
     expect(event.severity).toBe('warn');
-    expect(event.message).toContain('.agentguard.json reloaded:');
+    expect(event.message).toContain('.strayps.json reloaded:');
     expect(event.message).toContain('limits.staleSessionHours 6 → 12');
 
     writeJson(h.dir, { agents: ['vibe'] });
@@ -239,7 +239,7 @@ describe('a running session', () => {
     expect(events).toHaveLength(1);
     expect(events[0].severity).toBe('warn');
     expect(events[0].message).toContain('was not applied, previous settings kept');
-    expect(h.session.getSnapshot().config).toEqual(DEFAULT_GUARD_CONFIG);
+    expect(h.session.getSnapshot().config).toEqual(DEFAULT_CONFIG);
 
     writeJson(h.dir, { limits: { staleSessionHours: 9 } });
     h.session.reloadConfig();

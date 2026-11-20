@@ -1,7 +1,7 @@
 /**
  * Safety net for the whole test suite.
  *
- * agent-leash terminates processes for a living. A test that reaches the real `process.kill`
+ * strayps terminates processes for a living. A test that reaches the real `process.kill`
  * with the real process list would kill the developer's own agent sessions. While tests run,
  * `process.kill` therefore only works for liveness checks (signal 0) and for PIDs a test
  * explicitly spawned and registered here.

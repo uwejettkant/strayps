@@ -9,9 +9,9 @@ installKillGuard();
 
 // Everything a test file creates in the temp directory, including the copies that rollbacks
 // keep and whatever CLI child processes write, lands in one folder that is removed afterwards.
-// Nothing outside it is ever cleaned up: a real agent-leash session on this machine keeps its
+// Nothing outside it is ever cleaned up: a real strayps session on this machine keeps its
 // own copies in the same system temp directory.
-const suiteTmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-leash-suite-')));
+const suiteTmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'strayps-suite-')));
 process.env.TMPDIR = suiteTmp;
 process.env.TMP = suiteTmp;
 process.env.TEMP = suiteTmp;

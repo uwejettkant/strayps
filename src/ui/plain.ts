@@ -1,11 +1,11 @@
 import readline from 'node:readline';
-import type { WatchdogSession } from '../core/session.js';
+import type { MonitorSession } from '../core/session.js';
 import type { ActivityEvent } from '../core/events.js';
 import { type CommandResult, HELP_LINES, parseCommand, runCommand } from './commands.js';
 import { createPalette, formatEventLine, formatStatusReport, padEnd, type Palette } from './format.js';
 
 export interface PlainReporterOptions {
-  session: WatchdogSession;
+  session: MonitorSession;
   /** Receives one line of output at a time (without trailing newline). */
   write: (line: string) => void;
   /** Line-based command input (a pipe, or a terminal in cooked mode). Omit to disable commands. */
@@ -22,10 +22,10 @@ export interface PlainReporterOptions {
  * pipes, log files, CI, an agent's background task, or `--no-tui`.
  *
  * Prints one line per activity event and accepts the same commands as the full-screen
- * view, one per line. Reaching the end of the input does not stop the watchdog.
+ * view, one per line. Reaching the end of the input does not stop strayps.
  */
 export class PlainReporter {
-  private readonly session: WatchdogSession;
+  private readonly session: MonitorSession;
   private readonly options: PlainReporterOptions;
   private readonly palette: Palette;
   private rl: readline.Interface | null = null;
@@ -51,7 +51,7 @@ export class PlainReporter {
     if (this.options.input) {
       this.rl = readline.createInterface({ input: this.options.input, terminal: false });
       this.rl.on('line', (line) => this.handleLine(line));
-      // A closed or failing input must never take the watchdog down
+      // A closed or failing input must never take strayps down
       this.rl.on('close', () => {
         this.rl = null;
       });

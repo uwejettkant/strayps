@@ -10,7 +10,7 @@ afterEach(() => {
 
 const OTHER = '/work/other-repo';
 
-describe('WatchdogSession', () => {
+describe('MonitorSession', () => {
   it('gives every front end one newest-first view of processes and session events', async () => {
     const h = createHarness({
       procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', rssKb: 100_000, cpuTimeSec: 1.5 }],
@@ -284,8 +284,8 @@ describe('WatchdogSession', () => {
         return [];
       },
     });
-    const { WatchdogSession } = await import('../src/core/session.js');
-    const session = new WatchdogSession({
+    const { MonitorSession } = await import('../src/core/session.js');
+    const session = new MonitorSession({
       rootDir: h.dir,
       configManager: h.configManager,
       processMonitor: failing,

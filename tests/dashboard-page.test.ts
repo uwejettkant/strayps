@@ -23,7 +23,7 @@ interface FakeElement {
  * Enough to call `renderStatus` and read the markup it produces; no browser needed.
  */
 function loadDashboard() {
-  const script = html.match(/<script nonce="__LEASH_NONCE__">([\s\S]*?)<\/script>/)?.[1];
+  const script = html.match(/<script nonce="__STRAYPS_NONCE__">([\s\S]*?)<\/script>/)?.[1];
   if (!script) throw new Error('inline dashboard script not found');
 
   const elements = new Map<string, FakeElement>();
@@ -114,8 +114,8 @@ describe('dashboard page', () => {
   it('contains no inline event handlers and no script without the nonce', () => {
     expect(html).not.toMatch(/\son[a-z]+\s*=/i);
     const scripts = html.match(/<script\b[^>]*>/g) ?? [];
-    expect(scripts).toEqual(['<script nonce="__LEASH_NONCE__">']);
-    expect(html.match(/<style\b[^>]*>/g)).toEqual(['<style nonce="__LEASH_NONCE__">']);
+    expect(scripts).toEqual(['<script nonce="__STRAYPS_NONCE__">']);
+    expect(html.match(/<style\b[^>]*>/g)).toEqual(['<style nonce="__STRAYPS_NONCE__">']);
     expect(html).not.toMatch(/\sstyle\s*=/i);
     expect(html).not.toContain('v0.1.0');
   });
@@ -123,7 +123,7 @@ describe('dashboard page', () => {
   it('is a view only: no token, no buttons, no dialogs, and its script only reads', async () => {
     // the page held the token for the kill route, and any local process could load the page
     expect(html).not.toContain('leash-token');
-    expect(html).not.toContain('__LEASH_TOKEN__');
+    expect(html).not.toContain('__STRAYPS_TOKEN__');
     expect(html).not.toMatch(/<(button|dialog|form|input|textarea)\b/i);
     expect(html).not.toContain('data-action');
     expect(html).toContain('use the terminal');

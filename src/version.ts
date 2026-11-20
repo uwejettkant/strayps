@@ -22,7 +22,7 @@ export function getVersion(): string {
         name?: unknown;
         version?: unknown;
       };
-      if (pkg.name === 'agent-leash' && typeof pkg.version === 'string') {
+      if (pkg.name === 'strayps' && typeof pkg.version === 'string') {
         version = pkg.version;
         break;
       }

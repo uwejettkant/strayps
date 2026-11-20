@@ -1,6 +1,6 @@
 # Security Policy
 
-agent-leash terminates processes and rewrites files on the machine it runs on. A flaw in it can cost someone their work, so reports about security problems are welcome.
+strayps terminates processes and rewrites files on the machine it runs on. A flaw in it can cost someone their work, so reports about security problems are welcome.
 
 ## Reporting a vulnerability
 
@@ -8,7 +8,7 @@ Please do not open a public issue for a security problem. Use GitHub's private v
 
 Helpful to include:
 
-- the version (`agent-leash --version`), the operating system and the Node.js version,
+- the version (`strayps --version`), the operating system and the Node.js version,
 - what you ran and what happened,
 - what you expected instead.
 

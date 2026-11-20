@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export interface GuardLimits {
+export interface ConfigLimits {
   /** Seconds without CPU activity before an orphaned process (parent gone) counts as frozen. */
   mcpSilenceTimeoutSec: number;
   /** Hours after which a session in another repository counts as stale. */
@@ -9,26 +9,26 @@ export interface GuardLimits {
 }
 
 /** What the process monitor needs to know beyond its built-in rules. */
-export interface GuardConfig {
+export interface StraypsConfig {
   /** Program names to treat as coding agents, on top of the built-in names and MCP clients. */
   agents: string[];
-  limits: GuardLimits;
+  limits: ConfigLimits;
 }
 
-/** Values that take precedence over `.agentguard.json`, e.g. from the programmatic API. */
-export interface GuardConfigOverrides {
+/** Values that take precedence over `.strayps.json`, e.g. from the programmatic API. */
+export interface ConfigOverrides {
   agents?: string[];
-  limits?: Partial<GuardLimits>;
+  limits?: Partial<ConfigLimits>;
 }
 
-export interface GuardConfigManagerOptions {
-  /** Never write `.agentguard.json` (used by `--demo`). Reading and reloading still work. */
+export interface ConfigManagerOptions {
+  /** Never write `.strayps.json` (used by `--demo`). Reading and reloading still work. */
   readOnly?: boolean;
 }
 
-export const CONFIG_FILENAME = '.agentguard.json';
+export const CONFIG_FILENAME = '.strayps.json';
 
-export const DEFAULT_GUARD_CONFIG: GuardConfig = {
+export const DEFAULT_CONFIG: StraypsConfig = {
   agents: [],
   limits: {
     mcpSilenceTimeoutSec: 45,
@@ -36,12 +36,12 @@ export const DEFAULT_GUARD_CONFIG: GuardConfig = {
   },
 };
 
-const LIMIT_KEYS: ReadonlyArray<keyof GuardLimits> = [
+const LIMIT_KEYS: ReadonlyArray<keyof ConfigLimits> = [
   'mcpSilenceTimeoutSec',
   'staleSessionHours',
 ];
 
-export type ConfigKey = 'agents' | `limits.${keyof GuardLimits}`;
+export type ConfigKey = 'agents' | `limits.${keyof ConfigLimits}`;
 
 export const CONFIG_KEYS: ConfigKey[] = [...LIMIT_KEYS.map((key) => `limits.${key}` as ConfigKey), 'agents'];
 
@@ -50,7 +50,7 @@ function isProgramName(value: unknown): value is string {
   return typeof value === 'string' && /^[^\s/\\]+$/.test(value.trim());
 }
 
-/** What each setting does. Shown by `agent-leash config`; the README table mirrors it. */
+/** What each setting does. Shown by `strayps config`; the README table mirrors it. */
 export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
   'limits.mcpSilenceTimeoutSec': 'seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen',
   'limits.staleSessionHours': 'hours after which a session in another repository counts as stale, if it is also idle for ten minutes (no new process, under 8 s CPU time)',
@@ -70,14 +70,14 @@ export interface ConfigReloadResult {
   warnings: string[];
 }
 
-/** Upper bound for .agentguard.json; a real one is a few hundred bytes. */
+/** Upper bound for .strayps.json; a real one is a few hundred bytes. */
 const CONFIG_MAX_BYTES = 1024 * 1024;
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
-/** A FIFO put in place of .agentguard.json must not block the watchdog in open(). */
+/** A FIFO put in place of .strayps.json must not block strayps in open(). */
 const O_NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
 
 /**
- * Reads .agentguard.json only when it is a plain file. A link there would make agent-leash read
+ * Reads .strayps.json only when it is a plain file. A link there would make strayps read
  * whatever it points to (.env), and the JSON error message would quote it into the log.
  */
 function readConfigText(filePath: string): { state: 'missing' } | { state: 'ok'; text: string } | { state: 'invalid'; reason: string } {
@@ -88,12 +88,12 @@ function readConfigText(filePath: string): { state: 'missing' } | { state: 'ok';
     return { state: 'missing' };
   }
   if (stat.isSymbolicLink()) {
-    return { state: 'invalid', reason: 'it is a symbolic link; agent-leash reads only a plain file there' };
+    return { state: 'invalid', reason: 'it is a symbolic link; strayps reads only a plain file there' };
   }
   if (!stat.isFile() || stat.nlink !== 1) return { state: 'invalid', reason: 'it is not a plain file' };
   if (stat.size > CONFIG_MAX_BYTES) return { state: 'invalid', reason: 'it is larger than 1 MB' };
   // The agent can swap the file between lstat and open: check again on what was opened, and never
-  // let a read error escape (it would end the watchdog from inside a reload)
+  // let a read error escape (it would end strayps from inside a reload)
   let fd: number;
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
@@ -125,11 +125,11 @@ function describeJsonError(err: unknown): string {
   return 'file is not valid JSON';
 }
 
-/** Writes .agentguard.json; refuses a link at that path instead of writing to its target. */
+/** Writes .strayps.json; refuses a link at that path instead of writing to its target. */
 function writeConfigText(filePath: string, text: string): void {
   try {
     if (fs.lstatSync(filePath).isSymbolicLink()) {
-      throw new Error(`${filePath} is a symbolic link; agent-leash writes only a plain file there. Nothing was changed.`);
+      throw new Error(`${filePath} is a symbolic link; strayps writes only a plain file there. Nothing was changed.`);
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -138,7 +138,7 @@ function writeConfigText(filePath: string, text: string): void {
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.nlink !== 1) {
-      throw new Error(`${filePath} is not a plain file of its own; agent-leash writes only a plain file there. Nothing was changed.`);
+      throw new Error(`${filePath} is not a plain file of its own; strayps writes only a plain file there. Nothing was changed.`);
     }
     const content = Buffer.from(text, 'utf-8');
     fs.ftruncateSync(fd, 0);
@@ -161,7 +161,7 @@ interface FileRead {
   state: 'missing' | 'ok' | 'invalid';
   invalidReason?: string;
   agents?: string[];
-  limits: Partial<GuardLimits>;
+  limits: Partial<ConfigLimits>;
   /** Invalid values; they are left out of `agents` / `limits`. */
   errors: ValueError[];
   /** Things that are valid but probably not what was meant (unknown keys). */
@@ -206,7 +206,7 @@ function readConfigFile(filePath: string): FileRead {
   for (const key of Object.keys(record)) {
     if (key === 'mode') {
       // The modes were removed: an old file still loads, the key just has no effect
-      result.notices.push('"mode" no longer exists and is ignored: agent-leash always watches by the settings in this file');
+      result.notices.push('"mode" no longer exists and is ignored: strayps always watches by the settings in this file');
       continue;
     }
     if (key === 'protectedFiles') {
@@ -244,12 +244,12 @@ function readConfigFile(filePath: string): FileRead {
           result.notices.push(`limits.${key} is not a known setting and is ignored`);
           continue;
         }
-        const limitKey = key as keyof GuardLimits;
+        const limitKey = key as keyof ConfigLimits;
         const valid = validLimit(value);
         if (valid === null) {
           result.errors.push({
             message: `limits.${key} must be a number >= 1 (got ${JSON.stringify(value)})`,
-            startupSuffix: `, using ${DEFAULT_GUARD_CONFIG.limits[limitKey]}`,
+            startupSuffix: `, using ${DEFAULT_CONFIG.limits[limitKey]}`,
           });
         } else {
           result.limits[limitKey] = valid;
@@ -263,7 +263,7 @@ function readConfigFile(filePath: string): FileRead {
   return result;
 }
 
-function describeChanges(before: GuardConfig, after: GuardConfig): string[] {
+function describeChanges(before: StraypsConfig, after: StraypsConfig): string[] {
   const changes: string[] = [];
   for (const key of LIMIT_KEYS) {
     if (before.limits[key] !== after.limits[key]) {
@@ -279,18 +279,18 @@ function describeChanges(before: GuardConfig, after: GuardConfig): string[] {
 
 // --- The manager ------------------------------------------------------------------------------
 
-export class GuardConfigManager {
+export class ConfigManager {
   private rootDir: string;
-  private config: GuardConfig;
+  private config: StraypsConfig;
   private warnings: string[] = [];
-  private overrides: GuardConfigOverrides;
+  private overrides: ConfigOverrides;
   private readOnly: boolean;
   private sources: Record<ConfigKey, ConfigSource>;
 
   constructor(
     rootDir: string = process.cwd(),
-    initialConfig?: GuardConfigOverrides,
-    options: GuardConfigManagerOptions = {},
+    initialConfig?: ConfigOverrides,
+    options: ConfigManagerOptions = {},
   ) {
     this.rootDir = path.resolve(rootDir);
     this.overrides = initialConfig ?? {};
@@ -306,14 +306,14 @@ export class GuardConfigManager {
     return path.join(this.rootDir, CONFIG_FILENAME);
   }
 
-  public getConfig(): GuardConfig {
+  public getConfig(): StraypsConfig {
     return {
       agents: [...this.config.agents],
       limits: { ...this.config.limits },
     };
   }
 
-  /** Problems found in `.agentguard.json` during the last load or reload. */
+  /** Problems found in `.strayps.json` during the last load or reload. */
   public getWarnings(): string[] {
     return [...this.warnings];
   }
@@ -335,7 +335,7 @@ export class GuardConfigManager {
    * Loads the file as at startup: invalid values fall back to the defaults, with a warning each.
    * Passing `overrides` replaces the overrides given to the constructor.
    */
-  public loadFromDiskOrDefaults(overrides?: GuardConfigOverrides): GuardConfig {
+  public loadFromDiskOrDefaults(overrides?: ConfigOverrides): StraypsConfig {
     if (overrides) this.overrides = overrides;
     const file = readConfigFile(this.configFilePath);
     const warnings: string[] = [];
@@ -354,7 +354,7 @@ export class GuardConfigManager {
   }
 
   /**
-   * Re-reads the file while the watchdog runs. A file with invalid content is not applied at all:
+   * Re-reads the file while strayps runs. A file with invalid content is not applied at all:
    * the previous settings stay in effect and the result says why.
    */
   public reload(): ConfigReloadResult {
@@ -373,8 +373,8 @@ export class GuardConfigManager {
     return { applied: true, changes: describeChanges(before, this.config), warnings: this.getWarnings() };
   }
 
-  /** Writes the complete effective configuration (used by `agent-leash init`). */
-  public saveConfig(customConfig?: GuardConfig): string {
+  /** Writes the complete effective configuration (used by `strayps init`). */
+  public saveConfig(customConfig?: StraypsConfig): string {
     if (this.readOnly) {
       throw new Error(`${CONFIG_FILENAME} is read-only in this session`);
     }
@@ -389,11 +389,11 @@ export class GuardConfigManager {
     return this.configFilePath;
   }
 
-  private merge(file: FileRead): { config: GuardConfig; notices: string[] } {
+  private merge(file: FileRead): { config: StraypsConfig; notices: string[] } {
     const notices: string[] = [];
     const sources = { ...this.sources };
 
-    const limits = { ...DEFAULT_GUARD_CONFIG.limits };
+    const limits = { ...DEFAULT_CONFIG.limits };
     for (const key of LIMIT_KEYS) {
       const overrideValue = this.overrides.limits?.[key];
       const validOverride = overrideValue === undefined ? null : validLimit(overrideValue);
@@ -419,7 +419,7 @@ export class GuardConfigManager {
       agents = [...file.agents];
       sources.agents = 'file';
     } else {
-      agents = [...DEFAULT_GUARD_CONFIG.agents];
+      agents = [...DEFAULT_CONFIG.agents];
       sources.agents = 'default';
     }
 
@@ -428,7 +428,7 @@ export class GuardConfigManager {
   }
 }
 
-// --- Changing single values (agent-leash config set / unset) ----------------------------------
+// --- Changing single values (strayps config set / unset) ----------------------------------
 
 /** Accepts `limits.staleSessionHours`, `staleSessionHours` or any capitalization of either. */
 export function resolveConfigKey(input: string): ConfigKey | null {
@@ -477,7 +477,7 @@ export interface WriteConfigValueResult {
 }
 
 /**
- * Sets one key in `.agentguard.json` (or removes it when `value` is undefined), keeping every
+ * Sets one key in `.strayps.json` (or removes it when `value` is undefined), keeping every
  * other key exactly as it is. Refuses to touch a file that is not valid JSON.
  */
 export function writeConfigValue(

@@ -74,7 +74,7 @@ export interface MonitoredProcess {
    * started. Dev servers, editors and other sessions are never paused.
    */
   pauseTarget: boolean;
-  /** Held with SIGSTOP by agent-leash; `resume` continues it where it stopped. */
+  /** Held with SIGSTOP by strayps; `resume` continues it where it stopped. */
   paused: boolean;
   /** Application the process tree hangs off (VS Code, Claude Desktop, a terminal, ...), if recognizable. */
   host?: string;
@@ -296,9 +296,9 @@ const NON_APP_HOSTS = new Set(['detached', 'tmux', 'SSH session', 'terminal']);
 const CPU_TIME_TICK_SEC = 0.005;
 
 /**
- * A session in another repository is called stale only after agent-leash has watched it for this
+ * A session in another repository is called stale only after strayps has watched it for this
  * long, it started no new process in that window, and it used less than STALE_CPU_BUDGET_SEC of
- * CPU time in it. A freshly started watchdog therefore calls nothing stale for this long.
+ * CPU time in it. A freshly started strayps therefore calls nothing stale for this long.
  */
 export const STALE_QUIET_SEC = 10 * 60;
 /**
@@ -697,7 +697,7 @@ export class ProcessMonitor extends EventEmitter {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // Never leave an agent held when the watchdog goes away
+    // Never leave an agent held when strayps goes away
     this.resumePaused();
     for (const pid of Array.from(this.terminating.keys())) {
       this.escalateKill(pid);
@@ -780,7 +780,7 @@ export class ProcessMonitor extends EventEmitter {
       }
     }
 
-    // The chain of processes that launched this watchdog (npm, tsx, npx wrappers, the shell).
+    // The chain of processes that launched strayps (npm, tsx, npx wrappers, the shell).
     const selfAncestors = new Set<number>();
     for (let cur = parentByPid.get(this.selfPid), depth = 0; cur && cur > 1 && depth < 32; depth++) {
       selfAncestors.add(cur);
@@ -803,7 +803,7 @@ export class ProcessMonitor extends EventEmitter {
       }
       const classified = this.classifyProcess(raw);
       if (!classified) continue;
-      // Wrappers that started the watchdog itself are not agent work; killing them would kill us.
+      // Wrappers that started strayps itself are not agent work; killing them would kill us.
       if (selfAncestors.has(raw.pid) && classified.category !== 'agent') continue;
       candidates.push({ raw, ...classified });
     }
@@ -839,7 +839,7 @@ export class ProcessMonitor extends EventEmitter {
     const agentAbove = (pid: number): boolean => {
       let cur = parentByPid.get(pid);
       for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
-        // agent-leash's own subtree: what it runs is no work of the agent that started it
+        // its own subtree: what it runs is no work of the agent that started it
         if (cur === this.selfPid) return false;
         if (candidateByPid.get(cur)?.category === 'agent') return true;
         cur = parentByPid.get(cur);
@@ -848,7 +848,7 @@ export class ProcessMonitor extends EventEmitter {
     };
     for (const raw of rawList) {
       if (candidateByPid.has(raw.pid) || raw.pid === this.selfPid || this.terminating.has(raw.pid)) continue;
-      // The wrappers that started agent-leash: ending the agent's session must not end agent-leash
+      // The wrappers that started strayps: ending the agent's session must not end strayps
       if (selfAncestors.has(raw.pid)) continue;
       if (!agentAbove(raw.pid)) continue;
       // Without a known age a tool call cannot be told from a server
@@ -864,7 +864,7 @@ export class ProcessMonitor extends EventEmitter {
       candidateByPid.set(raw.pid, child);
     }
 
-    // Descendants of every candidate, for "did it start a process?". agent-leash's own subtree is
+    // Descendants of every candidate, for "did it start a process?". its own subtree is
     // left out: its ps calls would make the agent that started it look busy forever.
     const descendantsOf = new Map<number, number[]>();
     for (const r of rawList) {
@@ -1122,7 +1122,7 @@ export class ProcessMonitor extends EventEmitter {
       const paused = this.paused.has(raw.pid);
       if (paused) {
         if (status === 'FROZEN' || status === 'STALE') status = 'IDLE';
-        reason = 'Paused by agent-leash; resume continues it';
+        reason = 'Paused by strayps; resume continues it';
       }
 
       const monitored: MonitoredProcess = {
@@ -1297,7 +1297,7 @@ export class ProcessMonitor extends EventEmitter {
     return this.getProcesses().filter((proc) => proc.pauseTarget && !proc.paused);
   }
 
-  /** PIDs agent-leash is holding right now. */
+  /** PIDs strayps is holding right now. */
   public getPausedPids(): number[] {
     return Array.from(this.paused);
   }
@@ -1318,7 +1318,7 @@ export class ProcessMonitor extends EventEmitter {
       }
     }
     if (held.length > 0) {
-      // Whatever ends agent-leash from now on (a crash, process.exit, an uncaught exception, the
+      // Whatever ends strayps from now on (a crash, process.exit, an uncaught exception, the
       // normal shutdown) must continue what it holds: a stopped agent stays stopped forever.
       // Only SIGKILL skips this, and nothing can run then.
       if (!this.exitHookInstalled) {
@@ -1330,7 +1330,7 @@ export class ProcessMonitor extends EventEmitter {
     return held;
   }
 
-  /** Continues every process agent-leash is holding (SIGCONT). */
+  /** Continues every process strayps is holding (SIGCONT). */
   public resumePaused(): number[] {
     const resumed: number[] = [];
     for (const pid of Array.from(this.paused)) {
