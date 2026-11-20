@@ -99,7 +99,7 @@ agent-leash keeps no list of AI products, and it does not care which model an ag
 
 `pause` holds the agents of the watched repository and the processes they started. Your dev server, your editor and the sessions in other repositories keep running.
 
-The process list marks old sessions in other repositories as `STALE` once it has watched them for ten minutes and they used less than half a second of CPU time in that window, and processes whose parent is gone as `FROZEN` (an app that macOS started from the Dock or Finder is not counted as one). Those are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. You end a process with `kill <pid>` after a confirmation, or from its row in the dashboard.
+The process list marks old sessions in other repositories as `STALE` once it has watched them for ten minutes and they used less than half a second of CPU time in that window, and processes whose parent is gone as `FROZEN` (an app that macOS started from the Dock or Finder is not counted as one). An MCP server of an editor or desktop app that is still running stays `STANDBY`, however long it waits. Those are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. You end a process with `kill <pid>` after a confirmation, or from its row in the dashboard.
 
 ---
 
@@ -310,7 +310,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 185 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 187 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

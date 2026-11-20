@@ -224,6 +224,41 @@ describe('ProcessMonitor classification (production rules)', () => {
     }
   });
 
+  it('keeps an idle MCP server of a running app in STANDBY, however old it is', async () => {
+    // Measured on 20.11.2026: an MCP server of the open Antigravity app, without a working
+    // directory, 10 h old and 0.00 s CPU time in 10 min, was called STALE. It waits for tool calls.
+    const t0 = Date.now();
+    const { monitor } = setup([
+      { pid: 90, ppid: 1, pgid: 90, name: 'Electron', cmd: '/Applications/Antigravity.app/Contents/MacOS/Electron', cpu: 0, etime: '10:07:00' },
+      { pid: 91, ppid: 90, pgid: 90, name: 'Antigravity Helper', cmd: '/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper', cpu: 0, etime: '10:07:00' },
+      mcp(92, 91, { pgid: 90, etime: '10:07:00', cpuTimeSec: 0.4 }),
+    ]);
+    for (const offset of [0, 46, STALE_QUIET_SEC, STALE_QUIET_SEC + 3600]) {
+      const server = (await monitor.scan(t0 + offset * 1000)).find((p) => p.pid === 92)!;
+      expect(server.status, `after ${offset} s`).toBe('STANDBY');
+      expect(server.host).toBe('Antigravity');
+    }
+  });
+
+  it('still calls an old idle MCP server stale when no app holds it', async () => {
+    const t0 = Date.now();
+    const { monitor } = setup([
+      // detached: started by launchd, leader of its own group, nobody waiting for its answers
+      mcp(93, 1, { pgid: 93, etime: '10:07:00', cpuTimeSec: 0.4 }),
+      // held by a terminal, not by an app: the terminal says nothing about whether it is in use
+      { pid: 94, ppid: 1, pgid: 94, name: 'tmux', cmd: 'tmux new -s work', cpu: 0, etime: '2-00:00:00' },
+      { pid: 95, ppid: 94, pgid: 95, name: 'zsh', cmd: '-zsh', cpu: 0, etime: '2-00:00:00' },
+      mcp(96, 95, { pgid: 96, etime: '10:07:00', cpuTimeSec: 0.4 }),
+    ]);
+    await monitor.scan(t0);
+    const list = await monitor.scan(t0 + STALE_QUIET_SEC * 1000);
+    expect(list.filter((p) => p.pid === 93 || p.pid === 96).map((p) => [p.pid, p.status])).toEqual([
+      [93, 'STALE'],
+      [96, 'STALE'],
+    ]);
+    expect(list.find((p) => p.pid === 93)!.reason).toContain('MCP process without a working directory');
+  });
+
   it('marks tool processes started by an agent of the watched repo as belonging to it', async () => {
     const { monitor } = setup([
       agent(100, REPO, { cpu: 2 }),

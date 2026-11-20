@@ -29,7 +29,7 @@ agent-leash keeps no list of AI products. A process is a coding agent when one o
 | :--- | :--- | :--- |
 | 1 | dev server pattern, not in another repo | `ACTIVE` |
 | 2 | working directory in another repo, older than `staleSessionHours` (6 h), **and** measured idle: watched for 10 min (`STALE_QUIET_SEC`) and used less than 0.5 s CPU time in that window (`STALE_CPU_BUDGET_SEC`) | `STALE` |
-| 3 | MCP process, no resolvable working directory, not part of the watched session, older than `staleSessionHours`, measured idle as in rule 2 | `STALE` |
+| 3 | MCP process, no resolvable working directory, not part of the watched session, older than `staleSessionHours`, measured idle as in rule 2, **and** not held by a running app (live parent chain under an editor or desktop `host`; a terminal, tmux or SSH session does not count) | `STALE` |
 | 4 | orphaned: parent is PID 1 **and** not the leader of its own process group, not an agent, 0 % CPU, older than the silence timeout | `FROZEN` |
 | 5 | MCP process, 0 % CPU, parent alive | `STANDBY` |
 | 6 | agent that belongs to the watched repository | `ACTIVE` / `IDLE`, never stale or frozen |
@@ -43,7 +43,7 @@ Activity is measured, not read from `ps %cpu`: the lister reads the CPU time a p
 
 `agentPid` is the nearest monitored agent a process descends from. `pauseTarget` is true for the agents of the watched repository and for the processes they started; `pause` holds exactly those (SIGSTOP) and `resume` continues them. A dev server started from the user's terminal, an editor and its MCP servers, and every session in another repository are never paused. A held process is never reported `STALE` or `FROZEN`.
 
-`host` names the application a process tree hangs off (VS Code, Claude Desktop, a terminal …). It is shown to the user, keeps rule 3 of section 1 away from apps, and does not change the classification.
+`host` names the application a process tree hangs off (VS Code, Claude Desktop, a terminal …). It is shown to the user, keeps rule 3 of section 1 away from apps, and keeps rule 3 of section 2 away from MCP servers of an app that is still running. It changes nothing else in the classification.
 
 Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `limits.mcpSilenceTimeoutSec` (default 45) in `.agentguard.json`, applied to a running monitor by `setStaleSessionHours` / `setSilenceTimeoutSec` when the file changes; `agents` likewise by `setAgentNames`. A lower threshold makes more processes look stale, so a rule uses the configured value (`staleSessionSec`, `mcpSilenceTimeoutSec`), never the default as a literal.
 
@@ -55,6 +55,7 @@ Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `l
 - **Quiet is not frozen.** Every tracked process without CPU and file activity for 45 s was `FROZEN`: a resting `tsx watch` server, a browser, a young session in another repository waiting for its user (audit D-02). Fix: `FROZEN` only for orphans (rule 4); rule 7 now only says the process is quiet.
 - **An app is not an orphan.** On macOS launchd (PID 1) is the parent of every app started from the Dock or Finder, so an idle browser app was called orphaned. launchd makes each one the leader of its own process group; a process whose parent died keeps the group it was started in. Measured on 19.11.2026: 727 of 732 PPID-1 processes led their own group, the other 5 were real orphans whose group leader was gone. Fix: rule 4 needs `pgid !== pid`; without a known group (fallback lister) nothing is called orphaned.
 - **Busy, but stale by age.** A session in another repository counted as stale after 6 hours whatever it was doing, even at an open VS Code window (audit D-01). Measured on 19.11.2026 over 2 minutes: idle agent and MCP processes used 0.00 to 0.2 s of CPU time, working sessions 2 to 17 s. Fix: rule 2 and 3 need measured inactivity below a budget over a 10-minute window.
+- **Idle under an open app.** On 20.11.2026, an MCP server of the open Antigravity app had no working directory, was 10 h old, and used 0.00 s CPU time in 10 min. It became `STALE` by rule 3, which runs before `STANDBY`. It was waiting for tool calls. Fix: rule 3 skips MCP servers whose parent chain is alive under an app `host`. Only a terminal-held or detached one can still be called stale.
 - **An agent nobody listed.** On 17.11.2026 the Antigravity CLI (`agy`) worked in the watched repository and did not appear at all; only its MCP server did. The emergency brake would have stopped the Claude session next to it, but not `agy`. Fix: rule 3 of section 1, without adding `agy` to any list.
 
 ## 4. Known weak spots (not decided yet)

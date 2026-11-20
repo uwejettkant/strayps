@@ -208,6 +208,9 @@ const HOST_PATTERNS: Array<[RegExp, string]> = [
   ],
 ];
 
+/** Hosts that keep a process running without saying anyone still uses it. */
+const NON_APP_HOSTS = new Set(['detached', 'tmux', 'SSH session', 'terminal']);
+
 /** CPU time below this between two scans is measurement noise, not work. */
 const CPU_TIME_TICK_SEC = 0.005;
 
@@ -801,6 +804,12 @@ export class ProcessMonitor extends EventEmitter {
             allLivePids.has(parentByPid.get(raw.ppid)!)),
       );
 
+      // An idle MCP server of an open editor or desktop app waits for its next tool call; it was
+      // called STALE after 10 idle minutes although the app was in use (20.11.2026). A terminal,
+      // tmux or SSH session says nothing about whether anyone still uses what runs in it.
+      const heldByRunningApp =
+        hasLiveParentChain && raw.ppid !== 1 && host !== undefined && !NON_APP_HOSTS.has(host);
+
       // STALE and FROZEN describe what is observed. They are never presented as "safe to kill":
       // age and silence alone have been wrong about sessions that were still in use.
       let status: ProcessHealthStatus = hasCpuActivity ? 'ACTIVE' : 'IDLE';
@@ -822,7 +831,14 @@ export class ProcessMonitor extends EventEmitter {
             : usedInWindowSec === undefined
               ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; watching for ${formatDuration(this.staleQuietSec)} whether it is still in use`
               : `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; in use: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
-      } else if (!belongsToWatchedRepo && !rawCwd && isStaleByAge && quietLongEnough && category === 'mcp') {
+      } else if (
+        !belongsToWatchedRepo &&
+        !rawCwd &&
+        isStaleByAge &&
+        quietLongEnough &&
+        category === 'mcp' &&
+        !heldByRunningApp
+      ) {
         // Detached MCP process without a repository cwd, older than staleSessionHours
         status = 'STALE';
         reason = `MCP process without a working directory, running for ${formattedUptime}, idle: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}${hostNote}`;
