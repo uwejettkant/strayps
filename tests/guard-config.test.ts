@@ -5,8 +5,8 @@ import {
   CONFIG_FILENAME,
   DEFAULT_GUARD_CONFIG,
   GuardConfigManager,
-  globToRegExp,
   matchesGlobPattern,
+  writeConfigValue,
 } from '../src/core/guard-config.js';
 import { cleanupTmpDirs, makeTmpDir, writeFiles } from './helpers/harness.js';
 
@@ -99,6 +99,41 @@ describe('.agentguard.json', () => {
 
 });
 
+describe('.agentguard.json that is not a plain file', () => {
+  it('reads nothing through a link: a link to .env leaks none of its contents', () => {
+    const dir = makeTmpDir();
+    writeFiles(dir, { '.env': 'SECRET=from-env-123\n' });
+    fs.symlinkSync('.env', path.join(dir, CONFIG_FILENAME));
+
+    const manager = new GuardConfigManager(dir);
+    expect(manager.getConfig()).toEqual(DEFAULT_GUARD_CONFIG);
+    expect(manager.getWarnings().join(' ')).toContain('symbolic link');
+    const reload = manager.reload();
+    expect(reload.applied).toBe(false);
+    expect(JSON.stringify([manager.getWarnings(), reload])).not.toContain('SECRET');
+
+    expect(() => writeConfigValue(dir, 'limits.maxFilesWarn', 5)).toThrow(/symbolic link/);
+    expect(fs.readFileSync(path.join(dir, '.env'), 'utf-8')).toBe('SECRET=from-env-123\n');
+  });
+
+  it('says where the JSON is broken without quoting the file', () => {
+    // JSON.parse puts the start of the text into its error message
+    const dir = makeTmpDir();
+    writeFiles(dir, { [CONFIG_FILENAME]: 'TOKEN=abc123 {"limits": {}}' });
+    const manager = new GuardConfigManager(dir);
+    const warnings = manager.getWarnings().join(' ');
+    expect(warnings).toContain('not valid JSON');
+    expect(warnings).not.toContain('TOKEN');
+    expect(JSON.stringify(manager.reload())).not.toContain('TOKEN');
+    expect(() => writeConfigValue(dir, 'limits.maxFilesWarn', 5)).toThrow(/not valid JSON/);
+    try {
+      writeConfigValue(dir, 'limits.maxFilesWarn', 5);
+    } catch (err) {
+      expect(String(err)).not.toContain('TOKEN');
+    }
+  });
+});
+
 describe('protected file globs', () => {
   it('matches by path and, for patterns without a slash, by file name anywhere', () => {
     expect(matchesGlobPattern('.env', '.env*')).toBe(true);
@@ -117,9 +152,34 @@ describe('protected file globs', () => {
   });
 
   it('treats regular expression characters in patterns as literal text', () => {
-    expect(globToRegExp('a+b(c).ts').test('a+b(c).ts')).toBe(true);
-    expect(globToRegExp('a+b(c).ts').test('aab(c)xts')).toBe(false);
+    expect(matchesGlobPattern('a+b(c).ts', 'a+b(c).ts')).toBe(true);
+    expect(matchesGlobPattern('aab(c)xts', 'a+b(c).ts')).toBe(false);
     expect(matchesGlobPattern('config[prod].json', 'config[prod].json')).toBe(true);
+    expect(matchesGlobPattern('a.b', 'a?b')).toBe(true);
+    expect(matchesGlobPattern('a/b', 'a?b')).toBe(false);
+    // ** without a slash after it crosses directories, a single * does not
+    expect(matchesGlobPattern('logs/2026/app.log', 'logs/**.log')).toBe(true);
+    expect(matchesGlobPattern('logs/2026/app.log', 'logs/*.log')).toBe(false);
+  });
+
+  it('refuses patterns too long or too many to match on every file event', () => {
+    const manager = managerWith({ protectedFiles: ['.env*', `${'a*'.repeat(300)}`, ...Array.from({ length: 300 }, (_, i) => `f${i}`)] });
+    const { protectedFiles } = manager.getConfig();
+    expect(protectedFiles).toHaveLength(256);
+    expect(protectedFiles[0]).toBe('.env*');
+    expect(protectedFiles.every((glob) => glob.length <= 512)).toBe(true);
+    expect(manager.getWarnings().join(' ')).toMatch(/at most 512 characters.*more than 256 entries/);
+  });
+
+  it('matches hostile patterns from .agentguard.json without freezing the watchdog', () => {
+    // The agent being watched can write .agentguard.json; nested wildcards made the old regular
+    // expression backtrack for minutes on every file event
+    const started = Date.now();
+    expect(matchesGlobPattern('a'.repeat(200), `${'*a'.repeat(25)}b`)).toBe(false);
+    expect(matchesGlobPattern(`${'x/'.repeat(100)}y`, `${'**/'.repeat(30)}z`)).toBe(false);
+    expect(matchesGlobPattern(`${'x/'.repeat(100)}y`, `${'**/'.repeat(30)}y`)).toBe(true);
+    expect(matchesGlobPattern(`${'ab/'.repeat(60)}d`, `${'**/a*'.repeat(20)}/c`)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   it('resolves absolute paths against the repository root', () => {

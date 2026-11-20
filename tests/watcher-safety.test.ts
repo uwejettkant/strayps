@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GuardConfigManager } from '../src/core/guard-config.js';
 import { RepoWatcher } from '../src/core/watcher.js';
@@ -191,6 +193,120 @@ describe('RepoWatcher rollback: what it may touch', () => {
     const keptFiles = fs.readdirSync(discardDir, { recursive: true }).map(String);
     expect(keptFiles.some((f) => f.includes('.env'))).toBe(false);
     fs.rmSync(discardDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(!isPosix)('never writes through a symlink an agent put in place of a file', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'victim.txt': 'precious\n' });
+    writeFiles(repo, { 'src/a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+
+    fs.rmSync(path.join(repo, 'src/a.ts'));
+    fs.symlinkSync(path.join(outside, 'victim.txt'), path.join(repo, 'src/a.ts'));
+    watcher.handleFileSystemEvent('change', 'src/a.ts');
+
+    expect(watcher.rollbackFile('src/a.ts')).toBe(false);
+    expect(read(outside, 'victim.txt')).toBe('precious\n');
+    expect(fs.lstatSync(path.join(repo, 'src/a.ts')).isSymbolicLink()).toBe(true);
+    // nothing of the link's target was copied either
+    const discardDir = watcher.getDiscardDir();
+    if (discardDir) {
+      const kept = fs.readdirSync(discardDir, { recursive: true }).map(String);
+      for (const file of kept) {
+        const full = path.join(discardDir, file);
+        if (fs.statSync(full).isFile()) expect(fs.readFileSync(full, 'utf-8')).not.toContain('precious');
+      }
+    }
+    expect(watcher.getRecentEvents()[0].message).toContain('symbolic link');
+  });
+
+  it.skipIf(!isPosix)('never reads .env contents through a symlink with another name', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { '.env': 'SECRET=from-env\n', 'src/keep.ts': 'k\n' });
+    const watcher = watcherFor(repo);
+    const t0 = Date.now();
+
+    fs.symlinkSync('../.env', path.join(repo, 'src/tmp.txt'));
+    watcher.handleFileSystemEvent('add', 'src/tmp.txt', t0);
+    // a minute later the link becomes a plain file: the linked version is now the rollback target
+    fs.rmSync(path.join(repo, 'src/tmp.txt'));
+    writeFiles(repo, { 'src/tmp.txt': 'plain\n' });
+    watcher.handleFileSystemEvent('change', 'src/tmp.txt', t0 + 61_000);
+
+    watcher.rollbackFile('src/tmp.txt');
+    expect(read(repo, 'src/tmp.txt')).not.toContain('SECRET');
+  });
+
+  it.skipIf(!isPosix)('is not blocked by a FIFO an agent creates in the repository', () => {
+    // Opening a FIFO for reading waits for a writer; it froze the whole watchdog, signals included
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'src/a.ts': 'a\n' });
+    execFileSync('mkfifo', [path.join(repo, 'src/pipe')]);
+    const watcherModule = fileURLToPath(new URL('../src/core/watcher.ts', import.meta.url));
+    const script = `
+      const mod = await import(${JSON.stringify(watcherModule)});
+      const RepoWatcher = mod.RepoWatcher ?? mod.default.RepoWatcher;
+      const watcher = new RepoWatcher({ rootDir: ${JSON.stringify(repo)}, keepDiscarded: false });
+      watcher.createCheckpoint();
+      watcher.handleFileSystemEvent('add', 'src/pipe');
+      watcher.handleFileSystemEvent('change', 'src/pipe');
+      console.log(watcher.rollbackFile('src/pipe') ? 'rolled back' : 'refused');
+    `;
+    const output = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+    });
+    expect(output.trim()).toBe('refused');
+  });
+
+  it.skipIf(!isPosix)('never writes to or reads another file through a hard link', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'victim.txt': 'precious\n' });
+    writeFiles(repo, { 'src/a.ts': 'a\n', '.env': 'SECRET=hard\n' });
+    const watcher = watcherFor(repo);
+
+    // a second name for a file outside the repository, in place of src/a.ts
+    fs.rmSync(path.join(repo, 'src/a.ts'));
+    fs.linkSync(path.join(outside, 'victim.txt'), path.join(repo, 'src/a.ts'));
+    watcher.handleFileSystemEvent('change', 'src/a.ts');
+    expect(watcher.rollbackFile('src/a.ts')).toBe(false);
+    expect(read(outside, 'victim.txt')).toBe('precious\n');
+    expect(watcher.getRecentEvents()[0].message).toContain('hard link');
+
+    // a second name for .env: its contents never become a version to restore
+    const t0 = Date.now();
+    fs.linkSync(path.join(repo, '.env'), path.join(repo, 'src/notes.txt'));
+    watcher.handleFileSystemEvent('add', 'src/notes.txt', t0);
+    fs.rmSync(path.join(repo, 'src/notes.txt'));
+    writeFiles(repo, { 'src/notes.txt': 'plain\n' });
+    watcher.handleFileSystemEvent('change', 'src/notes.txt', t0 + 61_000);
+    watcher.rollbackFile('src/notes.txt');
+    expect(read(repo, 'src/notes.txt')).not.toContain('SECRET');
+  });
+
+  it('does not let another spelling of a name reach .env or an unchanged file', () => {
+    // macOS file systems ignore case: ".ENV" opens .env, "readme.md" opens README.md
+    const repo = makeTmpDir();
+    writeFiles(repo, { '.env': 'SECRET=1\n', 'README.md': 'readme\n', '.envrc': 'export TOKEN=2\n' });
+    const watcher = watcherFor(repo);
+
+    expect(watcher.isEnvFile('.ENV')).toBe(true);
+    expect(watcher.isEnvFile('config/.Env.Local')).toBe(true);
+    // the default glob .env* covers .envrc, so its contents are never read either
+    expect(watcher.isEnvFile('.envrc')).toBe(true);
+    expect(watcher.getCheckpoint()?.snapshottedFiles).toBe(1);
+
+    for (const name of ['.ENV', 'readme.md', 'README.md', '.envrc']) {
+      expect(watcher.rollbackFile(name), name).toBe(false);
+    }
+    expect(read(repo, '.env')).toBe('SECRET=1\n');
+    expect(read(repo, 'README.md')).toBe('readme\n');
+    expect(read(repo, '.envrc')).toBe('export TOKEN=2\n');
+    const messages = watcher.getRecentEvents().map((e) => e.message);
+    expect(messages).toContain('Could not roll back readme.md: it was not changed in this session, left untouched');
+    expect(messages).toContain("Could not roll back .ENV: it is a .env file; agent-leash never reads or writes those");
   });
 
   it.skipIf(!isPosix)('handles file names that contain backslashes, quotes and markup', () => {

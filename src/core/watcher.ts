@@ -113,8 +113,8 @@ const SNAPSHOT_MAX_BYTES = 5 * 1024 * 1024;
 const OWN_WRITE_WINDOW_MS = 2000;
 
 interface OwnWrite {
-  /** Content we wrote, or null when we removed the file. */
-  expected: Buffer | null;
+  /** SHA-256 of the content we wrote, or null when we removed the file. */
+  expectedHash: string | null;
   until: number;
 }
 
@@ -164,10 +164,21 @@ const GIT_ASK_TIMEOUT_MS = 2_000;
 
 /** A hash of the file, or 'missing'. Only the hash is kept: git config can hold credentials. */
 function hashFile(file: string): string {
+  // O_NONBLOCK: a FIFO put in place of a .gitignore must not block the watchdog in open()
+  let fd: number;
   try {
-    return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    fd = fs.openSync(file, fs.constants.O_RDONLY | O_NONBLOCK);
   } catch {
     return 'missing';
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 1024 * 1024) return `not-a-plain-file:${stat.mode}:${stat.size}`;
+    return createHash('sha256').update(fs.readFileSync(fd)).digest('hex');
+  } catch {
+    return 'unreadable';
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -178,6 +189,97 @@ function isDirectory(absPath: string): boolean {
     return false;
   }
 }
+
+/** Opening with this flag fails on a symbolic link instead of following it (0 where unsupported). */
+const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+/** Opening a FIFO without it blocks until a writer appears: an agent's `mkfifo` froze the watchdog. */
+const O_NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
+
+/**
+ * Opens a path for reading only if it is a plain file under this one name: never through a
+ * symbolic link at the path itself (O_NOFOLLOW), never a hard link (a second name of another file,
+ * which could be .env or ~/.zshrc), never a FIFO or device. Returns the descriptor, null when the
+ * path does not exist, undefined for anything else.
+ */
+function openPlainFile(absPath: string): number | null | undefined {
+  let fd: number;
+  try {
+    fd = fs.openSync(absPath, fs.constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.isFile() && stat.nlink === 1) return fd;
+  } catch {
+    // fall through
+  }
+  fs.closeSync(fd);
+  return undefined;
+}
+
+/**
+ * Reads a plain file (see openPlainFile): an agent can replace a file with a link to ~/.zshrc or
+ * to .env, and its target must neither be read nor written. Returns null when the path does not
+ * exist, undefined when it is not a plain file of its own, larger than `maxBytes` or unreadable.
+ */
+function readPlainFile(absPath: string, maxBytes: number): Buffer | null | undefined {
+  const fd = openPlainFile(absPath);
+  if (fd === null || fd === undefined) return fd;
+  try {
+    if (fs.fstatSync(fd).size > maxBytes) return undefined;
+    return fs.readFileSync(fd);
+  } catch {
+    return undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** SHA-256 of a plain file (see openPlainFile), read in chunks; null when missing, else undefined. */
+function hashPlainFile(absPath: string): string | null | undefined {
+  const fd = openPlainFile(absPath);
+  if (fd === null || fd === undefined) return fd;
+  try {
+    const hash = createHash('sha256');
+    const chunk = Buffer.alloc(1024 * 1024);
+    for (let read = fs.readSync(fd, chunk); read > 0; read = fs.readSync(fd, chunk)) {
+      hash.update(chunk.subarray(0, read));
+    }
+    return hash.digest('hex');
+  } catch {
+    return undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Writes a plain file. An existing file is opened without truncating and checked first: a symbolic
+ * link at the path fails the open, and a hard link (a second name of a file elsewhere, e.g. ~/.zshrc)
+ * is refused before a byte changes. A missing file is created, never through a link.
+ */
+function writePlainFile(absPath: string, content: Buffer): void {
+  let fd: number;
+  try {
+    fd = fs.openSync(absPath, fs.constants.O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    fd = fs.openSync(absPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | O_NOFOLLOW, 0o666);
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error('it is not a plain file of its own (a hard link or a special file), left untouched');
+    }
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, content, 0, content.length, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+const sha256 = (content: Buffer): string => createHash('sha256').update(content).digest('hex');
 
 /** Larger files are restored without keeping the replaced version (they are not in the snapshot either). */
 const DISCARD_MAX_BYTES = 50 * 1024 * 1024;
@@ -269,6 +371,9 @@ export class RepoWatcher extends EventEmitter {
       ignoreInitial: true,
       persistent: true,
       ignored: (targetPath: string) => this.shouldIgnorePath(targetPath),
+      // A link to a directory outside the repository would make its files look like repository
+      // files, to be read into memory on every change; the snapshot walk does not follow links either
+      followSymlinks: false,
       awaitWriteFinish: false,
     });
 
@@ -431,14 +536,8 @@ export class RepoWatcher extends EventEmitter {
         this.existedAtStart.add(relPath);
         // Never read .env* secret files into memory snapshots
         if (this.isEnvFile(relPath)) continue;
-        try {
-          const stat = fs.statSync(fullPath);
-          if (stat.size <= SNAPSHOT_MAX_BYTES) {
-            this.initialSnapshot.set(relPath, fs.readFileSync(fullPath));
-          }
-        } catch {
-          // Ignore unreadable files
-        }
+        const content = readPlainFile(fullPath, SNAPSHOT_MAX_BYTES);
+        if (content) this.initialSnapshot.set(relPath, content);
       }
     }
   }
@@ -448,8 +547,9 @@ export class RepoWatcher extends EventEmitter {
    * `.env*` files are strictly warn-only: their contents are never read into memory or overwritten.
    */
   public isEnvFile(targetPath: string): boolean {
-    const base = path.posix.basename(toPosixPath(targetPath));
-    return base === '.env' || base.startsWith('.env.');
+    // Matches what the default glob .env* protects (.envrc, .env-local, .env.production …), in any
+    // spelling: on macOS ".ENV" opens .env, and a case-sensitive test let it be read and deleted.
+    return path.posix.basename(toPosixPath(targetPath)).toLowerCase().startsWith('.env');
   }
 
   public shouldIgnorePath(targetPath: string): boolean {
@@ -677,16 +777,12 @@ export class RepoWatcher extends EventEmitter {
     return this.existedAtStart.has(relPath) || this.wasIgnoredAtStart(relPath) ? undefined : null;
   }
 
-  /** Reads the file as it is now; undefined when it is too large or unreadable to keep a copy. */
+  /**
+   * Reads the file as it is now; undefined when it is too large, unreadable or a symbolic link
+   * (a link's target is never read: it may be .env or a file outside the repository).
+   */
   private readVersion(relPath: string): VersionContent {
-    const absPath = path.join(this.rootDir, relPath);
-    try {
-      const stat = fs.statSync(absPath);
-      if (!stat.isFile() || stat.size > SNAPSHOT_MAX_BYTES) return undefined;
-      return fs.readFileSync(absPath);
-    } catch (err) {
-      return (err as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
-    }
+    return readPlainFile(path.join(this.rootDir, relPath), SNAPSHOT_MAX_BYTES);
   }
 
   /**
@@ -857,7 +953,16 @@ export class RepoWatcher extends EventEmitter {
     }
     // Never overwrite or delete .env* secret files
     if (this.isEnvFile(relPath)) {
-      return { relPath, outcome: { ok: false, action: 'unchanged' } };
+      return {
+        relPath,
+        outcome: { ok: false, action: 'unchanged', reason: 'it is a .env file; agent-leash never reads or writes those' },
+      };
+    }
+    // Only a file that changed in this session has a version to go back to. Any other name, even
+    // one that opens an existing file (another spelling on macOS), has no history and would be
+    // taken for a file to delete.
+    if (!this.modifiedFiles.has(relPath)) {
+      return { relPath, outcome: { ok: false, reason: 'it was not changed in this session, left untouched' } };
     }
     const outcome = this.restoreFile(relPath, now);
     // A file restored to a version from the middle of the session still differs from the start
@@ -924,6 +1029,29 @@ export class RepoWatcher extends EventEmitter {
     }
 
     const absPath = path.join(this.rootDir, relPath);
+    try {
+      const stat = fs.lstatSync(absPath);
+      if (stat.isSymbolicLink()) {
+        return {
+          ok: false,
+          reason:
+            'it is a symbolic link now; agent-leash never writes through a link or copies its target. Restore it yourself (for example with git checkout)',
+        };
+      }
+      if (!stat.isFile() || stat.nlink !== 1) {
+        return {
+          ok: false,
+          reason: 'it is not a plain file of its own now (a hard link to another file, or a special file); agent-leash never writes to it',
+        };
+      }
+    } catch {
+      // Missing: nothing to follow
+    }
+    // resolveInsideRoot checked the parent directories; the agent can swap one for a link to ~
+    // after that check, so check again right before anything is read, written or removed
+    if (!this.parentInsideRoot(absPath)) {
+      return { ok: false, reason: 'a directory on its path now leads outside the repository, left untouched' };
+    }
     const history = this.histories.get(relPath);
     const target = history ? history.stable : this.initialVersion(relPath);
     const targetIsStart = history ? history.stableIsStart : true;
@@ -942,20 +1070,19 @@ export class RepoWatcher extends EventEmitter {
 
     try {
       if (target instanceof Buffer) {
-        let current: Buffer | null = null;
-        try {
-          current = fs.readFileSync(absPath);
-        } catch {
-          current = null;
-        }
-        if (current && current.equals(target)) {
+        if (hashPlainFile(absPath) === sha256(target)) {
           remember(target);
           return { ok: true, action: 'unchanged', backAtStart };
         }
         const backupPath = this.keepDiscardedCopy(relPath, absPath);
-        this.ownWrites.set(relPath, { expected: target, until: Date.now() + OWN_WRITE_WINDOW_MS });
+        this.ownWrites.set(relPath, { expectedHash: sha256(target), until: Date.now() + OWN_WRITE_WINDOW_MS });
         fs.mkdirSync(path.dirname(absPath), { recursive: true });
-        fs.writeFileSync(absPath, target);
+        if (!this.parentInsideRoot(absPath)) {
+          this.ownWrites.delete(relPath);
+          return { ok: false, reason: 'a directory on its path now leads outside the repository, left untouched' };
+        }
+        // O_NOFOLLOW and the hard-link check: a link put at the path after the checks above makes it fail
+        writePlainFile(absPath, target);
         remember(target);
         return { ok: true, action: 'restored', backupPath, backAtStart };
       }
@@ -964,7 +1091,10 @@ export class RepoWatcher extends EventEmitter {
         // The file did not exist before its latest series of changes: it was created in this session
         if (fs.existsSync(absPath)) {
           const backupPath = this.keepDiscardedCopy(relPath, absPath);
-          this.ownWrites.set(relPath, { expected: null, until: Date.now() + OWN_WRITE_WINDOW_MS });
+          if (!this.parentInsideRoot(absPath)) {
+            return { ok: false, reason: 'a directory on its path now leads outside the repository, left untouched' };
+          }
+          this.ownWrites.set(relPath, { expectedHash: null, until: Date.now() + OWN_WRITE_WINDOW_MS });
           fs.unlinkSync(absPath);
           remember(null);
           return { ok: true, action: 'removed', backupPath, backAtStart };
@@ -987,13 +1117,15 @@ export class RepoWatcher extends EventEmitter {
         try {
           execFileSync(
             'git',
-            ['restore', `--source=${this.checkpointSha}`, '--worktree', '--', relPath],
+            // literal: a file named with *, [ or : would otherwise be a pattern for several files
+            ['--literal-pathspecs', 'restore', `--source=${this.checkpointSha}`, '--worktree', '--', relPath],
             { cwd: this.rootDir, stdio: ['ignore', 'pipe', 'ignore'], timeout: GIT_LIST_TIMEOUT_MS },
           );
-          this.ownWrites.set(relPath, {
-            expected: fs.readFileSync(absPath),
-            until: Date.now() + OWN_WRITE_WINDOW_MS,
-          });
+          // A hash, read in chunks: the file is larger than the snapshot limit
+          const restoredHash = hashPlainFile(absPath);
+          if (typeof restoredHash === 'string') {
+            this.ownWrites.set(relPath, { expectedHash: restoredHash, until: Date.now() + OWN_WRITE_WINDOW_MS });
+          }
           remember(undefined);
           return { ok: true, action: 'restored', backupPath, backAtStart: true, fromCheckpoint: true };
         } catch {
@@ -1016,12 +1148,9 @@ export class RepoWatcher extends EventEmitter {
    */
   private keepDiscardedCopy(relPath: string, absPath: string): string | undefined {
     if (!this.keepDiscarded || this.isEnvFile(relPath)) return undefined;
-    try {
-      const stat = fs.statSync(absPath);
-      if (!stat.isFile() || stat.size > DISCARD_MAX_BYTES) return undefined;
-    } catch {
-      return undefined;
-    }
+    // Never through a link: its target may be .env or a file outside the repository
+    const content = readPlainFile(absPath, DISCARD_MAX_BYTES);
+    if (!content) return undefined;
     try {
       if (!this.discardDir) {
         // mkdtemp creates the directory with mode 0700, so other local users cannot read the copies
@@ -1031,7 +1160,7 @@ export class RepoWatcher extends EventEmitter {
       const slot = path.join(this.discardDir, String(this.discardCounter).padStart(5, '0'));
       const target = path.join(slot, ...relPath.split('/'));
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(absPath, target);
+      fs.writeFileSync(target, content, { mode: 0o600 });
       this.discardSlots.push(slot);
       while (this.discardSlots.length > DISCARD_MAX_COPIES) {
         const oldest = this.discardSlots.shift();
@@ -1056,9 +1185,9 @@ export class RepoWatcher extends EventEmitter {
     }
     const absPath = path.join(this.rootDir, relPath);
     try {
-      if (own.expected === null) {
+      if (own.expectedHash === null) {
         if (!fs.existsSync(absPath)) return true;
-      } else if (fs.readFileSync(absPath).equals(own.expected)) {
+      } else if (hashPlainFile(absPath) === own.expectedHash) {
         return true;
       }
     } catch {
@@ -1066,6 +1195,20 @@ export class RepoWatcher extends EventEmitter {
     }
     this.ownWrites.delete(relPath);
     return false;
+  }
+
+  /** True if the directory holding `absPath` is, after resolving links, still inside the repository. */
+  private parentInsideRoot(absPath: string): boolean {
+    let parent = path.dirname(absPath);
+    while (parent !== this.rootDir && parent.startsWith(this.rootDir + path.sep) && !fs.existsSync(parent)) {
+      parent = path.dirname(parent);
+    }
+    try {
+      const real = fs.realpathSync(parent);
+      return real === this.rootDir || real.startsWith(this.rootDir + path.sep);
+    } catch {
+      return false;
+    }
   }
 
   /**

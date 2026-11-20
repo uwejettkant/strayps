@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   parseCpuTime,
+  parsePsOutput,
   parseLsofCwdOutput,
   ProcessMonitor,
   STALE_QUIET_SEC,
@@ -565,6 +566,59 @@ describe('ProcessMonitor termination', () => {
     expect(monitor.killProcess(process.ppid)).toBe(false);
     expect(takeBlockedKills()).toEqual([{ pid: process.ppid, signal: 'SIGTERM' }]);
     monitor.stop();
+  });
+});
+
+describe('ProcessMonitor pause and exit', () => {
+  it('continues the processes it holds when agent-leash exits in any way, also by a crash', async () => {
+    // The shutdown path resumed them, but a crash ended the process with them still stopped
+    const { monitor, kills } = setup([agent(100, REPO, { cpu: 1 }), mcp(101, 100, { cwd: '/' })]);
+    await monitor.scan(1_000);
+    const before = process.listeners('exit');
+    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101]);
+    const added = process.listeners('exit').filter((listener) => !before.includes(listener));
+    expect(added).toHaveLength(1);
+
+    // what process.exit() from the crash handler, or an uncaught exception, runs
+    (added[0] as () => void)();
+    expect(kills.filter((k) => k.signal === 'SIGCONT').map((k) => k.pid).sort((a, b) => a - b)).toEqual([100, 101]);
+    expect(monitor.getPausedPids()).toEqual([]);
+    expect(process.listeners('exit').filter((listener) => !before.includes(listener))).toEqual([]);
+  });
+
+  it('removes its exit hook again once everything held is continued', async () => {
+    const { monitor } = setup([agent(100, REPO, { cpu: 1 })]);
+    await monitor.scan(1_000);
+    const before = process.listeners('exit').length;
+    monitor.pauseTargets();
+    monitor.resumePaused();
+    expect(process.listeners('exit')).toHaveLength(before);
+  });
+});
+
+describe('ps output', () => {
+  it('keeps every column in place when a program path contains spaces', () => {
+    const main = [
+      '  PID  PPID  PGID    RSS  %CPU %MEM     ELAPSED      TIME ARGS',
+      '41926 41925 41925 377772   1.5  2.1    20:39:41   4:09.88 /Users/me/Library/Application Support/Claude/claude-code/claude --model x',
+      '  512     1   512   1024   0.0  0.0 01-02:03:04   0:00.45 node /x/node_modules/.bin/mcp-server-git',
+    ].join('\n');
+    const comm = ['  PID COMM', '41926 /Users/me/Library/Application Support/Claude/claude-code/claude', '  512 node'].join('\n');
+    expect(parsePsOutput(main, comm)).toEqual([
+      {
+        pid: 41926,
+        ppid: 41925,
+        pgid: 41925,
+        rssKb: 377772,
+        cpu: 1.5,
+        memory: 2.1,
+        etime: '20:39:41',
+        cpuTimeSec: 249.88,
+        name: '/Users/me/Library/Application Support/Claude/claude-code/claude',
+        cmd: '/Users/me/Library/Application Support/Claude/claude-code/claude --model x',
+      },
+      expect.objectContaining({ pid: 512, name: 'node', cpuTimeSec: 0.45, etime: '01-02:03:04', cmd: 'node /x/node_modules/.bin/mcp-server-git' }),
+    ]);
   });
 });
 

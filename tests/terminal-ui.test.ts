@@ -532,6 +532,22 @@ describe('interactive terminal view', () => {
     ui.stop();
   });
 
+  it.skipIf(process.platform === 'win32')('never writes control sequences from a completed file name to the terminal', async () => {
+    const h = createHarness({ files: { 'a.ts': 'a\n' } });
+    h.watcher.createCheckpoint();
+    // a file name an agent chose: it would set the window title and clear the screen
+    const hostile = 'evil\u001b]0;pwned\u0007\u001b[2J.ts';
+    writeFiles(h.dir, { [hostile]: 'x\n' });
+    h.watcher.handleFileSystemEvent('add', hostile);
+    const { tty, ui, type } = await startUi(h);
+    type('revert ev\t');
+    const output = tty.written.join('');
+    expect(output).not.toContain('\u001b]0;pwned');
+    expect(output).not.toContain('\u0007');
+    expect(tty.screen).toContain('revert evil');
+    ui.stop();
+  });
+
   it('asks y/N before destructive commands and treats everything but y as no', async () => {
     const { tty, ui, type, h } = await startUi();
     type('kill 300\r');

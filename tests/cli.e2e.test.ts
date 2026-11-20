@@ -152,9 +152,9 @@ describe('agent-leash CLI', () => {
     expect((await run.exit).code).toBe(0);
   });
 
-  it('keeps running when its input closes, and stops cleanly on SIGINT, SIGTERM and SIGHUP', async () => {
+  it('keeps running when its input closes, and stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT', async () => {
     const dir = makeTmpDir();
-    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const) {
       const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
       await run.waitFor(READY);
       run.child.stdin.end();

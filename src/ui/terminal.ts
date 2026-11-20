@@ -328,9 +328,12 @@ export function renderFrame(view: FrameView): Frame {
   const prompt = ' › ';
   const hint = 'help · exit · Ctrl+C ';
   const inputRoom = Math.max(4, cols - prompt.length - 1);
-  const inputChars = Array.from(view.input);
+  // The input can hold a file name completed with Tab, and file names come from the agent being
+  // watched: control sequences in them must not reach the terminal
+  const safeInput = sanitize(view.input);
+  const inputChars = Array.from(safeInput);
   const shownInput =
-    inputChars.length > inputRoom ? inputChars.slice(inputChars.length - inputRoom).join('') : view.input;
+    inputChars.length > inputRoom ? inputChars.slice(inputChars.length - inputRoom).join('') : safeInput;
   const inputLine = leftRight(
     [seg(prompt, p.accent), seg(view.confirmPrompt ? '' : shownInput)],
     [seg(hint, p.dim)],

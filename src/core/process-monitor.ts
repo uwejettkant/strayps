@@ -388,37 +388,65 @@ function formatReadableCmd(rawName: string, rawCmd: string): string {
 }
 
 /**
+ * Turns the output of `ps -Ao pid,ppid,pgid,rss,pcpu,pmem,etime,time,args` and of `ps -Ao pid,comm`
+ * into process records. `comm` comes from its own call, where it is the last column: on macOS it is
+ * the full program path, which can contain spaces ("Application Support"), and in the middle of a
+ * line it shifted every column after it into the wrong field.
+ */
+export function parsePsOutput(main: string, comm: string): RawProcessInfo[] {
+  const commByPid = new Map<number, string>();
+  for (const line of comm.split('\n').slice(1)) {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (match) commByPid.set(Number(match[1]), match[2]);
+  }
+  const results: RawProcessInfo[] = [];
+  for (const line of main.trim().split('\n').slice(1)) {
+    const match = line
+      .trim()
+      .match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+(.*)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const cmd = match[9];
+    results.push({
+      pid,
+      ppid: Number(match[2]),
+      pgid: Number(match[3]),
+      rssKb: Number(match[4]) || 0,
+      cpu: Number(match[5]) || 0,
+      memory: Number(match[6]) || 0,
+      etime: match[7],
+      cpuTimeSec: parseCpuTime(match[8]),
+      name: commByPid.get(pid) ?? cmd.split(/\s+/)[0] ?? '',
+      cmd,
+    });
+  }
+  return results;
+}
+
+/**
+ * Numbers from `ps` in one format: under de_DE, macOS ps writes "0,0", and those lines were dropped.
+ * Only the number format is fixed; the character set stays the user's, so paths with umlauts stay
+ * readable. LC_ALL would override LC_NUMERIC, so its value moves to LC_CTYPE.
+ */
+function psEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, LC_NUMERIC: 'C' };
+  const ctype = env.LC_ALL || env.LC_CTYPE || env.LANG;
+  delete env.LC_ALL;
+  if (ctype) env.LC_CTYPE = ctype;
+  return env;
+}
+
+/**
  * Default OS process lister using POSIX `ps` (with RSS in KB and elapsed uptime) and `ps-list` fallback.
  */
 export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   try {
-    const { stdout } = await execFileAsync(
-      'ps',
-      ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,comm,args'],
-      { maxBuffer: 16 * 1024 * 1024 },
-    );
-    const lines = stdout.trim().split('\n').slice(1);
-    const results: RawProcessInfo[] = [];
-
-    for (const line of lines) {
-      const match = line
-        .trim()
-        .match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$/);
-      if (!match) continue;
-      results.push({
-        pid: Number(match[1]),
-        ppid: Number(match[2]),
-        pgid: Number(match[3]),
-        rssKb: Number(match[4]) || 0,
-        cpu: Number(match[5]) || 0,
-        memory: Number(match[6]) || 0,
-        etime: match[7],
-        cpuTimeSec: parseCpuTime(match[8]),
-        name: match[9],
-        cmd: match[10],
-      });
-    }
-    return results;
+    const options = { maxBuffer: 16 * 1024 * 1024, env: psEnvironment() };
+    const [main, comm] = await Promise.all([
+      execFileAsync('ps', ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,args'], options),
+      execFileAsync('ps', ['-Ao', 'pid,comm'], options),
+    ]);
+    return parsePsOutput(main.stdout, comm.stdout);
   } catch {
     try {
       const psListMod = await import('ps-list');
@@ -478,6 +506,10 @@ export class ProcessMonitor extends EventEmitter {
   private alertedPids: Set<number> = new Set();
   /** CPU time samples per PID, oldest first, spaced CPU_SAMPLE_SPACING_MS apart. */
   private cpuSamples: Map<number, Array<{ at: number; cpuTimeSec: number }>> = new Map();
+  private exitHookInstalled = false;
+  private readonly continueOnExit = (): void => {
+    this.resumePaused();
+  };
   private lastFileActivityAt: number = Date.now();
   private scanInFlight: Promise<MonitoredProcess[]> | null = null;
   /** PIDs that received SIGTERM and are inside their grace period. */
@@ -1055,7 +1087,16 @@ export class ProcessMonitor extends EventEmitter {
         held.push(proc.pid);
       }
     }
-    if (held.length > 0) this.emit('processes-paused', held);
+    if (held.length > 0) {
+      // Whatever ends agent-leash from now on (a crash, process.exit, an uncaught exception, the
+      // normal shutdown) must continue what it holds: a stopped agent stays stopped forever.
+      // Only SIGKILL skips this, and nothing can run then.
+      if (!this.exitHookInstalled) {
+        process.on('exit', this.continueOnExit);
+        this.exitHookInstalled = true;
+      }
+      this.emit('processes-paused', held);
+    }
     return held;
   }
 
@@ -1067,6 +1108,10 @@ export class ProcessMonitor extends EventEmitter {
       const proc = this.tracked.get(pid);
       if (proc) proc.paused = false;
       if (this.processKiller(pid, 'SIGCONT')) resumed.push(pid);
+    }
+    if (this.exitHookInstalled) {
+      process.off('exit', this.continueOnExit);
+      this.exitHookInstalled = false;
     }
     if (resumed.length > 0) this.emit('processes-resumed', resumed);
     return resumed;

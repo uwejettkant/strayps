@@ -307,6 +307,9 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGHUP', () => void shutdown('SIGHUP'));
+  // Ctrl+\ in plain mode: its default action ends the process without the exit event, which
+  // would leave paused agents stopped
+  process.on('SIGQUIT', () => void shutdown('SIGQUIT'));
 
   // Whatever happens, never leave the terminal in raw mode on the alternate screen
   process.on('exit', () => ui?.stop());
@@ -344,7 +347,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
 
   out('');
   out(`${palette.accent(`agent-leash v${getVersion()}`)} — AI Agent & MCP Watchdog${demo ? palette.warn('  [DEMO: simulated, nothing is touched]') : ''}`);
-  out(`  Repo:        ${rootDir}`);
+  out(`  Repo:        ${sanitize(rootDir)}`);
   out(`  Checkpoint:  ${checkpoint.ref} (${checkpoint.type}, ${checkpoint.snapshottedFiles} files)`);
   out(`  Dashboard:   ${running ? running.url : 'off (--no-dashboard)'}`);
   out(`  Limits:      warn=${cfg.limits.maxFilesWarn}, stop=${cfg.limits.maxFilesHardStop}, loop=${cfg.limits.maxEditsPerFilePerMinute}/min, mcp=${cfg.limits.mcpSilenceTimeoutSec}s, stale=${cfg.limits.staleSessionHours}h`);
