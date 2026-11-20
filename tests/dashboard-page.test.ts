@@ -315,12 +315,15 @@ describe('dashboard page', () => {
         events: [
           { id: '1', type: 'file-edit', severity: 'info', timestamp: 0, filePath: 'a.ts', message: 'CHANGE: a.ts' },
           { id: '2', type: 'rollback', severity: 'warn', timestamp: 0, filePath: 'b.ts', message: 'Rolled back b.ts' },
+          { id: '3', type: 'protected-file', severity: 'warn', timestamp: 0, filePath: 'config/.ENV.local', message: 'Protected ENV file changed' },
         ],
       }),
     );
     const markup = getElementById('activity-list').innerHTML;
     expect(markup).toContain('data-path="a.ts"');
     expect(markup).not.toContain('data-path="b.ts"');
+    // a .env file can never be restored, so it gets no button that can only fail
+    expect(markup).not.toContain('data-path="config/.ENV.local"');
   });
 
   it('offers to end an agent session with the processes it started and names each one first', async () => {
@@ -388,7 +391,4 @@ describe('dashboard page', () => {
     expect(getElementById('metric-files').className).toContain('text-red-400');
     expect(getElementById('metric-files-limit').textContent).toContain('HARD STOP');
   });
-
-  // Known gap: the behavior is not decided yet (AGENTS.md, section 6)
-  it.todo('works without any request to a third party (Tailwind is loaded from a CDN today)');
 });

@@ -858,7 +858,7 @@ export class ProcessMonitor extends EventEmitter {
         status = 'ACTIVE';
         reason = `Running dev server in current repository (${formattedUptime})`;
       } else if (isOtherRepo && isStaleByAge && quietLongEnough) {
-        // Age alone called sessions stale that were still in use at an open editor (audit D-01):
+        // Age alone called sessions stale that were still in use at an open editor:
         // a session in another repository is stale only when it is old AND has used no CPU time
         // for a measured window.
         status = 'STALE';
@@ -896,7 +896,7 @@ export class ProcessMonitor extends EventEmitter {
         reason = `Agent session in current repository (open for ${formattedUptime})`;
       } else if (this.agentActive && silenceSec >= this.mcpSilenceTimeoutSec && !isDevServer) {
         // Quiet is not frozen: a resting watch server, a browser or a session in another repo
-        // waiting for its user were all called FROZEN after 45 s (audit D-02). Only a process
+        // waiting for its user were all called FROZEN after 45 s. Only a process
         // whose parent is gone (rule above) is called frozen.
         reason = `Quiet: no CPU or file activity for ${silenceSec}s`;
       } else if (category === 'mcp' && !hasCpuActivity) {

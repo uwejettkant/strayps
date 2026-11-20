@@ -74,7 +74,7 @@ describe('reloading a changed file', () => {
     expect(result.changes).toEqual([
       'limits.maxFilesWarn 15 → 20',
       'limits.staleSessionHours 6 → 24',
-      'no longer protected: docker-compose*.yml, .git/**',
+      'no longer protected: docker-compose*.yml',
       'now protected: secrets/**',
     ]);
     expect(manager.getConfig().limits.maxFilesWarn).toBe(20);

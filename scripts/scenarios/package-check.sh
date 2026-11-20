@@ -39,7 +39,7 @@ printf 'require("agent-leash"); console.log("still mine");\n' > my-cli.js
 cat > consumer.ts <<'TS'
 import { GuardConfigManager, ProcessMonitor, RepoWatcher, type StatusSnapshot, WatchdogSession, listenWatchdogServer } from 'agent-leash';
 export async function embed(rootDir: string) {
-  const configManager = new GuardConfigManager(rootDir, { mode: 'balanced' });
+  const configManager = new GuardConfigManager(rootDir);
   const watcher = new RepoWatcher({ rootDir, configManager });
   const processMonitor = new ProcessMonitor({ rootDir });
   const session = new WatchdogSession({ rootDir, configManager, watcher, processMonitor });

@@ -176,7 +176,7 @@
           <span id="metric-procs" class="text-xl font-semibold text-[#F2F7F4]">0</span>
           <span id="metric-frozen" class="text-xs text-[#8FA197]">0 frozen</span>
         </div>
-        <div id="metric-silence-limit" class="text-xs text-[#8FA197] mt-1">frozen after 45s silence</div>
+        <div id="metric-silence-limit" class="text-xs text-[#8FA197] mt-1">frozen: orphaned · stale: other repo, old and idle</div>
       </div>
     </section>
 
@@ -187,9 +187,9 @@
         <div class="console-header px-4 py-3 flex items-center justify-between">
           <div>
             <h2 id="ticker-heading" class="text-sm font-semibold text-[#F2F7F4]">
-              <span class="text-[#5BE49B]">$</span> tail -f .agentguard/events.log
+              <span class="text-[#5BE49B]">$</span> activity log
             </h2>
-            <p class="text-xs text-[#8FA197]">Live file edits, protected file blocks &amp; thrashing alerts</p>
+            <p class="text-xs text-[#8FA197]">Live file edits, protected file alarms &amp; thrashing alerts</p>
           </div>
           <span id="event-count-badge" class="text-xs px-2 py-0.5 rounded bg-[#16201B] text-[#B4C3BA] border border-[#1F2C25]">
             0 events
@@ -226,7 +226,7 @@
     <footer class="console-card px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-[#8FA197]">
       <div>
         <span class="text-[#5BE49B]">protected globs:</span>
-        <span id="protected-globs" class="text-[#C9D6CE] ml-1">.env*, docker-compose*.yml, .git/**</span>
+        <span id="protected-globs" class="text-[#C9D6CE] ml-1">.env*, docker-compose*.yml</span>
       </div>
       <div id="status-toast" class="text-[#5BE49B]">ready</div>
     </footer>
@@ -550,8 +550,8 @@
           : '0 stale · ' + totalMb.toFixed(0) + ' MB total';
       frozenEl.className = stale.length > 0 ? 'text-xs text-amber-400 font-semibold' : 'text-xs text-[#8FA197]';
       document.getElementById('metric-silence-limit').textContent =
-        'frozen after ' + cfg.limits.mcpSilenceTimeoutSec + 's silence · stale after ' +
-        (cfg.limits.staleSessionHours || 6) + 'h in another repo';
+        'frozen: orphaned and quiet for ' + cfg.limits.mcpSilenceTimeoutSec + 's · stale: other repo, older than ' +
+        (cfg.limits.staleSessionHours || 6) + 'h and idle for 10m';
 
       renderEvents(state.events || []);
       renderProcesses(procs);
@@ -578,8 +578,10 @@
               ? 'bg-amber-950/80 text-amber-300 border-amber-500/40'
               : 'bg-[#16201B] text-[#5BE49B] border-[#1F2C25]';
 
-          // A rollback line reports a revert; offering another one there only confuses
-          const rollbackBtn = ev.filePath && ev.type !== 'rollback' && ev.type !== 'rollback-failed'
+          // A rollback line reports a revert; offering another one there only confuses. A .env file
+          // is never read, so it can never be restored: no button that can only fail
+          const envFile = ev.filePath && String(ev.filePath).split('/').pop().toLowerCase().startsWith('.env');
+          const rollbackBtn = ev.filePath && !envFile && ev.type !== 'rollback' && ev.type !== 'rollback-failed'
             ? `<button type="button" data-action="revert" data-path="${esc(ev.filePath)}" class="text-[11px] px-2 py-0.5 rounded border border-[#2E4237] text-[#B4C3BA] hover:border-[#5BE49B] hover:text-[#F2F7F4] cursor-pointer">revert</button>`
             : '';
 

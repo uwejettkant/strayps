@@ -182,7 +182,7 @@ There are no modes to choose from: agent-leash always watches exactly by your se
 
 | Guardrail | Default | What happens |
 | :--- | :--- | :--- |
-| Protected files | `.env*`, `docker-compose*.yml`, `.git/**` | A change raises a critical alarm; `revert` restores the file. `.env*` only warns, because agent-leash never reads its contents and so can never restore it |
+| Protected files | `.env*`, `docker-compose*.yml` | A change raises a critical alarm; `revert` restores the file. `.env*` only warns, because agent-leash never reads its contents and so can never restore it |
 | Circuit breaker | more than 5 edits to one file within 60 seconds | One alarm per series of edits; `revert` restores the version before the series |
 | Modified files | warning at 15, hard-stop alarm at 40 | An alarm in the terminal view, the log and the dashboard. It does not stop the agent: a hard stop is an alarm, not a brake |
 
@@ -211,7 +211,7 @@ npx agent-leash init                         # or write a file with every defaul
 | `limits.maxEditsPerFilePerMinute` | `5` | Edits to one file within 60 seconds before the circuit breaker raises an alarm |
 | `limits.mcpSilenceTimeoutSec` | `45` | Seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen |
 | `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale, if it is also measured idle for ten minutes |
-| `protectedFiles` | `.env*`, `docker-compose*.yml`, `.git/**` | Globs relative to the repository root. Your list replaces the default one, so keep `.env*` in it if you want those warnings |
+| `protectedFiles` | `.env*`, `docker-compose*.yml` | Globs relative to the repository root. Your list replaces the default one, so keep `.env*` in it if you want those warnings |
 | `agents` | none | More program names to treat as coding agents, e.g. `vibe`. Not needed for agents that start MCP servers, nor for Claude Code, Codex and Aider ([how agents are recognized](#which-processes-count-as-agents)) |
 
 **Changes apply while agent-leash runs.** A saved change is picked up within about a second, whether it comes from `config set` or from your editor, and the activity log says what changed, for example `.agentguard.json reloaded: limits.maxFilesWarn 15 → 25`. Reloads are logged as warnings, so they also show with `--quiet`: the agent you are watching can write this file as easily as you can. An edit that is not valid (broken JSON, a limit below 1) is not applied at all; the previous settings stay and the log says why. At startup, an invalid value falls back to its default with a warning. Edits to `.agentguard.json` itself are never counted as agent edits and never reverted.
@@ -223,7 +223,7 @@ npx agent-leash init                         # or write a file with every defaul
 
 ```json
 {
-  "protectedFiles": [".env*", "docker-compose*.yml", ".git/**"],
+  "protectedFiles": [".env*", "docker-compose*.yml"],
   "agents": [],
   "limits": {
     "maxFilesWarn": 15,
@@ -290,7 +290,7 @@ Verified on macOS. Linux is implemented but not yet verified, and its process cl
 
 ```text
 agent-leash/
-├── assets/                  # SVG banner; demo animation and VHS tape (older than the terminal view)
+├── assets/                  # SVG banner
 ├── scripts/
 │   ├── agents/              # Guard hook for coding agents working on this repo
 │   └── scenarios/           # Sandbox repo, pseudo-terminal driver, package check

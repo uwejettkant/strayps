@@ -237,7 +237,7 @@ describe('agent-leash CLI', () => {
 
     const forced = runCli(['init', dir, '--force']);
     expect((await forced.exit).code).toBe(0);
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toMatchObject({ protectedFiles: ['.env*', 'docker-compose*.yml', '.git/**'] });
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toMatchObject({ protectedFiles: ['.env*', 'docker-compose*.yml'] });
   });
 
   it('tells the user about problems in the config file at startup', async () => {

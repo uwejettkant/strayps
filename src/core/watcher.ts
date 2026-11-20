@@ -311,7 +311,7 @@ export class RepoWatcher extends EventEmitter {
   private discardSlots: string[] = [];
   private rootCheckTimer: NodeJS.Timeout | null = null;
   private rootMissingReported = false;
-  /** What git ignores in this repository (audit D-06); null outside git or when git fails. */
+  /** What git ignores in this repository; null outside git or when git fails. */
   private gitIgnore: GitIgnoreState | null = null;
 
   constructor(options: RepoWatcherOptions) {
@@ -523,7 +523,7 @@ export class RepoWatcher extends EventEmitter {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       // One rule for what is snapshotted, watched and restorable: the snapshot of a virtual
-      // environment once held 224 MB of files nobody would ever restore (audit D-06).
+      // environment once held 224 MB of files nobody would ever restore.
       if (this.shouldIgnorePath(fullPath)) continue;
       const relPath = this.toRelPath(fullPath);
 

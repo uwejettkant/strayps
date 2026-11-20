@@ -40,7 +40,8 @@ export interface GuardConfigManagerOptions {
 export const CONFIG_FILENAME = '.agentguard.json';
 
 export const DEFAULT_GUARD_CONFIG: GuardConfig = {
-  protectedFiles: ['.env*', 'docker-compose*.yml', '.git/**'],
+  // No .git/**: .git is never watched (git itself rewrites it constantly), so it never matched
+  protectedFiles: ['.env*', 'docker-compose*.yml'],
   agents: [],
   limits: {
     maxFilesWarn: 15,

@@ -24,7 +24,7 @@ Example (safe: --demo touches no files and no real processes):
 
   python3 scripts/scenarios/pty-drive.py --cols 110 --rows 32 -- \
     node dist/cli.js watch --demo --no-dashboard :: \
-    wait:8 screen:story type:clean key:enter screen:confirm type:y screen:done type:exit key:enter
+    wait:8 screen:story type:status key:enter screen:done type:exit key:enter
 
 Never drive kill or pause against an instance that runs without --demo.
 POSIX only (pty, termios).

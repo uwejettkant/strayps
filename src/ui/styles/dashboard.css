@@ -1,6 +1,6 @@
 /*
  * Input for `npm run build:css`. Tailwind generates src/ui/public/dashboard.css from the classes
- * in the dashboard page, so the page loads nothing from another host (audit D-07). Only the page
+ * in the dashboard page, so the page loads nothing from another host. Only the page
  * is scanned: automatic source detection would also read whatever lies in the repository.
  */
 @import 'tailwindcss' source(none);

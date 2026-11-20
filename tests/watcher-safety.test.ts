@@ -355,7 +355,7 @@ describe('RepoWatcher protected files', () => {
 });
 
 describe('RepoWatcher and .gitignore', () => {
-  // Audit D-06: a repository with a virtual environment and a local database was snapshotted with
+  // a repository with a virtual environment and a local database was snapshotted with
   // 10,769 files (224 MB), 10,723 of them ignored by git, and a SQLite file written more than five
   // times a minute raised the thrashing alarm while the application had it open.
   function ignoredRepo() {
@@ -740,9 +740,7 @@ describe('RepoWatcher health', () => {
     }
   });
 
-  // Known gaps: the behavior is not decided yet (AGENTS.md, section 6)
-  it.todo('ignores files matched by .gitignore (build output, caches, local databases)');
-  it.todo('rolls back to the last good version instead of the session start');
+  // Known gap: the behavior is not decided yet (AGENTS.md, section 6)
   it.todo('does something on a hard stop besides reporting it');
 });
 

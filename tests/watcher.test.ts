@@ -27,7 +27,8 @@ describe('GuardConfigManager & RepoWatcher', () => {
     const cfg = manager.getConfig();
 
     expect(cfg).toEqual(DEFAULT_GUARD_CONFIG);
-    expect(cfg.protectedFiles).toEqual(['.env*', 'docker-compose*.yml', '.git/**']);
+    // .git is never watched, so a .git/** default would promise an alarm that never comes
+    expect(cfg.protectedFiles).toEqual(['.env*', 'docker-compose*.yml']);
     expect(cfg.limits.maxFilesWarn).toBe(15);
     expect(cfg.limits.maxFilesHardStop).toBe(40);
     expect(cfg.limits.maxEditsPerFilePerMinute).toBe(5);

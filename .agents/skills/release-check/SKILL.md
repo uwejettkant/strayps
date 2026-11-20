@@ -1,6 +1,6 @@
 ---
 name: release-check
-description: Checks whether agent-leash is ready to be published to npm and GitHub, and prepares a release without publishing it. Verifies the gate, the packed tarball, version and README facts, open audit items and package metadata. Use when the maintainer asks for a release, a version bump, or an assessment of release readiness. Never pushes, tags or publishes.
+description: Checks whether agent-leash is ready to be published to npm and GitHub, and prepares a release without publishing it. Verifies the gate, the packed tarball, version and README facts, open it.todo items and package metadata. Use when the maintainer asks for a release, a version bump, or an assessment of release readiness. Never pushes, tags or publishes.
 ---
 
 # Release check
@@ -57,7 +57,7 @@ Run the skill `scenario-testing` (or the subagent `scenario-tester`). No blocker
 
 - Bump `version` in `package.json` only (it is the single source).
 - Write the changelog entry from the commits since the last tag: what users notice, breaking changes first.
-- Demo assets (`assets/demo.svg`, `assets/demo.tape`) show the current terminal view.
+- If the README embeds a demo recording, it shows the current terminal view (there is none today).
 
 ## 6. Report
 

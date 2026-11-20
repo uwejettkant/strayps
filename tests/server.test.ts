@@ -305,7 +305,7 @@ describe('dashboard page', () => {
   });
 
   it('loads nothing from another host: its styles come from this server', async () => {
-    // Audit D-07: the page loaded Tailwind's script from a CDN, third-party code on a page that
+    // the page loaded Tailwind's script from a CDN, third-party code on a page that
     // holds the token for the kill endpoints, and the policy had to allow that host.
     const h = createHarness();
     const { app } = appFor(h);

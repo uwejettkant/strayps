@@ -153,7 +153,7 @@ describe('ProcessMonitor classification (production rules)', () => {
   });
 
   it('never calls an old session in another repository stale while it keeps using CPU time', async () => {
-    // Audit D-01: a two-day-old session at an open editor window was called stale by age alone
+    // a two-day-old session at an open editor window was called stale by age alone
     const { monitor, procs } = setup([agent(502, OTHER, { etime: '02-15:40:05', cpuTimeSec: 100 })]);
     const t0 = Date.now();
     for (let minute = 0; minute <= 60; minute += 5) {
@@ -176,7 +176,7 @@ describe('ProcessMonitor classification (production rules)', () => {
   });
 
   it('does not call a quiet process frozen while its parent is alive, however long it is quiet', async () => {
-    // Audit D-02: a resting watch server, a browser and a young session in another repository
+    // a resting watch server, a browser and a young session in another repository
     // were "frozen" after 45 quiet seconds. Quiet is not frozen.
     const { monitor } = setup([
       { pid: 50, name: 'zsh', cmd: '-zsh', cwd: REPO, cpu: 0, etime: '02:00:00' },
@@ -337,11 +337,6 @@ describe('ProcessMonitor classification (production rules)', () => {
     await Promise.all([first, second]);
     expect(calls).toBe(1);
   });
-
-  // Known gaps: the behavior is not decided yet (AGENTS.md, section 6)
-  it.todo('does not call an other-repo session stale while it is demonstrably in use');
-  it.todo('does not flag an idle dev server (tsx watch, nodemon, ...) as frozen after 45 seconds');
-  it.todo('measures CPU activity from CPU time deltas instead of ps %cpu (lifetime average on Linux)');
 });
 
 describe('ProcessMonitor agent detection (no list of products to keep up to date)', () => {
