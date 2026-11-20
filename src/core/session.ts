@@ -280,8 +280,23 @@ export class MonitorSession extends EventEmitter {
     const home = os.homedir();
     const sharedDirectory = (agent: MonitoredProcess): boolean =>
       Boolean(agent.cwd && agent.cwd === target.cwd && !['/', '~', home].includes(agent.cwd));
+    const saysNothing = (dir: string | undefined): boolean => !dir || ['/', '~', home].includes(dir);
+    const inside = (dir: string, root: string): boolean => dir === root || dir.startsWith(root.endsWith('/') ? root : `${root}/`);
+    // What an agent started in another directory is a session of its own: an agent strayps does not
+    // recognize, started by this one in another repository, ended with it (review, 20.11.2026)
+    const elsewhere = (proc: MonitoredProcess): boolean =>
+      proc.category === 'child' && !saysNothing(proc.cwd) && !saysNothing(target.cwd) && !inside(proc.cwd!, target.cwd!);
+    const underElsewhere = (proc: MonitoredProcess): boolean => {
+      let cur = proc.ppid !== undefined ? byPid.get(proc.ppid) : undefined;
+      for (let depth = 0; cur && cur.pid !== pid && depth < 32; depth++) {
+        if (elsewhere(cur)) return true;
+        cur = cur.ppid !== undefined ? byPid.get(cur.ppid) : undefined;
+      }
+      return false;
+    };
     const belongs = (proc: MonitoredProcess): boolean => {
       if (proc.category === 'agent' && !sharedDirectory(proc)) return false;
+      if (elsewhere(proc) || underElsewhere(proc)) return false;
       let cur = proc.agentPid;
       for (let depth = 0; cur !== undefined && depth < 32; depth++) {
         if (cur === pid) return true;

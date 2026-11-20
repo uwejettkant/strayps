@@ -155,7 +155,9 @@ export const BUILT_IN_AGENT_NAMES: readonly string[] = ['claude', 'codex', 'aide
 
 /** Programs that only start another program. Never the agent itself, whatever they launch. */
 const LAUNCHER_NAMES = new Set([
-  'sh', 'bash', 'zsh', 'dash', 'fish', 'ksh', 'env', 'nohup', 'timeout',
+  // login: Terminal.app and Ghostty start the shell through it, and an MCP server run by hand in
+  // such a tab made login an agent (review, 20.11.2026)
+  'sh', 'bash', 'zsh', 'dash', 'fish', 'ksh', 'env', 'nohup', 'timeout', 'login',
   'npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'bunx', 'corepack', 'uv', 'uvx', 'pipx',
 ]);
 
@@ -189,23 +191,42 @@ export function programNames(raw: Pick<RawProcessInfo, 'name' | 'cmd'>): string[
   if (first) names.add(stripScriptExtension(first));
 
   if (INTERPRETER.test(first) || INTERPRETER.test(executable)) {
-    for (let i = 1; i < args.length; i++) {
-      const arg = args[i];
-      if (INLINE_CODE_OPTIONS.has(arg)) break;
-      if (arg === '-m') {
-        if (args[i + 1]) names.add(baseName(args[i + 1]));
-        break;
-      }
-      if (OPTIONS_WITH_VALUE.has(arg)) {
-        i += 1;
-        continue;
-      }
-      if (arg.startsWith('-')) continue;
-      names.add(stripScriptExtension(baseName(arg)));
-      break;
-    }
+    const script = interpreterScript(args);
+    if (script) names.add(script.module ? baseName(script.path) : stripScriptExtension(baseName(script.path)));
   }
   return Array.from(names);
+}
+
+/** The script (or `-m` module) an interpreter runs, from its arguments. */
+function interpreterScript(args: string[]): { path: string; module: boolean } | undefined {
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i];
+    if (INLINE_CODE_OPTIONS.has(arg)) return undefined;
+    if (arg === '-m') return args[i + 1] ? { path: args[i + 1], module: true } : undefined;
+    if (OPTIONS_WITH_VALUE.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('-')) continue;
+    return { path: arg, module: false };
+  }
+  return undefined;
+}
+
+/**
+ * What a process is, for the host patterns: its executable and, for an interpreter, its script.
+ * Never its other arguments: agy, started by the Antigravity IDE with "antigravity" in its
+ * arguments, was taken for the IDE and so for no agent at all (scenario pass, 20.11.2026).
+ */
+function programIdentity(raw: Pick<RawProcessInfo, 'name' | 'cmd'>): string {
+  const args = (raw.cmd ?? '').trim().split(/\s+/).filter(Boolean);
+  // On macOS `name` is the full path of the executable (ps comm), spaces included
+  const parts = [raw.name, args[0] ?? ''];
+  if (INTERPRETER.test(baseName(args[0] ?? '')) || INTERPRETER.test(baseName(raw.name))) {
+    const script = interpreterScript(args);
+    if (script) parts.push(script.path);
+  }
+  return parts.join(' ');
 }
 
 const MCP_KEYWORDS = ['mcp', 'modelcontextprotocol'];
@@ -974,9 +995,9 @@ export class ProcessMonitor extends EventEmitter {
       for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
         const ancestor = rawByPid.get(cur);
         if (!ancestor) return undefined;
-        const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
+        const identity = programIdentity(ancestor);
         for (const [pattern, label] of HOST_PATTERNS) {
-          if (pattern.test(text)) return label;
+          if (pattern.test(identity)) return label;
         }
         cur = ancestor.ppid;
       }
@@ -1490,7 +1511,7 @@ export class ProcessMonitor extends EventEmitter {
       const ancestor = rawByPid.get(cur);
       if (!ancestor) return undefined;
       const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
-      if (HOST_PATTERNS.some(([pattern]) => pattern.test(text))) return undefined;
+      if (HOST_PATTERNS.some(([pattern]) => pattern.test(programIdentity(ancestor)))) return undefined;
       if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.toLowerCase().includes(pattern))) {
         return undefined;
       }

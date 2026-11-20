@@ -122,6 +122,23 @@ describe('MonitorSession', () => {
     expect(h.session.getKillPlan(800)!.alsoEnds.map((p) => p.pid)).toEqual([801]);
   });
 
+  it('does not end what an agent started in another directory: that is a session of its own', async () => {
+    // An agent strayps does not recognize (no MCP server, not in the settings), started by a
+    // recognized one in another repository, became its child and would have ended with it (review, 20.11.2026)
+    const h = createHarness({
+      procs: [
+        { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' },
+        { pid: 401, ppid: 400, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: `${OTHER}/web`, etime: '02:00:00' },
+        { pid: 402, ppid: 400, name: 'gemini', cmd: 'gemini', cwd: '/work/third-repo', etime: '02:00:00' },
+        { pid: 403, ppid: 402, name: 'node', cmd: 'node node_modules/.bin/next dev', cwd: '/work/third-repo', etime: '02:00:00' },
+        // nothing known about where it works: '/' says nothing, so it goes with the session
+        { pid: 404, ppid: 400, name: 'Chromium', cmd: 'Chromium --headless', cwd: '/', etime: '02:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+    expect(h.session.getKillPlan(400)!.alsoEnds.map((p) => p.pid).sort()).toEqual([401, 404]);
+  });
+
   it('ends what an agent started with its session, and names it in the plan, but not the wrappers in between', async () => {
     const h = createHarness({
       procs: [

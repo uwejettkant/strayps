@@ -448,6 +448,60 @@ describe('ProcessMonitor agent detection (no list of products to keep up to date
     expect(list.find((p) => p.pid === 502)?.host).toBe('VS Code');
   });
 
+  it('recognizes an agent an IDE started even when its arguments name the IDE, and the IDE stays a host', async () => {
+    // Seen on 20.11.2026: agy started by the Antigravity IDE, with "antigravity" in its arguments,
+    // was taken for the IDE itself. It was not listed, and pause would not have held it.
+    const app = '/Applications/Antigravity IDE.app/Contents';
+    const { monitor } = setup([
+      { pid: 300, ppid: 1, pgid: 300, name: `${app}/MacOS/Electron`, cmd: `${app}/MacOS/Electron` },
+      {
+        pid: 301,
+        ppid: 300,
+        name: `${app}/Frameworks/Antigravity IDE Helper (Plugin).app/Contents/MacOS/Antigravity IDE Helper (Plugin)`,
+        cmd: `${app}/Frameworks/Antigravity IDE Helper (Plugin).app/Contents/MacOS/Antigravity IDE Helper (Plugin) --type=utility`,
+      },
+      { pid: 302, ppid: 301, name: '/Users/dev/.gemini/bin/agy', cmd: '/Users/dev/.gemini/bin/agy --client antigravity --stdio', cwd: REPO, cpu: 1, etime: '05:00:00' },
+      { pid: 303, ppid: 302, name: 'npm', cmd: 'npm exec x-mcp-server', cwd: REPO, etime: '05:00:00' },
+      mcp(304, 303, { cwd: REPO }),
+      // an MCP server the IDE starts itself: the IDE is its host, not an agent
+      mcp(305, 301, { cwd: REPO }),
+    ]);
+    const byPid = new Map((await monitor.scan(1_000)).map((p) => [p.pid, p]));
+    expect(byPid.get(302)).toMatchObject({ category: 'agent', detectedBy: 'mcp-client', host: 'Antigravity', pauseTarget: true });
+    expect(byPid.get(304)).toMatchObject({ category: 'mcp', agentPid: 302 });
+    expect(byPid.get(305)?.agentPid).toBeUndefined();
+    expect(byPid.get(305)?.host).toBe('Antigravity');
+    expect(byPid.has(300) || byPid.has(301)).toBe(false);
+  });
+
+  it('never takes a program for a host because of a word in its arguments', async () => {
+    // an agent named in the settings, run with arguments that name a terminal and an editor
+    const { monitor } = setup([
+      ...terminalTab,
+      { pid: 90, ppid: 71, name: 'vibe', cmd: 'vibe --term xterm-256color --open-in windsurf', cwd: REPO, cpu: 1, etime: '05:00' },
+      mcp(91, 90, { cwd: REPO }),
+    ]);
+    monitor.setAgentNames(['vibe']);
+    const byPid = new Map((await monitor.scan(1_000)).map((p) => [p.pid, p]));
+    expect(byPid.get(91)).toMatchObject({ agentPid: 90, host: 'terminal' });
+  });
+
+  it('does not take the login program of a terminal tab for an agent', async () => {
+    // Terminal.app and Ghostty start the shell through login; an MCP server run by hand in such a
+    // tab made login an agent, and everything in the tab its session (review, 20.11.2026)
+    const { monitor } = setup([
+      { pid: 80, ppid: 1, pgid: 80, name: '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal', cmd: '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal' },
+      { pid: 81, ppid: 80, name: 'login', cmd: 'login -pf dev', cwd: REPO },
+      { pid: 82, ppid: 81, name: '-zsh', cmd: '-zsh', cwd: REPO },
+      { pid: 83, ppid: 82, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-inspector', cwd: REPO, etime: '10:00' },
+      { pid: 84, ppid: 82, name: 'vim', cmd: 'vim notes.md', cwd: REPO, etime: '30:00' },
+    ]);
+    const list = await monitor.scan(1_000);
+    expect(list.filter((p) => p.category === 'agent')).toEqual([]);
+    expect(list.map((p) => p.pid)).toEqual([83]);
+    expect(list[0].host).toBe('terminal');
+  });
+
   it('recognizes programs named in the agents setting, by their exact name', async () => {
     const { monitor } = setup([
       ...terminalTab,

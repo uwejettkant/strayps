@@ -66,7 +66,7 @@ Each row shows the process, its working directory, the app or terminal it is att
 
 These are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. An idle session at an editor window you will come back to tomorrow looks the same as a forgotten one. You end a process with `kill <pid>` in the terminal, after a confirmation: SIGTERM first, SIGKILL only if it does not exit.
 
-Ending an agent ends its session: the confirmation lists every monitored process the agent started, one line each, and the RAM they hold together, and they end with it. Otherwise they would stay behind as orphans. That includes its MCP servers and an agent it started in the same directory, with that agent's servers; an agent it started anywhere else (another repository, a subdirectory, or when both run in your home directory) is a session of its own and keeps running. Only what the confirmation listed is ended: a server the agent starts while the question is open keeps running, and a PID that meanwhile belongs to another process is not touched; the log says so. If the list does not fit your terminal, the answer is not taken: make the terminal taller and ask again. Other sessions, editors and their MCP servers are never part of it. To end only one MCP server, `kill` its own PID.
+Ending an agent ends its session: the confirmation lists every monitored process the agent started, one line each, and the RAM they hold together, and they end with it. Otherwise they would stay behind as orphans. That includes its MCP servers, what it runs inside its directory (a dev server, a browser), and an agent it started in the same directory, with that agent's servers; an agent it started in any other directory (another repository, a subdirectory, or when both run in your home directory), and a program it started outside its directory, are sessions of their own and keep running. Only what the confirmation listed is ended: a server the agent starts while the question is open keeps running, and a PID that meanwhile belongs to another process is not touched; the log says so. If the list does not fit your terminal, the answer is not taken: make the terminal taller and ask again. Other sessions, editors and their MCP servers are never part of it. To end only one MCP server, `kill` its own PID.
 
 ### Which processes count as agents
 
@@ -245,7 +245,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 174 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 178 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real
