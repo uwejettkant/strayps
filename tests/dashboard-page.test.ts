@@ -123,7 +123,9 @@ describe('dashboard page', () => {
   it('contains no inline event handlers and no script without the nonce', () => {
     expect(html).not.toMatch(/\son[a-z]+\s*=/i);
     const scripts = html.match(/<script\b[^>]*>/g) ?? [];
-    expect(scripts).toEqual(['<script src="https://cdn.tailwindcss.com">', '<script nonce="__LEASH_NONCE__">']);
+    expect(scripts).toEqual(['<script nonce="__LEASH_NONCE__">']);
+    expect(html.match(/<style\b[^>]*>/g)).toEqual(['<style nonce="__LEASH_NONCE__">']);
+    expect(html).not.toMatch(/\sstyle\s*=/i);
     expect(html).toContain('<meta name="leash-token" content="__LEASH_TOKEN__" />');
     expect(html).not.toContain('v0.1.0');
   });

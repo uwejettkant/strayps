@@ -258,6 +258,33 @@ describe('dashboard page', () => {
     expect(again.headers.get('content-security-policy')).not.toBe(csp);
   });
 
+  it('loads nothing from another host: its styles come from this server', async () => {
+    // Audit D-07: the page loaded Tailwind's script from a CDN, third-party code on a page that
+    // holds the token for the kill endpoints, and the policy had to allow that host.
+    const h = createHarness();
+    const { app } = appFor(h);
+    const res = await app.request('/');
+    const html = await res.text();
+    const csp = res.headers.get('content-security-policy') ?? '';
+
+    expect(csp).not.toMatch(/https?:/);
+    expect(csp).not.toContain("'unsafe-inline'");
+    expect(html).not.toMatch(/(?:src|href)\s*=\s*["']?(?:https?:)?\/\//i);
+    expect(html).not.toMatch(/@import|url\(\s*["']?(?:https?:)?\/\//i);
+    expect(html).toContain('<link rel="stylesheet" href="/dashboard.css"');
+
+    const css = await app.request('/dashboard.css');
+    expect(css.status).toBe(200);
+    expect(css.headers.get('content-type')).toContain('text/css');
+    expect(css.headers.get('x-content-type-options')).toBe('nosniff');
+    const text = await css.text();
+    // classes the page uses, also ones its script puts together at runtime
+    for (const selector of ['.max-w-7xl', '.bg-amber-950\\/60', '.lg\\:grid-cols-12', '.text-\\[10px\\]']) {
+      expect(text, selector).toContain(selector);
+    }
+    expect(text).not.toMatch(/@import|url\(\s*["']?(?:https?:)?\/\//i);
+  });
+
   it('never serves a page from the directory it happens to be started in', async () => {
     const decoy = makeTmpDir();
     writeFiles(decoy, { 'src/ui/public/index.html': '<html><body>decoy page from the watched repo</body></html>' });
@@ -268,6 +295,8 @@ describe('dashboard page', () => {
     try {
       const html = await (await app.request('/')).text();
       expect(html).not.toContain('decoy page');
+      writeFiles(decoy, { 'src/ui/public/dashboard.css': 'body { display: none } /* decoy */' });
+      expect(await (await app.request('/dashboard.css')).text()).not.toContain('decoy');
       expect(html).toContain('id="confirm-dialog"');
     } finally {
       process.chdir(previous);

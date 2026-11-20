@@ -34,7 +34,8 @@ export const DEFAULT_HOSTNAME = '127.0.0.1';
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
-function loadDashboardHtml(): string {
+/** Reads a file of the dashboard from the installation, never from the working directory. */
+function loadDashboardAsset(name: string): string | null {
   const candidates: string[] = [];
 
   try {
@@ -44,9 +45,9 @@ function loadDashboardHtml(): string {
         : path.dirname(fs.realpathSync(process.argv[1] ?? process.cwd()));
     candidates.push(
       // running from source (src/server.ts) or tests
-      path.resolve(baseDir, 'ui/public/index.html'),
+      path.resolve(baseDir, 'ui/public', name),
       // running from the published bundle (dist/*.js next to src/ui/public)
-      path.resolve(baseDir, '../src/ui/public/index.html'),
+      path.resolve(baseDir, '../src/ui/public', name),
     );
   } catch {
     // Ignore resolution fallback errors
@@ -61,7 +62,12 @@ function loadDashboardHtml(): string {
       }
     }
   }
+  return null;
+}
 
+function loadDashboardHtml(): string {
+  const html = loadDashboardAsset('index.html');
+  if (html !== null) return html;
   return `<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8"><meta name="color-scheme" content="light dark"><title>agent-leash</title></head><body><h1>agent-leash watchdog</h1><p>Dashboard assets are missing from this installation. The terminal view and the API still work.</p></body></html>`;
 }
 
@@ -156,8 +162,9 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
       [
         "default-src 'self'",
         // The nonce covers our own inline script. Injected markup (onerror=..., <script>) has none.
-        `script-src 'nonce-${nonce}' https://cdn.tailwindcss.com`,
-        "style-src 'self' 'unsafe-inline'",
+        `script-src 'nonce-${nonce}'`,
+        // Our stylesheet and our one nonce-marked <style>; injected <style> markup has no nonce.
+        `style-src 'self' 'nonce-${nonce}'`,
         "connect-src 'self'",
         "img-src 'self' data:",
         "base-uri 'none'",
@@ -170,6 +177,15 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     c.header('Referrer-Policy', 'no-referrer');
     c.header('Cache-Control', 'no-store');
     return c.html(html);
+  });
+
+  // Styles generated at build time from the page's classes: nothing is loaded from another host
+  app.get('/dashboard.css', (c) => {
+    const css = loadDashboardAsset('dashboard.css');
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('Cache-Control', 'no-store');
+    if (css === null) return c.text('/* dashboard styles are missing from this installation */', 404);
+    return c.body(css, 200, { 'Content-Type': 'text/css; charset=utf-8' });
   });
 
   // REST Status API

@@ -7,7 +7,7 @@
 **Stop runaway AI coding agents from thrashing your repo, overwriting `.env` files, or leaving forgotten MCP processes behind — with one command, on your machine, no account, no telemetry.**
 
 [![npm version](https://img.shields.io/badge/npm-v0.1.0-5BE49B?style=flat-square&logo=npm&labelColor=0D120F)](https://www.npmjs.com/package/agent-leash)
-[![package size](https://img.shields.io/badge/package-54%20kB-5BE49B?style=flat-square&labelColor=0D120F)](#)
+[![package size](https://img.shields.io/badge/package-72.9%20kB-5BE49B?style=flat-square&labelColor=0D120F)](#)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-5BE49B?style=flat-square&logo=typescript&labelColor=0D120F)](./tsconfig.json)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20%20LTS-5BE49B?style=flat-square&logo=node.js&labelColor=0D120F)](./package.json)
 [![Local](https://img.shields.io/badge/privacy-local%20%C2%B7%20no%20account%20%C2%B7%20no%20telemetry-5BE49B?style=flat-square&labelColor=0D120F)](#security-model)
@@ -266,7 +266,7 @@ console.log(dashboard.url);
 - Only processes from the monitored list can be terminated, one PID at a time; `pause` holds only the agents of the watched repository and the processes they started, and agent-leash continues them when it exits. Only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
 - File names and command lines are treated as untrusted text in the dashboard and in the terminal.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
-- Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The watched agent can also edit `.agentguard.json`; a running agent-leash applies the edit and logs it as a warning. The dashboard page loads Tailwind from its CDN; with `--no-dashboard` no network request is made at all.
+- Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The watched agent can also edit `.agentguard.json`; a running agent-leash applies the edit and logs it as a warning. The dashboard loads nothing from another host: its styles are generated when the package is built and served by agent-leash itself.
 
 ## Platform Support
 
@@ -298,8 +298,11 @@ agent-leash/
 │       ├── plain.ts         # Line output for pipes, logs and background jobs
 │       ├── commands.ts      # Command language shared by both terminal front ends
 │       ├── format.ts        # Sanitizing, truncation, colors, tables
+│       ├── styles/
+│       │   └── dashboard.css # Tailwind input for npm run build:css
 │       └── public/
-│           └── index.html   # Zero-build Dark Console SPA (Tailwind + Native Dialog)
+│           ├── index.html   # The dashboard page (native dialog, no framework)
+│           └── dashboard.css # Its styles, generated from the classes in index.html
 └── tests/                   # Vitest: unit, API, dashboard script, CLI end-to-end
 ```
 
@@ -310,7 +313,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 198 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 199 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing
