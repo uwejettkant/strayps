@@ -259,6 +259,9 @@ describe('RepoWatcher rollback: what it may touch', () => {
     // unless a protected glob names that directory: its files still raise alarms
     const protecting = watcherFor(repo, { configManager: new GuardConfigManager(repo, { protectedFiles: ['ext/**'] }) });
     expect(protecting.shouldIgnorePath(path.join(repo, 'ext'))).toBe(false);
+    // a glob that only fixes a parent does not open it: that link could be the home directory
+    const parentOnly = watcherFor(repo, { configManager: new GuardConfigManager(repo, { protectedFiles: ['**/*.pem'] }) });
+    expect(parentOnly.shouldIgnorePath(path.join(repo, 'ext'))).toBe(true);
     // a link to a directory inside the repository, and a link to a file, stay watched
     expect(watcher.shouldIgnorePath(path.join(repo, 'src-alias'))).toBe(false);
     expect(watcher.shouldIgnorePath(path.join(repo, '.env'))).toBe(false);
@@ -277,6 +280,42 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(watcher.getModifiedFiles()).toEqual(['real/x.md']);
     expect(watcher.rollbackFile('alias/x.md')).toBe(true);
     expect(read(repo, 'real/x.md')).toBe('start\n');
+  });
+
+  it.skipIf(!isPosix)('checks ignore rules where an alias leads, and protected globs on both names', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'real/x.md': 'start\n', 'node_modules/pkg/a.js': 'a\n' });
+    fs.symlinkSync(path.join(repo, 'real'), path.join(repo, 'alias'));
+    fs.symlinkSync(path.join(repo, 'node_modules/pkg'), path.join(repo, 'gen'));
+    const configManager = new GuardConfigManager(repo, { protectedFiles: ['alias/**'] });
+    const watcher = new RepoWatcher({ rootDir: repo, configManager, keepDiscarded: false });
+    watcher.createCheckpoint();
+    const onProtected = vi.fn();
+    watcher.on('protected-file', onProtected);
+
+    writeFiles(repo, { 'node_modules/pkg/a.js': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'gen/a.js');
+    expect(watcher.getModifiedFiles()).toEqual([]);
+
+    writeFiles(repo, { 'alias/x.md': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'alias/x.md');
+    expect(onProtected).toHaveBeenCalledTimes(1);
+  });
+
+  it.skipIf(!isPosix)('never reads .env through a rule file inside the repository that links to it', () => {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    writeFiles(repo, { '.gitignore': '.env\n', '.env': 'TOKEN=[PLACEHOLDER]\n', 'src/a.ts': 'a\n' });
+    commitAll(repo);
+    // the agent points .git/info/exclude at .env; fingerprinting the rules must not read it
+    fs.rmSync(path.join(repo, '.git/info/exclude'), { force: true });
+    fs.symlinkSync('../../.env', path.join(repo, '.git/info/exclude'));
+    const watcher = watcherFor(repo);
+    writeFiles(repo, { '.env': 'TOKEN=[OTHER-VALUE]\n' });
+    writeFiles(repo, { 'src/c.ts': 'x\n' });
+    watcher.handleFileSystemEvent('add', 'src/c.ts');
+    // had .env been read, its new contents would count as changed ignore rules
+    expect(watcher.getRecentEvents().map((e) => e.type)).not.toContain('ignore-rules-changed');
   });
 
   it.skipIf(!isPosix)('never reads .env contents through a symlink with another name', () => {
@@ -435,6 +474,22 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(watcher.rollbackFile('readme.md')).toBe(true);
     expect(fs.readdirSync(repo)).toContain('README.md');
     expect(read(repo, 'README.md')).toBe('start\n');
+  });
+
+  it.skipIf(!isPosix)('resolves aliases also when the root is given in another case, and folds composed names', () => {
+    const parent = makeTmpDir();
+    const repo = path.join(parent, 'Repo');
+    writeFiles(repo, { 'real/x.md': 'start\n', 'caf\u00e9.md': 'nfc\n' });
+    fs.symlinkSync(path.join(repo, 'real'), path.join(repo, 'alias'));
+    const caseInsensitive = fs.existsSync(path.join(parent, 'repo'));
+    if (!caseInsensitive) return;
+    const watcher = watcherFor(path.join(parent, 'repo'), { keepDiscarded: false });
+    writeFiles(repo, { 'alias/x.md': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'alias/x.md');
+    // the decomposed spelling of café names the same file on APFS
+    writeFiles(repo, { 'caf\u00e9.md': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'cafe\u0301.md');
+    expect(watcher.getModifiedFiles().sort()).toEqual(['caf\u00e9.md', 'real/x.md']);
   });
 
   it('learns a spelling from the file system, never from a refused revert', () => {

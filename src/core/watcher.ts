@@ -167,19 +167,28 @@ const GIT_ASK_TIMEOUT_MS = 2_000;
 
 /** A hash of the file, or 'missing'. Only the hash is kept: git config can hold credentials. */
 /**
- * Fingerprint of an ignore-rule file. `followLinks` is for the git config files outside the
- * repository, which dotfile managers often link; a .gitignore inside the repository is never read
- * through a link (its target could be .env) and is fingerprinted by where the link points, so a
- * link put there is still a change. O_NONBLOCK: a FIFO put in place must not block the watchdog.
+ * Fingerprint of an ignore-rule file, never of .env contents. A link is followed only when
+ * `followRoot` is given (the git config files, which dotfile managers often link) and it leads
+ * outside that repository to a file not named .env*; any other link, including one from
+ * .git/info/exclude or a .gitignore to .env, is fingerprinted by where it points, so putting it
+ * there is still a change. A file with more than one name (a hard link, maybe to .env) is
+ * fingerprinted by inode, size and time, never read. O_NONBLOCK: a FIFO must not block the watchdog.
  */
-function hashFile(file: string, followLinks = false): string {
-  if (!followLinks) {
-    try {
-      if (fs.lstatSync(file).isSymbolicLink()) return `link:${fs.readlinkSync(file)}`;
-    } catch {
-      return 'missing';
+function hashFile(file: string, followRoot?: string): string {
+  let followLink = false;
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) {
+      const real = followRoot ? fs.realpathSync(file) : '';
+      const inside = real === followRoot || (followRoot !== undefined && real.startsWith(followRoot + path.sep));
+      if (!followRoot || inside || path.basename(real).toLowerCase().startsWith('.env')) {
+        return `link:${fs.readlinkSync(file)}`;
+      }
+      followLink = true;
     }
+  } catch {
+    return 'missing';
   }
+  const followLinks = followLink;
   let fd: number;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | O_NONBLOCK | (followLinks ? 0 : O_NOFOLLOW));
@@ -189,6 +198,7 @@ function hashFile(file: string, followLinks = false): string {
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return `not-a-plain-file:${stat.mode}`;
+    if (stat.nlink !== 1) return `several-names:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
     // In chunks, whatever the size: a same-size edit of a large rule file must change the hash too
     const hash = createHash('sha256');
     const chunk = Buffer.alloc(1024 * 1024);
@@ -354,7 +364,9 @@ export class RepoWatcher extends EventEmitter {
   constructor(options: RepoWatcherOptions) {
     super();
     try {
-      this.rootDir = fs.realpathSync(path.resolve(options.rootDir));
+      // .native: the spelling on disk, as toRelPath's realpath sees it; with the JS realpath a root
+      // typed in another case never matched and aliases were not resolved
+      this.rootDir = fs.realpathSync.native(path.resolve(options.rootDir));
     } catch {
       this.rootDir = path.resolve(options.rootDir);
     }
@@ -721,14 +733,18 @@ export class RepoWatcher extends EventEmitter {
    * (`.env*`, `docker-compose*.yml`) matches a file name at any depth, a glob with a fixed
    * directory (`secrets/**`) only below that directory.
    */
-  /** True if a protected glob with a fixed directory reaches into `rel` (secrets/** into secrets). */
+  /**
+   * True if a protected glob names `rel` itself or something below it by its fixed part
+   * (secrets/** names secrets). A glob that only fixes a parent (src/ and any depth below, for src/ext) does
+   * not count: following such a link could mean crawling a whole home directory.
+   */
   private protectedGlobNamesDirectory(rel: string): boolean {
     const dir = `${rel}/`;
     return this.configManager.getConfig().protectedFiles.some((pattern) => {
       const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
       if (!normalized.includes('/')) return false;
       const fixed = normalized.slice(0, normalized.search(/[*?]|$/));
-      return fixed.length > 0 && (fixed.startsWith(dir) || dir.startsWith(fixed));
+      return fixed.startsWith(dir);
     });
   }
 
@@ -803,8 +819,9 @@ export class RepoWatcher extends EventEmitter {
   }
 
   private fingerprint(files: string[]): string {
-    // Git config files outside the repository: followed, dotfile managers link them
-    return createHash('sha256').update(files.map((file) => hashFile(file, true)).join('\n')).digest('hex');
+    // Git config files: followed through a link that leads outside the repository (dotfile managers
+    // link them), never into it, never to .env
+    return createHash('sha256').update(files.map((file) => hashFile(file, this.rootDir)).join('\n')).digest('hex');
   }
 
   /** True if git ignored this path, or a directory above it, when the session started. */
@@ -974,7 +991,11 @@ export class RepoWatcher extends EventEmitter {
     const relPath = this.canonicalSpelling(seenPath);
     // Checked before the ignore rules, which this very edit may change
     if (path.posix.basename(relPath) === '.gitignore') this.markIgnoreRulesChanged(relPath);
-    if (this.shouldIgnorePath(absPath)) return;
+    // Ignore rules on where the file really is (an alias can lead into .git or node_modules) and on
+    // the path as reported (a link that leads outside is ignored by its own name)
+    if (this.shouldIgnorePath(absPath) || this.shouldIgnorePath(path.join(this.rootDir, relPath))) return;
+    // A protected glob may be written for the alias (.claude/**) or for the real place
+    const reportedPath = toPosixPath(path.relative(this.rootDir, absPath));
 
     // Ignore events generated by our own rollback operations
     if (this.isOwnWriteEcho(relPath)) {
@@ -991,7 +1012,10 @@ export class RepoWatcher extends EventEmitter {
     this.trackChange(relPath, now);
 
     // 1. Protected files: an alarm, never an automatic rollback
-    if (this.configManager.isProtectedFile(relPath)) {
+    if (
+      this.configManager.isProtectedFile(relPath) ||
+      (reportedPath !== relPath && !reportedPath.startsWith('..') && this.configManager.isProtectedFile(reportedPath))
+    ) {
       const envFile = this.isEnvFile(relPath);
       const verb = action === 'add' ? 'created' : action === 'unlink' ? 'deleted' : 'changed';
       const event = this.recordActivity({
@@ -1427,7 +1451,7 @@ export class RepoWatcher extends EventEmitter {
 
   private rememberSpelling(relPath: string): void {
     if (!this.caseInsensitive) return;
-    const lower = relPath.toLowerCase();
+    const lower = relPath.normalize('NFC').toLowerCase();
     if (!this.nameByLowercase.has(lower)) this.nameByLowercase.set(lower, relPath);
   }
 
@@ -1438,9 +1462,11 @@ export class RepoWatcher extends EventEmitter {
    */
   private canonicalSpelling(relPath: string, remember = true): string {
     if (!this.caseInsensitive) return relPath;
-    const known = this.nameByLowercase.get(relPath.toLowerCase());
+    // APFS also treats the composed and decomposed forms of a name (café) as one file
+    const key = relPath.normalize('NFC').toLowerCase();
+    const known = this.nameByLowercase.get(key);
     if (known) return known;
-    if (remember) this.nameByLowercase.set(relPath.toLowerCase(), relPath);
+    if (remember) this.nameByLowercase.set(key, relPath);
     return relPath;
   }
 
