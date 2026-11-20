@@ -200,7 +200,7 @@ console.log(dashboard.url);
 
 - The dashboard server binds to `127.0.0.1`, answers only when addressed as this machine, and changes nothing: every request that is not a read is refused. A web page on another site cannot open its live stream.
 - Only processes from the monitored list can be terminated, and only from the terminal: one process, or one agent with the processes it started, exactly as the confirmation listed them. `pause` holds only the agents of the repository strayps was started in and the processes they started, and strayps continues them when it exits: by `exit`, Ctrl+C, SIGTERM, SIGHUP, SIGQUIT, or a crash in its own code. Ended by a signal it does not handle (`kill -9`, or a rarely used one such as SIGUSR2 or SIGALRM), or by a fatal error of Node itself (out of memory), it cannot run anything, and the held processes stay stopped: `kill -CONT <pid>` continues them.
-- The only file strayps reads in a repository is `.strayps.json`, and only when it is a plain file (never through a symbolic or hard link). It writes that file only on `init`, `config set` and `config unset`.
+- The only file strayps reads in a repository is `.strayps.json`, and only when it is a plain file (never through a symbolic or hard link). It writes that file only on `init`, `config set` and `config unset`. To read memory on macOS it runs `/usr/bin/footprint`, which writes its result into a private temporary directory that strayps removes right after; `ps`, `lsof` and `footprint` are run by their full paths there, so a program of the same name in a repository's `node_modules/.bin` is never run instead.
 - Command lines, directories and log messages are treated as untrusted text in the dashboard and in the terminal. Values that look like secrets in command lines (`--token`, `--api-key`, `--password`, `API_KEY=…`, credentials in URLs) are shown as `[redacted]`.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
 - Known limits: any local process, another user account included, can read the dashboard: it shows command lines (with secrets redacted) and directories. The agents you watch can edit `.strayps.json`; a running strayps applies the edit and logs it as a warning. The dashboard loads nothing from another host: its styles are generated when the package is built and served by strayps itself. It needs a current browser (Chrome 111, Safari 16.4, Firefox 128 or newer).
@@ -245,7 +245,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 178 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 180 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real

@@ -106,7 +106,7 @@ export function createDashboardApp(deps: DashboardServerDeps) {
   // A read-only server: no route changes anything. Ending processes and pausing run in the
   // terminal, where they ask first; a page any local process can load once held the token for
   // the kill route.
-  app.use('/api/*', async (c, next) => {
+  app.use('*', async (c, next) => {
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
       return c.json({ error: 'This dashboard is read-only; use the terminal to end or pause processes' }, 405);
     }

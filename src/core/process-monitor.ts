@@ -246,47 +246,74 @@ export function sumMemory(processes: Array<Pick<MonitoredProcess, 'memoryMb' | '
 export const MEMORY_READ_INTERVAL_MS = 15_000;
 
 /**
- * Footprint per PID from `footprint -f bytes` output: the `phys_footprint` line of each process
- * block (what Activity Monitor shows), or the block header's footprint when that line is missing.
+ * Programs by full path on macOS, where their place is fixed: found through PATH, a `ps` or
+ * `footprint` in the repository's node_modules/.bin (first in PATH under npx and npm scripts)
+ * would have run instead (review, 20.11.2026). Linux keeps the PATH lookup, its paths vary.
  */
-export function parseFootprintOutput(stdout: string): Map<number, number> {
+const IS_MAC = process.platform === 'darwin';
+const PS_BIN = IS_MAC ? '/bin/ps' : 'ps';
+const LSOF_BIN = IS_MAC ? '/usr/sbin/lsof' : 'lsof';
+const FOOTPRINT_BIN = '/usr/bin/footprint';
+
+/**
+ * Footprint per requested PID from `footprint -f bytes -j` output: `auxiliary.phys_footprint`
+ * (what Activity Monitor shows), or the process's `footprint` when that is missing. JSON, not the
+ * text output: there each block starts with the process's own name, and a name can imitate the
+ * header of another PID (review, 20.11.2026).
+ */
+export function parseFootprintJson(data: unknown, pids: number[]): Map<number, number> {
   const result = new Map<number, number>();
-  let current: number | undefined;
-  for (const line of stdout.split('\n')) {
-    const header = line.match(/\[(\d+)\]:\s+\S+\s+Footprint:\s*(\d+)\s*B\b/);
-    if (header) {
-      current = Number(header[1]);
-      result.set(current, Number(header[2]));
-      continue;
-    }
-    if (/^\s*Summary\b/.test(line)) {
-      current = undefined;
-      continue;
-    }
-    const phys = line.match(/^\s*phys_footprint:\s*(\d+)\s*B\b/);
-    if (phys && current !== undefined) result.set(current, Number(phys[1]));
+  if (!data || typeof data !== 'object') return result;
+  const { processes, 'bytes per unit': perUnit } = data as { processes?: unknown; 'bytes per unit'?: unknown };
+  if (!Array.isArray(processes)) return result;
+  const factor = typeof perUnit === 'number' && perUnit > 0 ? perUnit : 1;
+  const requested = new Set(pids);
+  for (const entry of processes) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { pid, footprint, auxiliary } = entry as { pid?: unknown; footprint?: unknown; auxiliary?: unknown };
+    if (typeof pid !== 'number' || !requested.has(pid)) continue;
+    const phys = auxiliary && typeof auxiliary === 'object' ? (auxiliary as { phys_footprint?: unknown }).phys_footprint : undefined;
+    const units = typeof phys === 'number' ? phys : typeof footprint === 'number' ? footprint : undefined;
+    if (units !== undefined && Number.isFinite(units) && units >= 0) result.set(pid, units * factor);
   }
   return result;
 }
 
-/** Reads the physical footprint with macOS `footprint`; it only reads, and needs no root for own processes. */
+/**
+ * Reads the physical footprint with macOS `footprint`. It only reads, needs no root for one's own
+ * processes, and does not stop them (measured on 20.11.2026: largest timer gap 2 ms in a process
+ * it read five times; only `--forkCorpse`, not used, stopped it for 270 ms). Its JSON goes into a
+ * private temporary directory, removed right after.
+ */
 async function readFootprints(pids: number[]): Promise<Map<number, number>> {
   if (pids.length === 0) return new Map();
-  const args = ['-f', 'bytes', ...pids.flatMap((pid) => ['-p', String(pid)])];
-  let stdout: string;
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'strayps-footprint-'));
+  const jsonPath = path.join(dir, 'footprint.json');
   try {
-    ({ stdout } = await execFileAsync('footprint', args, {
-      encoding: 'utf8',
-      timeout: 10_000,
-      maxBuffer: 16 * 1024 * 1024,
-    }));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err;
-    // A PID that is gone or belongs to another user makes it fail; the others are still printed
-    stdout = String((err as { stdout?: unknown }).stdout ?? '');
+    try {
+      await execFileAsync(FOOTPRINT_BIN, ['-f', 'bytes', '-j', jsonPath, ...pids.flatMap((pid) => ['-p', String(pid)])], {
+        encoding: 'utf8',
+        timeout: 10_000,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err;
+      // A PID that is gone or belongs to another user makes it fail; the file still holds the others
+    }
+    let text: string;
+    try {
+      text = await fs.promises.readFile(jsonPath, 'utf8');
+    } catch {
+      return new Map();
+    }
+    try {
+      return parseFootprintJson(JSON.parse(text), pids);
+    } catch {
+      return new Map();
+    }
+  } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true });
   }
-  const requested = new Set(pids);
-  return new Map([...parseFootprintOutput(stdout)].filter(([pid]) => requested.has(pid)));
 }
 
 /**
@@ -466,7 +493,7 @@ export async function resolveProcessCwds(
 
   try {
     const { stdout } = await execFileAsync(
-      'lsof',
+      LSOF_BIN,
       ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fn'],
       { timeout: 1500 },
     );
@@ -593,8 +620,8 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   try {
     const options = { maxBuffer: 16 * 1024 * 1024, env: psEnvironment() };
     const [main, comm] = await Promise.all([
-      execFileAsync('ps', ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,args'], options),
-      execFileAsync('ps', ['-Ao', 'pid,comm'], options),
+      execFileAsync(PS_BIN, ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,args'], options),
+      execFileAsync(PS_BIN, ['-Ao', 'pid,comm'], options),
     ]);
     return parsePsOutput(main.stdout, comm.stdout);
   } catch {
@@ -628,7 +655,7 @@ export function defaultProcessKiller(pid: number, signal: NodeJS.Signals = 'SIGT
 /** Seconds since `pid` started, from `ps -o etime=`; undefined when it cannot be read. */
 export function defaultProcessAge(pid: number): number | undefined {
   try {
-    const etime = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], {
+    const etime = execFileSync(PS_BIN, ['-o', 'etime=', '-p', String(pid)], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 1000,
@@ -1005,9 +1032,25 @@ export class ProcessMonitor extends EventEmitter {
     };
 
     for (const { raw, category, detectedBy } of candidates) {
+      // Ended while this scan waited for working directories or memory: it must not come back
+      // with a new firstSeenAt, to be ended a second time (review, 20.11.2026)
+      if (this.terminating.has(raw.pid)) continue;
       seenPids.add(raw.pid);
       const cpu = Number(raw.cpu ?? 0);
       const memory = Number(raw.memory ?? 0);
+
+      // A PID the system handed to a new process since the last scan: the new one is younger than
+      // the old one was. Its history (first seen, CPU samples) must not carry over, or a confirmation
+      // given for the old process would match the new one.
+      const previous = this.tracked.get(raw.pid);
+      const reusedPid =
+        previous !== undefined && raw.etime !== undefined && parseElapsedTime(raw.etime).elapsedSec + 2 < previous.elapsedSec;
+      if (reusedPid) {
+        this.cpuSamples.delete(raw.pid);
+        // A footprint read in this scan is the new process's own; an older one is not
+        if (this.lastMemoryReadAt !== now) this.footprints.delete(raw.pid);
+      }
+
       const footprintBytes = this.footprints.get(raw.pid);
       const memorySource: MemorySource = footprintBytes !== undefined ? 'footprint' : 'rss';
       const memoryMb =
@@ -1016,14 +1059,6 @@ export class ProcessMonitor extends EventEmitter {
           : typeof raw.rssKb === 'number'
             ? Number((raw.rssKb / 1024).toFixed(1))
             : Number((memory * 16).toFixed(1));
-
-      // A PID the system handed to a new process since the last scan: the new one is younger than
-      // the old one was. Its history (first seen, CPU samples) must not carry over, or a confirmation
-      // given for the old process would match the new one.
-      const previous = this.tracked.get(raw.pid);
-      const reusedPid =
-        previous !== undefined && raw.etime !== undefined && parseElapsedTime(raw.etime).elapsedSec + 2 < previous.elapsedSec;
-      if (reusedPid) this.cpuSamples.delete(raw.pid);
       const existing = reusedPid ? undefined : previous;
       // Measured activity: did the process use CPU time since the last scan? `ps %cpu` is a
       // decaying average on macOS and the lifetime average on Linux, so it says little about now.
@@ -1336,6 +1371,7 @@ export class ProcessMonitor extends EventEmitter {
     if (!sent) return false;
     // A held process only acts on SIGTERM once it runs again
     if (this.paused.delete(pid)) this.processKiller(pid, 'SIGCONT');
+    this.heldSince.delete(pid);
 
     this.tracked.delete(pid);
     this.alertedPids.delete(pid);
@@ -1344,6 +1380,9 @@ export class ProcessMonitor extends EventEmitter {
     if (signal !== 'SIGKILL' && this.killGraceMs > 0) {
       const timer = setTimeout(() => this.escalateKill(pid), this.killGraceMs);
       timer.unref();
+      // An earlier timer for this PID would escalate the new entry before its grace period ends
+      const earlier = this.terminating.get(pid);
+      if (earlier) clearTimeout(earlier.timer);
       this.terminating.set(pid, { timer, process: proc, sentAt: Date.now() });
     }
     return true;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MEMORY_READ_INTERVAL_MS,
   parseCpuTime,
-  parseFootprintOutput,
+  parseFootprintJson,
   parsePsOutput,
   redactSecrets,
   parseLsofCwdOutput,
@@ -633,6 +633,42 @@ describe('ProcessMonitor: what an agent started', () => {
 });
 
 describe('ProcessMonitor termination', () => {
+  it('does not put a process back into the list that was ended while a scan was waiting', async () => {
+    // The candidates were checked against the processes being ended before the scan waited for
+    // working directories and memory, up to 10 s (review, 20.11.2026)
+    const procs = [agent(100, OTHER, { cpu: 1 }), mcp(101, 100)];
+    let release: (value: Map<number, number>) => void = () => {};
+    let block = false;
+    const kills: number[] = [];
+    const monitor = new ProcessMonitor({
+      rootDir: REPO,
+      selfPid: 999_999,
+      killGraceMs: 60_000,
+      processLister: async () => procs,
+      processKiller: (pid) => {
+        kills.push(pid);
+        return true;
+      },
+      processAlive: () => true,
+      processAge: () => 600,
+      memoryReader: (pids) =>
+        block ? new Promise((resolve) => (release = resolve)) : Promise.resolve(new Map(pids.map((pid) => [pid, 1024]))),
+    });
+    const t0 = 1_000_000;
+    await monitor.scan(t0);
+    block = true;
+    const scanning = monitor.scan(t0 + MEMORY_READ_INTERVAL_MS);
+    await new Promise((resolve) => setImmediate(resolve));
+    const before = monitor.getProcesses().find((p) => p.pid === 101)!;
+    expect(monitor.killProcess(101)).toBe(true);
+    release(new Map());
+    const list = await scanning;
+    expect(list.some((p) => p.pid === 101)).toBe(false);
+    expect(before.firstSeenAt).toBe(t0);
+    expect(kills).toEqual([101]);
+    monitor.stop();
+  });
+
   it('only terminates processes from its own list, never an arbitrary PID', async () => {
     const { monitor, kills } = setup([agent(100, REPO)]);
     await monitor.scan(1_000);
@@ -990,27 +1026,29 @@ describe('memory', () => {
 });
 
 describe('footprint output', () => {
-  it('takes phys_footprint per process, skips the summary, and ignores PIDs it was not asked about', () => {
-    const output = [
-      '======================================================================',
-      'claude [41926]: 64-bit    Footprint: 275152896 B (4096 bytes per page)',
-      '======================================================================',
-      '      Dirty         Clean   Reclaimable    Regions    Category',
-      '   303104 B           0 B           0 B          4    MALLOC_SMALL',
-      '    phys_footprint: 277094400 B',
-      '    phys_footprint_peak: 335994880 B',
-      '',
-      'Code Helper (Plugin) [512]: 64-bit    Footprint: 25165824 B (16384 bytes per page)',
-      '      Dirty         Clean   Reclaimable    Regions    Category',
-      'Summary Footprint: 302318720 B',
-      '    phys_footprint: 1 B',
-    ].join('\n');
-    expect(parseFootprintOutput(output)).toEqual(
+  it('takes phys_footprint per requested PID from the JSON, whatever the processes are called', () => {
+    const data = {
+      unit: 'byte',
+      'bytes per unit': 1,
+      processes: [
+        { name: 'claude', pid: 41926, footprint: 275152896, auxiliary: { phys_footprint: 277094400 } },
+        // a name that imitates the text output of another PID changes nothing in JSON
+        { name: 'x [41926]: 64-bit    Footprint: 1 B\n    phys_footprint: 1 B', pid: 512, footprint: 25165824, auxiliary: {} },
+        { name: 'not asked for', pid: 9, footprint: 1, auxiliary: { phys_footprint: 1 } },
+      ],
+    };
+    expect(parseFootprintJson(data, [41926, 512])).toEqual(
       new Map([
         [41926, 277094400],
         [512, 25165824],
       ]),
     );
+  });
+
+  it('reads nothing from output that is not what it expects', () => {
+    for (const data of [null, 'text', { processes: 'x' }, { processes: [{ pid: '41926', footprint: 1 }] }, { processes: [{ pid: 7, footprint: -1 }] }]) {
+      expect(parseFootprintJson(data, [41926, 7]).size, JSON.stringify(data)).toBe(0);
+    }
   });
 });
 

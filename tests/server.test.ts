@@ -46,8 +46,8 @@ describe('dashboard API: read-only', () => {
       'Content-Type': 'application/json',
     };
 
-    for (const route of ['/api/kill/100', '/api/kill/300', '/api/kill-frozen', '/api/pause', '/api/resume', '/api/rollback-file', '/api/status']) {
-      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    for (const route of ['/api/kill/100', '/api/kill/300', '/api/kill-frozen', '/api/pause', '/api/resume', '/api/rollback-file', '/api/status', '/', '/dashboard.css', '/nope']) {
+      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
         const res = await app.request(route, { method, headers: sameOrigin, body: method === 'DELETE' ? undefined : '{}' });
         expect(res.status, `${method} ${route}`).toBe(405);
       }
