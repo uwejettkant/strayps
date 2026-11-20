@@ -37,7 +37,7 @@
 
   <!-- Prompt Line -->
   <text x="64" y="112" class="mono" font-size="15" fill="#5BE49B">$</text>
-  <text x="82" y="112" class="mono" font-size="15" fill="#8FA197">npx agent-leash watch --mode balanced</text>
+  <text x="82" y="112" class="mono" font-size="15" fill="#8FA197">npx agent-leash</text>
 
   <!-- Main Headline -->
   <text x="64" y="176" class="mono" font-size="56" font-weight="700" fill="#F2F7F4" letter-spacing="-1.5">
@@ -46,25 +46,25 @@
 
   <!-- Subtitle -->
   <text x="64" y="216" class="sans" font-size="20" fill="#C9D6CE">
-    The runtime circuit breaker for autonomous AI coding agents &amp; local MCP servers.
+    Every AI coding agent and MCP server on your machine, in view. End the forgotten ones.
   </text>
 
   <!-- Feature Pills -->
   <g transform="translate(64, 244)">
     <rect x="0" y="0" width="250" height="36" rx="8" fill="#0B0F0D" stroke="#2E4237" />
     <circle cx="18" cy="18" r="4" fill="#5BE49B" />
-    <text x="32" y="23" class="mono" font-size="13" fill="#E4ECE7">60s Loop Circuit Breaker</text>
+    <text x="32" y="23" class="mono" font-size="13" fill="#E4ECE7">Agent &amp; MCP Process List</text>
 
     <rect x="266" y="0" width="246" height="36" rx="8" fill="#0B0F0D" stroke="#2E4237" />
     <circle cx="284" cy="18" r="4" fill="#5BE49B" />
-    <text x="298" y="23" class="mono" font-size="13" fill="#E4ECE7">.env &amp; Git Auto-Rollback</text>
+    <text x="298" y="23" class="mono" font-size="13" fill="#E4ECE7">Edit-Loop &amp; .env Alarms</text>
 
     <rect x="528" y="0" width="256" height="36" rx="8" fill="#0B0F0D" stroke="#2E4237" />
     <circle cx="546" cy="18" r="4" fill="#5BE49B" />
-    <text x="560" y="23" class="mono" font-size="13" fill="#E4ECE7">Zombie MCP Heartbeat</text>
+    <text x="560" y="23" class="mono" font-size="13" fill="#E4ECE7">End One Process at a Time</text>
 
-    <rect x="800" y="0" width="244" height="36" rx="8" fill="#3B0A0A" stroke="#EF4444" stroke-opacity="0.6" />
-    <circle cx="818" cy="18" r="4" fill="#EF4444" />
-    <text x="832" y="23" class="mono" font-size="13" font-weight="600" fill="#FCA5A5">1-Click Panic Rollback</text>
+    <rect x="800" y="0" width="244" height="36" rx="8" fill="#2A1D05" stroke="#F59E0B" stroke-opacity="0.6" />
+    <circle cx="818" cy="18" r="4" fill="#F59E0B" />
+    <text x="832" y="23" class="mono" font-size="13" font-weight="600" fill="#FCD34D">Pause &amp; Resume Agents</text>
   </g>
 </svg>
