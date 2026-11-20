@@ -276,7 +276,7 @@ console.log(dashboard.url);
 - The dashboard server binds to `127.0.0.1` and answers only when addressed as this machine.
 - Every state-changing request needs a token that is only handed to the dashboard page, and must come from that page's own origin. A web page in another tab cannot trigger anything.
 - Only processes from the monitored list can be terminated: one process, or one agent with the processes it started, exactly as the confirmation listed them; `pause` holds only the agents of the watched repository and the processes they started, and agent-leash continues them when it exits: by `exit`, Ctrl+C, SIGTERM, SIGHUP, SIGQUIT, or a crash in its own code. Ended by a signal it does not handle (`kill -9`, or a rarely used one such as SIGUSR2 or SIGALRM), or by a fatal error of Node itself (out of memory), it cannot run anything, and the held processes stay stopped: `kill -CONT <pid>` continues them. Only files inside the watched repository that changed in this session can be rolled back, and never through a symbolic or hard link. `.env*` files (any spelling, including `.envrc`) are never read, written or copied, and `.agentguard.json` is read only when it is a plain file.
-- File names and command lines are treated as untrusted text in the dashboard and in the terminal.
+- File names and command lines are treated as untrusted text in the dashboard and in the terminal. Values that look like secrets in command lines (`--token`, `--api-key`, `--password`, `API_KEY=…`, credentials in URLs) are shown as `[redacted]`.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
 - Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The watched agent can also edit `.agentguard.json`; a running agent-leash applies the edit and logs it as a warning. The dashboard loads nothing from another host: its styles are generated when the package is built and served by agent-leash itself. It needs a current browser (Chrome 111, Safari 16.4, Firefox 128 or newer).
 
@@ -325,7 +325,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 236 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 243 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

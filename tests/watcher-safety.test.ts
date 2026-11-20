@@ -221,6 +221,46 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(watcher.getRecentEvents()[0].message).toContain('symbolic link');
   });
 
+  it.skipIf(!isPosix)('removes a link an agent created in the session, and never what it points to', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'victim.txt': 'precious\n' });
+    writeFiles(repo, { 'src/a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+
+    fs.symlinkSync(path.join(outside, 'victim.txt'), path.join(repo, 'src/bad-link.ts'));
+    watcher.handleFileSystemEvent('add', 'src/bad-link.ts');
+    fs.linkSync(path.join(outside, 'victim.txt'), path.join(repo, 'src/hard.ts'));
+    watcher.handleFileSystemEvent('add', 'src/hard.ts');
+
+    expect(watcher.rollbackFile('src/bad-link.ts')).toBe(true);
+    expect(watcher.rollbackFile('src/hard.ts')).toBe(true);
+    expect(exists(repo, 'src/bad-link.ts')).toBe(false);
+    expect(exists(repo, 'src/hard.ts')).toBe(false);
+    expect(read(outside, 'victim.txt')).toBe('precious\n');
+    expect(watcher.getRecentEvents()[0].message).toContain('what it pointed to is untouched');
+    // nothing of the target was copied
+    const discardDir = watcher.getDiscardDir();
+    if (discardDir) expect(fs.readdirSync(discardDir, { recursive: true }).length).toBe(0);
+  });
+
+  it.skipIf(!isPosix)('does not crawl a directory link that leads outside, but keeps watching file links', () => {
+    // chokidar follows links: a link to ~ would have it crawl the whole home directory
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'deep/x.txt': 'x\n', '.env': 'SECRET=1\n' });
+    writeFiles(repo, { 'src/a.ts': 'a\n' });
+    fs.symlinkSync(outside, path.join(repo, 'ext'));
+    fs.symlinkSync(path.join(repo, 'src'), path.join(repo, 'src-alias'));
+    fs.symlinkSync(path.join(outside, '.env'), path.join(repo, '.env'));
+    const watcher = watcherFor(repo);
+
+    expect(watcher.shouldIgnorePath(path.join(repo, 'ext'))).toBe(true);
+    // a link to a directory inside the repository, and a link to a file, stay watched
+    expect(watcher.shouldIgnorePath(path.join(repo, 'src-alias'))).toBe(false);
+    expect(watcher.shouldIgnorePath(path.join(repo, '.env'))).toBe(false);
+  });
+
   it.skipIf(!isPosix)('never reads .env contents through a symlink with another name', () => {
     const repo = makeTmpDir();
     writeFiles(repo, { '.env': 'SECRET=from-env\n', 'src/keep.ts': 'k\n' });
@@ -257,7 +297,9 @@ describe('RepoWatcher rollback: what it may touch', () => {
       encoding: 'utf-8',
       timeout: 15_000,
     });
-    expect(output.trim()).toBe('refused');
+    // created in the session, so revert removes it; unlink never opens it, so nothing blocks
+    expect(output.trim()).toBe('rolled back');
+    expect(exists(repo, 'src/pipe')).toBe(false);
   });
 
   it.skipIf(!isPosix)('never writes to or reads another file through a hard link', () => {
@@ -322,6 +364,27 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(read(repo, 'shared/x.txt')).not.toContain('outside-secret');
   });
 
+  it('treats another spelling of an existing name as that file where the file system ignores case', () => {
+    // On macOS, a write to readme.md changes README.md; tracked under the other spelling, the file
+    // looked new, and a revert would have deleted README.md instead of restoring it
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'README.md': 'start\n' });
+    const caseInsensitive = fs.existsSync(path.join(repo, 'readme.md'));
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+
+    fs.writeFileSync(path.join(repo, 'readme.md'), 'changed\n');
+    watcher.handleFileSystemEvent('change', 'readme.md');
+    if (!caseInsensitive) {
+      // a case-sensitive file system: readme.md is a file of its own
+      expect(watcher.getModifiedFiles()).toEqual(['readme.md']);
+      return;
+    }
+    expect(watcher.getModifiedFiles()).toEqual(['README.md']);
+    expect(watcher.rollbackFile('readme.md')).toBe(true);
+    expect(fs.readdirSync(repo)).toContain('README.md');
+    expect(read(repo, 'README.md')).toBe('start\n');
+  });
+
   it('does not let another spelling of a name reach .env or an unchanged file', () => {
     // macOS file systems ignore case: ".ENV" opens .env, "readme.md" opens README.md
     const repo = makeTmpDir();
@@ -341,8 +404,14 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(read(repo, 'README.md')).toBe('readme\n');
     expect(read(repo, '.envrc')).toBe('export TOKEN=2\n');
     const messages = watcher.getRecentEvents().map((e) => e.message);
-    expect(messages).toContain('Could not roll back readme.md: it was not changed in this session, left untouched');
-    expect(messages).toContain("Could not roll back .ENV: it is a .env file; agent-leash never reads or writes those");
+    // where the file system ignores case, the refusal names the file as it is known
+    const caseInsensitive = fs.existsSync(path.join(repo, 'readme.md'));
+    expect(messages).toContain(
+      `Could not roll back ${caseInsensitive ? 'README.md' : 'readme.md'}: it was not changed in this session, left untouched`,
+    );
+    expect(messages).toContain(
+      `Could not roll back ${caseInsensitive ? '.env' : '.ENV'}: it is a .env file; agent-leash never reads or writes those`,
+    );
   });
 
   it.skipIf(!isPosix)('handles file names that contain backslashes, quotes and markup', () => {

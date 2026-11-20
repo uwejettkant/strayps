@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -92,6 +92,12 @@ export interface ProcessMonitorOptions {
    * the built-in killer, and to "already gone" when a custom `processKiller` is supplied.
    */
   processAlive?: (pid: number) => boolean;
+  /**
+   * Seconds since the process with this PID started, or undefined if unknown. Before SIGKILL the
+   * monitor checks that the PID still names the process it sent SIGTERM to. Defaults to `ps` with
+   * the built-in killer, and to "unknown" when a custom `processKiller` is supplied.
+   */
+  processAge?: (pid: number) => number | undefined;
   /** Time a process gets to exit after SIGTERM before SIGKILL is sent (default 3000 ms, 0 disables). */
   killGraceMs?: number;
   /** More program names to treat as coding agents (the `agents` setting); matched exactly. */
@@ -365,7 +371,26 @@ export async function resolveProcessCwds(
   return cwdMap;
 }
 
+/**
+ * Replaces secrets in a command line with [redacted]: values of flags named like a token, key,
+ * secret or password, VAR=value pairs named like that, and credentials in URLs. Command lines come
+ * from every process on the machine and are shown in the terminal, the dashboard and /api/status,
+ * where they end up in screenshots and logs. Recognition always uses the original command line.
+ */
+export function redactSecrets(cmd: string): string {
+  const secretName = '[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|api[-_]?key|access[-_]?key|private[-_]?key|auth|credential|bearer)[A-Za-z0-9_.-]*';
+  return cmd
+    .replace(new RegExp(`(--?${secretName})(=|\\s+)(?!-)(\\S+)`, 'gi'), '$1$2[redacted]')
+    .replace(new RegExp(`\\b(${secretName})=(\\S+)`, 'gi'), '$1=[redacted]')
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 [redacted]');
+}
+
 function formatReadableCmd(rawName: string, rawCmd: string): string {
+  return redactSecrets(readableCmd(rawName, rawCmd));
+}
+
+function readableCmd(rawName: string, rawCmd: string): string {
   const cmd = rawCmd.trim();
 
   if (
@@ -478,6 +503,21 @@ export function defaultProcessKiller(pid: number, signal: NodeJS.Signals = 'SIGT
   }
 }
 
+/** Seconds since `pid` started, from `ps -o etime=`; undefined when it cannot be read. */
+export function defaultProcessAge(pid: number): number | undefined {
+  try {
+    const etime = execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1000,
+      env: { ...process.env, LC_NUMERIC: 'C' },
+    }).trim();
+    return etime ? parseElapsedTime(etime).elapsedSec : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function defaultProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -500,6 +540,7 @@ export class ProcessMonitor extends EventEmitter {
   private processLister: () => Promise<RawProcessInfo[]>;
   private processKiller: (pid: number, signal?: NodeJS.Signals) => boolean;
   private processAlive: (pid: number) => boolean;
+  private processAge: (pid: number) => number | undefined;
   private cwdResolver: (pids: number[]) => Promise<Map<number, string>>;
   private agentNames: Set<string> = new Set();
 
@@ -518,7 +559,7 @@ export class ProcessMonitor extends EventEmitter {
   private lastFileActivityAt: number = Date.now();
   private scanInFlight: Promise<MonitoredProcess[]> | null = null;
   /** PIDs that received SIGTERM and are inside their grace period. */
-  private terminating: Map<number, { timer: NodeJS.Timeout; process: MonitoredProcess }> = new Map();
+  private terminating: Map<number, { timer: NodeJS.Timeout; process: MonitoredProcess; sentAt: number }> = new Map();
 
   constructor(options: ProcessMonitorOptions = {}) {
     super();
@@ -540,6 +581,7 @@ export class ProcessMonitor extends EventEmitter {
     this.processKiller = options.processKiller ?? defaultProcessKiller;
     this.processAlive =
       options.processAlive ?? (options.processKiller ? () => false : defaultProcessAlive);
+    this.processAge = options.processAge ?? (options.processKiller ? () => undefined : defaultProcessAge);
     this.cwdResolver =
       options.cwdResolver ??
       (options.processLister ? async () => new Map<number, string>() : resolveProcessCwds);
@@ -614,13 +656,13 @@ export class ProcessMonitor extends EventEmitter {
    */
   public recordFileActivity(now: number = Date.now()): void {
     this.lastFileActivityAt = now;
+    // A file change in the watched repository says something about its own processes only. It set
+    // every tracked process to ACTIVE, an orphan elsewhere too, which the next scan found frozen
+    // again: the same alarm every 2 seconds while an agent worked.
     for (const proc of this.tracked.values()) {
+      if (!proc.inWatchedRepo) continue;
       proc.lastActiveAt = now;
       proc.silenceSec = 0;
-      if (proc.status === 'FROZEN') {
-        proc.status = 'ACTIVE';
-        this.alertedPids.delete(proc.pid);
-      }
     }
   }
 
@@ -1102,7 +1144,7 @@ export class ProcessMonitor extends EventEmitter {
     if (signal !== 'SIGKILL' && this.killGraceMs > 0) {
       const timer = setTimeout(() => this.escalateKill(pid), this.killGraceMs);
       timer.unref();
-      this.terminating.set(pid, { timer, process: proc });
+      this.terminating.set(pid, { timer, process: proc, sentAt: Date.now() });
     }
     return true;
   }
@@ -1113,6 +1155,10 @@ export class ProcessMonitor extends EventEmitter {
     clearTimeout(pending.timer);
     this.terminating.delete(pid);
     if (!this.processAlive(pid)) return;
+    // The process may have exited on SIGTERM and the system handed its PID to a new one within the
+    // grace period: a process younger than our SIGTERM is not the one that was confirmed
+    const age = this.processAge(pid);
+    if (age !== undefined && age + 1 < (Date.now() - pending.sentAt) / 1000) return;
     if (this.processKiller(pid, 'SIGKILL')) {
       this.emit('process-killed', {
         pid,

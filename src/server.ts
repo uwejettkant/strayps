@@ -17,6 +17,8 @@ import { getVersion } from './version.js';
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 /** More processes than any agent session starts; a longer list is not a confirmation from the page. */
 const MAX_CONFIRMED_PROCESSES = 512;
+/** Dashboard tabs that may stream at the same time. */
+const MAX_EVENT_STREAMS = 16;
 
 export interface WatchdogServerDeps {
   rootDir: string;
@@ -289,8 +291,26 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
   });
 
   // Live SSE Event Stream
+  // The stream is read-only, but every open one holds a listener: a page in another tab could
+  // open hundreds. Only the dashboard's own origin may connect, and only a few at a time.
+  let openStreams = 0;
   app.get('/api/events', (c) => {
+    const fetchSite = c.req.header('sec-fetch-site');
+    if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+      return c.json({ error: 'Forbidden: cross-site request' }, 403);
+    }
+    if (openStreams >= MAX_EVENT_STREAMS) {
+      return c.json({ error: 'Too many open dashboard connections' }, 429);
+    }
+    openStreams += 1;
     return streamSSE(c, async (stream) => {
+      let counted = true;
+      const release = () => {
+        if (counted) {
+          counted = false;
+          openStreams -= 1;
+        }
+      };
       let open = true;
       const sendSnapshot = (snapshot: StatusSnapshot) => {
         if (!open) return;
@@ -307,6 +327,7 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
       stream.onAbort(() => {
         open = false;
         session.off('update', sendSnapshot);
+        release();
       });
 
       while (open) {
@@ -316,6 +337,7 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
         }
       }
       session.off('update', sendSnapshot);
+      release();
     });
   });
 

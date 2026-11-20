@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   parseCpuTime,
   parsePsOutput,
+  redactSecrets,
   parseLsofCwdOutput,
   ProcessMonitor,
   STALE_QUIET_SEC,
@@ -20,7 +21,10 @@ interface Setup {
   alive: Set<number>;
 }
 
-function setup(procs: RawProcessInfo[], options: { killGraceMs?: number; selfPid?: number } = {}): Setup {
+function setup(
+  procs: RawProcessInfo[],
+  options: { killGraceMs?: number; selfPid?: number; processAge?: (pid: number) => number | undefined } = {},
+): Setup {
   const kills: Setup['kills'] = [];
   const alive = new Set(procs.map((p) => p.pid));
   const table = [...procs];
@@ -34,6 +38,7 @@ function setup(procs: RawProcessInfo[], options: { killGraceMs?: number; selfPid
       return alive.has(pid);
     },
     processAlive: (pid) => alive.has(pid),
+    processAge: options.processAge,
   });
   return { monitor, kills, procs: table, alive };
 }
@@ -263,6 +268,23 @@ describe('ProcessMonitor classification (production rules)', () => {
     const [orphan] = await monitor.scan(t0 + 46_000);
     expect(orphan.status).toBe('FROZEN');
     expect(orphan.reason).toContain('its parent is gone');
+  });
+
+  it('raises the frozen alarm once, however many files change in the watched repository', async () => {
+    // Every file edit set all tracked processes to ACTIVE, an orphan elsewhere too; the next scan
+    // found it frozen again and raised the alarm again, every 2 seconds while an agent worked
+    const { monitor } = setup([mcp(70, 1, { pgid: 69, etime: '01:00:00', cwd: OTHER })]);
+    const alerts = vi.fn();
+    monitor.on('process-frozen', alerts);
+    const t0 = Date.now();
+    await monitor.scan(t0);
+    await monitor.scan(t0 + 46_000);
+    for (let i = 1; i <= 5; i++) {
+      monitor.recordFileActivity(t0 + 46_000 + i * 2000);
+      const [orphan] = await monitor.scan(t0 + 46_000 + i * 2000);
+      expect(orphan.status).toBe('FROZEN');
+    }
+    expect(alerts).toHaveBeenCalledTimes(1);
   });
 
   it('does not take an app started from the Dock or Finder for an orphan', async () => {
@@ -541,6 +563,25 @@ describe('ProcessMonitor termination', () => {
     );
   });
 
+  it('sends no SIGKILL when the PID belongs to a new process by the end of the grace period', async () => {
+    // The process exited on SIGTERM and the system gave its PID to another one within 3 s
+    vi.useFakeTimers();
+    let age = 3600;
+    const { monitor, kills } = setup([agent(100, REPO)], { processAge: () => age });
+    await monitor.scan(1_000);
+    monitor.killProcess(100);
+    age = 1;
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(kills).toEqual([{ pid: 100, signal: 'SIGTERM' }]);
+
+    // the same, older process still running: SIGKILL as before
+    const second = setup([agent(200, REPO)], { processAge: () => 3600 });
+    await second.monitor.scan(1_000);
+    second.monitor.killProcess(200);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(second.kills.map((k) => k.signal)).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
   it('settles pending terminations when the monitor stops', async () => {
     vi.useFakeTimers();
     const { monitor, kills } = setup([agent(100, REPO)]);
@@ -646,6 +687,21 @@ describe('ProcessMonitor pause and exit', () => {
     monitor.pauseTargets();
     monitor.resumePaused();
     expect(process.listeners('exit')).toHaveLength(before);
+  });
+});
+
+describe('secrets in command lines', () => {
+  it('shows command lines with token, key and password values and URL credentials redacted', async () => {
+    const { monitor } = setup([
+      mcp(70, 69, { cmd: 'node /x/node_modules/.bin/mcp-server-api --api-key sk-live-123 --token=abc API_SECRET=s3cr3t https://me:pw@example.com/x' }),
+    ]);
+    const [proc] = await monitor.scan(Date.now());
+    expect(proc.category).toBe('mcp');
+    expect(proc.cmd).not.toMatch(/sk-live-123|abc|s3cr3t|me:pw/);
+    expect(redactSecrets('tool --api-key sk-1 --password hunter2 --verbose')).toBe('tool --api-key [redacted] --password [redacted] --verbose');
+    expect(redactSecrets('git clone https://user:pw@github.com/a/b')).toBe('git clone https://[redacted]@github.com/a/b');
+    // flags that only look alike keep their value when it is another flag
+    expect(redactSecrets('node server --auth-mode -v')).toBe('node server --auth-mode -v');
   });
 });
 

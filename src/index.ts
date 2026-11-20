@@ -38,6 +38,7 @@ export {
   type MonitoredProcess,
   parseCpuTime,
   parsePsOutput,
+  redactSecrets,
   parseElapsedTime,
   type ProcessCategory,
   type ProcessHealthStatus,

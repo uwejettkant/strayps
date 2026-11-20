@@ -349,6 +349,31 @@ describe('dashboard page', () => {
     }
   });
 
+  it('streams only to its own page and only to a few tabs at a time', async () => {
+    const h = createHarness();
+    const { app } = appFor(h);
+    const crossSite = await app.request('/api/events', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+    expect(crossSite.status).toBe(403);
+
+    const readers = [];
+    for (let i = 0; i < 16; i++) {
+      const res = await app.request('/api/events', { headers: { 'Sec-Fetch-Site': 'same-origin' } });
+      expect(res.status).toBe(200);
+      const reader = res.body!.getReader();
+      await reader.read();
+      readers.push(reader);
+    }
+    expect((await app.request('/api/events')).status).toBe(429);
+
+    // a closed tab frees its place
+    await readers.pop()!.cancel();
+    await new Promise((r) => setTimeout(r, 20));
+    const again = await app.request('/api/events');
+    expect(again.status).toBe(200);
+    readers.push(again.body!.getReader());
+    for (const reader of readers) await reader.cancel();
+  });
+
   it('streams the current state to a connected dashboard', async () => {
     const h = createHarness({ files: { 'a.ts': 'a\n' } });
     h.watcher.createCheckpoint();
