@@ -677,6 +677,77 @@ describe('RepoWatcher rollback: bookkeeping', () => {
     expect(onHardStop).toHaveBeenCalledTimes(2);
   });
 
+  it('counts files against the limits since the last commit, so a long session is not red forever', () => {
+    // The count ran from the start of agent-leash: after a day of committed work it stayed at the
+    // hard stop and said nothing any more
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 4; i++) files[`f${i}.ts`] = 'original\n';
+    writeFiles(repo, files);
+    commitAll(repo);
+    const configManager = new GuardConfigManager(repo, {
+      limits: { maxFilesWarn: 2, maxFilesHardStop: 3, maxEditsPerFilePerMinute: 5, mcpSilenceTimeoutSec: 45 },
+    });
+    const watcher = watcherFor(repo, { configManager, keepDiscarded: false });
+    const onHardStop = vi.fn();
+    watcher.on('limit-hard-stop', onHardStop);
+
+    for (let i = 0; i < 3; i++) {
+      writeFiles(repo, { [`f${i}.ts`]: 'changed\n' });
+      watcher.handleFileSystemEvent('change', `f${i}.ts`);
+    }
+    expect(watcher.getLimitState()).toBe('hard-stop');
+    expect(onHardStop).toHaveBeenCalledTimes(1);
+
+    // two of the three are committed: only the third still counts
+    git(repo, 'add', 'f0.ts', 'f1.ts');
+    git(repo, 'commit', '-q', '-m', 'two files');
+    watcher.checkCommits();
+    expect(watcher.getUncommittedFiles()).toEqual(['f2.ts']);
+    expect(watcher.getLimitState()).toBe('ok');
+    expect(watcher.getRecentEvents()[0].message).toMatch(/^New commit [0-9a-f]{7}: 2 files committed, 1 changed file not committed$/);
+    // what changed in the session can still be reverted, committed or not
+    expect(watcher.getModifiedFiles().sort()).toEqual(['f0.ts', 'f1.ts', 'f2.ts']);
+    expect(watcher.rollbackFile('f0.ts')).toBe(true);
+    expect(read(repo, 'f0.ts')).toBe('original\n');
+
+    // a committed file that changes again counts again, and crossing the limit alarms again
+    writeFiles(repo, { 'f1.ts': 'changed again\n', 'f3.ts': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'f1.ts');
+    watcher.handleFileSystemEvent('change', 'f3.ts');
+    // f0.ts is back at its session-start version after the revert and counts no more
+    expect(watcher.getUncommittedFiles().sort()).toEqual(['f1.ts', 'f2.ts', 'f3.ts']);
+    expect(onHardStop).toHaveBeenCalledTimes(2);
+
+    // no new commit: nothing changes
+    const before = watcher.getUncommittedFiles();
+    watcher.checkCommits();
+    expect(watcher.getUncommittedFiles()).toEqual(before);
+  });
+
+  it('notices the first commit of a repository that had none', () => {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    writeFiles(repo, { 'a.ts': 'b\n' });
+    watcher.handleFileSystemEvent('change', 'a.ts');
+    commitAll(repo);
+    watcher.checkCommits();
+    expect(watcher.getUncommittedFiles()).toEqual([]);
+  });
+
+  it('counts since its own start where there is no git repository', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo);
+    writeFiles(repo, { 'a.ts': 'b\n' });
+    watcher.handleFileSystemEvent('change', 'a.ts');
+    watcher.checkCommits();
+    expect(watcher.getUncommittedFiles()).toEqual(['a.ts']);
+  });
+
   it('revert restores changed and deleted files and removes new ones, one at a time', () => {
     const repo = makeTmpDir();
     writeFiles(repo, { 'a.ts': 'a\n', 'b.ts': 'b\n', 'untouched.ts': 'same\n' });

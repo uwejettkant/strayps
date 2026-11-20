@@ -184,7 +184,7 @@ There are no modes to choose from: agent-leash always watches exactly by your se
 | :--- | :--- | :--- |
 | Protected files | `.env*`, `docker-compose*.yml` | A change raises a critical alarm; `revert` restores the file. `.env*` only warns, because agent-leash never reads its contents and so can never restore it |
 | Circuit breaker | more than 5 edits to one file within 60 seconds | One alarm per series of edits; `revert` restores the version before the series |
-| Modified files | warning at 15, hard-stop alarm at 40 | An alarm in the terminal view, the log and the dashboard. It does not stop the agent: a hard stop is an alarm, not a brake |
+| Uncommitted files | warning at 15, hard-stop alarm at 40 | Files changed and not committed yet: in a git repository a commit takes its files out of the count, so a long session with regular commits does not stay red (outside git, everything changed since agent-leash started counts). An alarm in the terminal view, the log and the dashboard. It does not stop the agent: a hard stop is an alarm, not a brake |
 
 Every value can be changed, see [Configuration](#configuration).
 
@@ -206,8 +206,8 @@ npx agent-leash init                         # or write a file with every defaul
 
 | Setting | Default | What it does |
 | :--- | :--- | :--- |
-| `limits.maxFilesWarn` | `15` | Files modified in this session before a warning |
-| `limits.maxFilesHardStop` | `40` | Files modified in this session before the hard-stop alarm |
+| `limits.maxFilesWarn` | `15` | Changed files not committed yet before a warning (outside git: changed since agent-leash started) |
+| `limits.maxFilesHardStop` | `40` | Changed files not committed yet before the hard-stop alarm (outside git: changed since agent-leash started) |
 | `limits.maxEditsPerFilePerMinute` | `5` | Edits to one file within 60 seconds before the circuit breaker raises an alarm |
 | `limits.mcpSilenceTimeoutSec` | `45` | Seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen |
 | `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale, if in ten minutes of watching it also started no new process and used less than 8 s of CPU time |
@@ -325,7 +325,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 230 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 236 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

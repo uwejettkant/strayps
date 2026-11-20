@@ -20,6 +20,7 @@ export type WatchEventType =
   | 'watch-error'
   | 'config-reload'
   | 'ignore-rules-changed'
+  | 'commit-detected'
   | 'process-alert'
   | 'process-recovered'
   | 'process-killed'
@@ -307,6 +308,14 @@ export class RepoWatcher extends EventEmitter {
   /** Every path that existed at session start, including files we hold no copy of. */
   private existedAtStart: Set<string> = new Set();
   private modifiedFiles: Set<string> = new Set();
+  /**
+   * Changed files that a commit made since then contains as they are now. They stay revertable
+   * (modifiedFiles) but no longer count against the limits: counted from the start of
+   * agent-leash, a long session with regular commits stayed at the hard stop for good.
+   */
+  private committedFiles: Set<string> = new Set();
+  /** HEAD at the last commit check ('' before the first commit); null outside a git work tree. */
+  private lastHead: string | null = null;
   private ownWrites: Map<string, OwnWrite> = new Map();
   private checkpoint: CheckpointInfo | null = null;
   private checkpointSha: string | null = null;
@@ -345,6 +354,74 @@ export class RepoWatcher extends EventEmitter {
 
   public getModifiedFiles(): string[] {
     return Array.from(this.modifiedFiles);
+  }
+
+  /** True when the limits count since the last commit (a git work tree), false when since the start. */
+  public countsSinceCommit(): boolean {
+    return this.lastHead !== null;
+  }
+
+  /** Changed files that are not committed as they are now: what the limits count. */
+  public getUncommittedFiles(): string[] {
+    return Array.from(this.modifiedFiles).filter((f) => !this.committedFiles.has(f));
+  }
+
+  private uncommittedCount(): number {
+    let count = 0;
+    for (const f of this.modifiedFiles) if (!this.committedFiles.has(f)) count++;
+    return count;
+  }
+
+  /**
+   * Notices a new commit (HEAD moved) and takes the changed files it contains out of the count.
+   * Called every 3 s by the health check; outside git, and in the demo, it does nothing.
+   */
+  public checkCommits(): void {
+    if (this.dryRun || this.lastHead === null) return;
+    let head: string;
+    try {
+      head = this.git(['rev-parse', 'HEAD']);
+    } catch {
+      return;
+    }
+    if (head === this.lastHead) return;
+    this.lastHead = head;
+    if (this.modifiedFiles.size === 0) return;
+
+    let dirty: Set<string>;
+    try {
+      const list = (args: string[]) =>
+        execFileSync('git', args, {
+          cwd: this.rootDir,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          encoding: 'utf-8',
+          maxBuffer: GIT_LIST_MAX_BUFFER,
+          timeout: GIT_LIST_TIMEOUT_MS,
+        })
+          .split('\0')
+          .filter((entry) => entry.length > 0);
+      // Paths relative to the watched directory, like everything else here
+      dirty = new Set([
+        ...list(['diff', '--relative', '--name-only', '-z', 'HEAD']),
+        ...list(['ls-files', '--others', '--exclude-standard', '-z']),
+      ]);
+    } catch {
+      return;
+    }
+    const before = this.uncommittedCount();
+    this.committedFiles = new Set(Array.from(this.modifiedFiles).filter((f) => !dirty.has(f)));
+    const after = this.uncommittedCount();
+    const committedNow = before - after;
+    if (committedNow > 0) {
+      const files = (n: number) => `${n} file${n === 1 ? '' : 's'}`;
+      this.recordActivity({
+        type: 'commit-detected',
+        message: `New commit ${head.slice(0, 7)}: ${files(committedNow)} committed, ${after} changed file${after === 1 ? '' : 's'} not committed`,
+        severity: 'info',
+      });
+    }
+    // Below a limit again: crossing it later raises the alarm again
+    this.lastLimitState = this.configManager.evaluateFileLimit(after);
   }
 
   public getRecentEvents(limit: number = 100): WatchActivityEvent[] {
@@ -401,7 +478,10 @@ export class RepoWatcher extends EventEmitter {
     // Without a permanent listener a late watcher error (EMFILE, EPERM, ...) would crash the process.
     this.watcher.on('error', (err) => this.reportWatchError(err));
 
-    this.rootCheckTimer = setInterval(() => this.checkHealth(), 3000);
+    this.rootCheckTimer = setInterval(() => {
+      this.checkHealth();
+      this.checkCommits();
+    }, 3000);
     this.rootCheckTimer.unref();
 
     return checkpoint;
@@ -445,6 +525,8 @@ export class RepoWatcher extends EventEmitter {
 
     this.gitIgnore = this.readGitIgnore();
     this.captureDirectorySnapshot(this.rootDir);
+    this.committedFiles.clear();
+    this.lastHead = null;
 
     let type: CheckpointInfo['type'] = 'memory-snapshot';
     let ref = `snap-${Date.now().toString(36)}`;
@@ -454,6 +536,13 @@ export class RepoWatcher extends EventEmitter {
 
       if (insideGit === 'true') {
         this.isGitRepo = true;
+        try {
+          this.lastHead = this.git(['rev-parse', 'HEAD']);
+        } catch {
+          // A repository without commits yet: its first commit is a change of HEAD too. This
+          // stays set when the checkpoint below falls back to a memory snapshot.
+          this.lastHead = '';
+        }
         // Try creating an invisible git stash commit object (leaves working tree untouched)
         const stashSha = this.git(['stash', 'create']);
 
@@ -846,6 +935,8 @@ export class RepoWatcher extends EventEmitter {
     this.loopDetector.setMaxEditsPerFilePerMinute(cfg.limits.maxEditsPerFilePerMinute);
 
     this.modifiedFiles.add(relPath);
+    // Changed again after a commit: it counts again
+    this.committedFiles.delete(relPath);
     this.trackChange(relPath, now);
 
     // 1. Protected files: an alarm, never an automatic rollback
@@ -901,15 +992,16 @@ export class RepoWatcher extends EventEmitter {
     this.emit('file-edit', editEvent);
 
     // 4. Check file count limits (warn / hard-stop)
-    const limitState = this.configManager.evaluateFileLimit(this.modifiedFiles.size);
+    const counted = this.uncommittedCount();
+    const limitState = this.configManager.evaluateFileLimit(counted);
     if (limitState !== 'ok' && limitState !== this.lastLimitState) {
       this.lastLimitState = limitState;
       if (limitState === 'warn') {
         const warnEvent = this.recordActivity({
           type: 'limit-warn',
           filePath: relPath,
-          modifiedFilesCount: this.modifiedFiles.size,
-          message: `Warning: ${this.modifiedFiles.size} files modified (warn threshold: ${cfg.limits.maxFilesWarn})`,
+          modifiedFilesCount: counted,
+          message: `Warning: ${counted} ${this.lastHead !== null ? 'uncommitted ' : ''}files modified (warn threshold: ${cfg.limits.maxFilesWarn})`,
           severity: 'warn',
           timestamp: now,
         });
@@ -918,8 +1010,8 @@ export class RepoWatcher extends EventEmitter {
         const stopEvent = this.recordActivity({
           type: 'limit-hard-stop',
           filePath: relPath,
-          modifiedFilesCount: this.modifiedFiles.size,
-          message: `HARD STOP: ${this.modifiedFiles.size} files modified (limit ${cfg.limits.maxFilesHardStop})`,
+          modifiedFilesCount: counted,
+          message: `HARD STOP: ${counted} ${this.lastHead !== null ? 'uncommitted ' : ''}files modified (limit ${cfg.limits.maxFilesHardStop})`,
           severity: 'critical',
           timestamp: now,
         });
@@ -975,7 +1067,8 @@ export class RepoWatcher extends EventEmitter {
     // A file restored to a version from the middle of the session still differs from the start
     if (outcome.ok && outcome.backAtStart) {
       this.modifiedFiles.delete(relPath);
-      this.lastLimitState = this.configManager.evaluateFileLimit(this.modifiedFiles.size);
+      this.committedFiles.delete(relPath);
+      this.lastLimitState = this.configManager.evaluateFileLimit(this.uncommittedCount());
     }
     return { relPath, outcome };
   }

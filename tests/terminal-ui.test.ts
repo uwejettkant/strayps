@@ -287,6 +287,15 @@ describe('full-screen frame', () => {
     };
   }
 
+  it('shows how many files the limits count, since the last commit in a git repository', async () => {
+    const h = await busyHarness();
+    const base = h.session.getSnapshot();
+    const frame = renderFrame(viewFor(h, { snapshot: { ...base, uncommittedFiles: ['src/app.ts'], countsSinceCommit: true } }));
+    expect(frame.lines.join('\n')).toContain('1 uncommitted');
+    const plain = renderFrame(viewFor(h, { snapshot: { ...base, countsSinceCommit: false } }));
+    expect(plain.lines.join('\n')).toContain(`${base.uncommittedFiles.length} modified`);
+  });
+
   it('shows what the dashboard shows: files, breaker, events and processes', async () => {
     const h = await busyHarness();
     const frame = renderFrame(viewFor(h));

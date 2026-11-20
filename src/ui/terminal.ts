@@ -96,12 +96,13 @@ function metricCells(view: FrameView): Seg[][] {
   const { config } = snapshot;
   const totals = processTotals(snapshot.processes);
 
-  const fileCount = snapshot.modifiedFiles.length;
+  // What the limits count: since the last commit in a git repository
+  const fileCount = snapshot.uncommittedFiles.length;
   const filesStyle =
     snapshot.limitState === 'hard-stop' ? p.danger : snapshot.limitState === 'warn' ? p.warn : p.strong;
   const files: Seg[] = [
     seg(' FILES      ', p.dim),
-    seg(`${fileCount} modified`, filesStyle),
+    seg(`${fileCount} ${snapshot.countsSinceCommit ? 'uncommitted' : 'modified'}`, filesStyle),
     snapshot.limitState === 'hard-stop'
       ? seg('  HARD STOP limit reached', p.danger)
       : seg(`  warn ${config.limits.maxFilesWarn} · stop ${config.limits.maxFilesHardStop}`, p.dim),
@@ -147,7 +148,7 @@ function compactMetrics(view: FrameView): Seg[] {
   const fileStyle =
     snapshot.limitState === 'hard-stop' ? p.danger : snapshot.limitState === 'warn' ? p.warn : p.plain;
   return [
-    seg(` ${snapshot.modifiedFiles.length} files`, fileStyle),
+    seg(` ${snapshot.uncommittedFiles.length} files`, fileStyle),
     snapshot.limitState === 'hard-stop' ? seg(' HARD STOP', p.danger) : seg(''),
     seg(' · '),
     snapshot.trippedFiles.length > 0

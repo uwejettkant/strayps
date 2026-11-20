@@ -1,7 +1,7 @@
 import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StatusSnapshot } from '../src/core/session.js';
-import { cleanupTmpDirs, createHarness, exists, read, writeFiles } from './helpers/harness.js';
+import { cleanupTmpDirs, commitAll, createHarness, exists, initGitRepo, read, writeFiles } from './helpers/harness.js';
 
 afterEach(() => {
   cleanupTmpDirs();
@@ -51,6 +51,26 @@ describe('WatchdogSession', () => {
     writeFiles(h.dir, { '.agentguard.json': JSON.stringify({ limits: { maxFilesWarn: 10, maxFilesHardStop: 12 } }) });
     h.session.reloadConfig();
     expect(h.session.getSnapshot().limitState).toBe('hard-stop');
+  });
+
+  it('counts the limits since the last commit and shows both lists to every front end', () => {
+    const h = createHarness({ files: { 'a.ts': 'a\n', 'b.ts': 'b\n', 'c.ts': 'c\n' }, config: { limits: { maxFilesWarn: 2, maxFilesHardStop: 3 } } });
+    initGitRepo(h.dir);
+    commitAll(h.dir);
+    h.watcher.createCheckpoint();
+    for (const name of ['a.ts', 'b.ts', 'c.ts']) {
+      writeFiles(h.dir, { [name]: 'changed\n' });
+      h.watcher.handleFileSystemEvent('change', name);
+    }
+    expect(h.session.getSnapshot()).toMatchObject({ limitState: 'hard-stop', countsSinceCommit: true });
+
+    commitAll(h.dir, 'work');
+    h.watcher.checkCommits();
+    const snapshot = h.session.getSnapshot();
+    expect(snapshot.uncommittedFiles).toEqual([]);
+    expect(snapshot.modifiedFiles.sort()).toEqual(['a.ts', 'b.ts', 'c.ts']);
+    expect(snapshot.limitState).toBe('ok');
+    expect(snapshot.events[0]).toMatchObject({ type: 'commit-detected', severity: 'info' });
   });
 
   it('terminates only monitored processes and says why it refuses', async () => {

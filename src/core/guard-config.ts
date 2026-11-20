@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export interface GuardLimits {
-  /** Files modified in this session before a warning. */
+  /** Changed files not committed yet (outside git: changed since the start) before a warning. */
   maxFilesWarn: number;
-  /** Files modified in this session before the hard-stop alarm. */
+  /** Changed files not committed yet (outside git: changed since the start) before the hard-stop alarm. */
   maxFilesHardStop: number;
   /** Edits to one file within 60 seconds before the circuit breaker raises an alarm. */
   maxEditsPerFilePerMinute: number;
@@ -75,8 +75,8 @@ function isProgramName(value: unknown): value is string {
 
 /** What each setting does. Shown by `agent-leash config`; the README table mirrors it. */
 export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
-  'limits.maxFilesWarn': 'files modified in this session before a warning',
-  'limits.maxFilesHardStop': 'files modified in this session before the hard-stop alarm',
+  'limits.maxFilesWarn': 'changed files not committed yet before a warning (outside git: changed since agent-leash started)',
+  'limits.maxFilesHardStop': 'changed files not committed yet before the hard-stop alarm (outside git: changed since agent-leash started)',
   'limits.maxEditsPerFilePerMinute': 'edits to one file within 60 s before the circuit breaker raises an alarm',
   'limits.mcpSilenceTimeoutSec': 'seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen',
   'limits.staleSessionHours': 'hours after which a session in another repository counts as stale, if it is also idle for ten minutes (no new process, under 8 s CPU time)',

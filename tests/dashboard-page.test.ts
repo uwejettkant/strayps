@@ -384,6 +384,15 @@ describe('dashboard page', () => {
     }
   });
 
+  it('shows the count the limits use: uncommitted files, in a git repository', () => {
+    const { api, getElementById } = loadDashboard();
+    api.renderStatus(stateWith({ modifiedFiles: ['a.ts', 'b.ts', 'c.ts'], uncommittedFiles: ['c.ts'], countsSinceCommit: true }));
+    expect(getElementById('metric-files').textContent).toBe('1');
+    expect(getElementById('metric-files-title').textContent).toBe('uncommitted files');
+    api.renderStatus(stateWith({ modifiedFiles: ['a.ts'], uncommittedFiles: ['a.ts'], countsSinceCommit: false }));
+    expect(getElementById('metric-files-title').textContent).toBe('modified files');
+  });
+
   it('shows the hard stop instead of the usual limits', () => {
     const { api, getElementById } = loadDashboard();
     api.renderStatus(stateWith({ limitState: 'hard-stop', modifiedFiles: new Array(41).fill('f.ts') }));

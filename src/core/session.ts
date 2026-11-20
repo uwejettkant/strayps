@@ -31,7 +31,12 @@ export interface StatusSnapshot {
   rootDir: string;
   config: GuardConfig;
   checkpoint: CheckpointInfo | null;
+  /** Files changed in this session (revertable), committed or not. */
   modifiedFiles: string[];
+  /** The changed files the limits count: since the last commit in a git repository, else all. */
+  uncommittedFiles: string[];
+  /** True when the count runs since the last commit, false when since agent-leash started. */
+  countsSinceCommit: boolean;
   trippedFiles: string[];
   limitState: 'ok' | 'warn' | 'hard-stop';
   events: WatchActivityEvent[];
@@ -194,6 +199,7 @@ export class WatchdogSession extends EventEmitter {
     const config = this.configManager.getConfig();
     const processes = this.processMonitor.getProcesses();
     const modifiedFiles = this.watcher.getModifiedFiles();
+    const uncommittedFiles = this.watcher.getUncommittedFiles();
     const events = [...this.sessionEvents, ...this.watcher.getRecentEvents(MAX_SNAPSHOT_EVENTS)]
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, MAX_SNAPSHOT_EVENTS);
@@ -203,8 +209,10 @@ export class WatchdogSession extends EventEmitter {
       config,
       checkpoint: this.watcher.getCheckpoint(),
       modifiedFiles,
+      uncommittedFiles,
+      countsSinceCommit: this.watcher.countsSinceCommit(),
       trippedFiles: this.watcher.loopDetector.getTrippedFiles(),
-      limitState: this.configManager.evaluateFileLimit(modifiedFiles.length),
+      limitState: this.configManager.evaluateFileLimit(uncommittedFiles.length),
       events,
       processes,
       sessionMembers: this.sessionMembersOf(processes),
