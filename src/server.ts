@@ -292,26 +292,32 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
 
   // Live SSE Event Stream
   // The stream is read-only, but every open one holds a listener: a page in another tab could
-  // open hundreds. Only the dashboard's own origin may connect, and only a few at a time.
-  let openStreams = 0;
+  // open hundreds. Only the dashboard's own origin may connect, and only a few at a time. When all
+  // places are taken, the oldest stream is closed instead of refusing the new one: refusing let
+  // any local process that held the places lock the dashboard out.
+  const openStreams = new Set<() => void>();
+  session.setMaxListeners(MAX_EVENT_STREAMS + 10);
   app.get('/api/events', (c) => {
     const fetchSite = c.req.header('sec-fetch-site');
     if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
       return c.json({ error: 'Forbidden: cross-site request' }, 403);
     }
-    if (openStreams >= MAX_EVENT_STREAMS) {
-      return c.json({ error: 'Too many open dashboard connections' }, 429);
-    }
-    openStreams += 1;
     return streamSSE(c, async (stream) => {
-      let counted = true;
-      const release = () => {
-        if (counted) {
-          counted = false;
-          openStreams -= 1;
-        }
-      };
       let open = true;
+      const close = () => {
+        open = false;
+        session.off('update', sendSnapshot);
+        openStreams.delete(close);
+        void stream.close();
+      };
+      const release = () => {
+        openStreams.delete(close);
+      };
+      if (openStreams.size >= MAX_EVENT_STREAMS) {
+        const oldest = openStreams.values().next().value;
+        oldest?.();
+      }
+      openStreams.add(close);
       const sendSnapshot = (snapshot: StatusSnapshot) => {
         if (!open) return;
         void stream

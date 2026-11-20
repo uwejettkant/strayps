@@ -349,7 +349,7 @@ describe('dashboard page', () => {
     }
   });
 
-  it('streams only to its own page and only to a few tabs at a time', async () => {
+  it('streams only to its own page, and a new tab replaces the oldest stream when all places are taken', async () => {
     const h = createHarness();
     const { app } = appFor(h);
     const crossSite = await app.request('/api/events', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
@@ -363,15 +363,15 @@ describe('dashboard page', () => {
       await reader.read();
       readers.push(reader);
     }
-    expect((await app.request('/api/events')).status).toBe(429);
-
-    // a closed tab frees its place
-    await readers.pop()!.cancel();
-    await new Promise((r) => setTimeout(r, 20));
-    const again = await app.request('/api/events');
-    expect(again.status).toBe(200);
-    readers.push(again.body!.getReader());
-    for (const reader of readers) await reader.cancel();
+    // a 17th connection, say the dashboard after another process took all places: it gets in,
+    // and the oldest stream ends instead
+    const latest = await app.request('/api/events');
+    expect(latest.status).toBe(200);
+    const latestReader = latest.body!.getReader();
+    await latestReader.read();
+    expect((await readers[0].read()).done).toBe(true);
+    expect(h.session.listenerCount('update')).toBeLessThanOrEqual(16 + 1);
+    for (const reader of [...readers.slice(1), latestReader]) await reader.cancel();
   });
 
   it('streams the current state to a connected dashboard', async () => {

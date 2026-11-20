@@ -256,9 +256,27 @@ describe('RepoWatcher rollback: what it may touch', () => {
     const watcher = watcherFor(repo);
 
     expect(watcher.shouldIgnorePath(path.join(repo, 'ext'))).toBe(true);
+    // unless a protected glob names that directory: its files still raise alarms
+    const protecting = watcherFor(repo, { configManager: new GuardConfigManager(repo, { protectedFiles: ['ext/**'] }) });
+    expect(protecting.shouldIgnorePath(path.join(repo, 'ext'))).toBe(false);
     // a link to a directory inside the repository, and a link to a file, stay watched
     expect(watcher.shouldIgnorePath(path.join(repo, 'src-alias'))).toBe(false);
     expect(watcher.shouldIgnorePath(path.join(repo, '.env'))).toBe(false);
+  });
+
+  it.skipIf(!isPosix)('treats a file reached through an alias directory as the real file', () => {
+    // .claude/skills links to .agents/skills: under the alias, a file that existed at the start
+    // looked new, and a revert would have deleted the real one
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'real/x.md': 'start\n' });
+    fs.symlinkSync(path.join(repo, 'real'), path.join(repo, 'alias'));
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+
+    writeFiles(repo, { 'alias/x.md': 'changed\n' });
+    watcher.handleFileSystemEvent('change', 'alias/x.md');
+    expect(watcher.getModifiedFiles()).toEqual(['real/x.md']);
+    expect(watcher.rollbackFile('alias/x.md')).toBe(true);
+    expect(read(repo, 'real/x.md')).toBe('start\n');
   });
 
   it.skipIf(!isPosix)('never reads .env contents through a symlink with another name', () => {
@@ -278,8 +296,9 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(read(repo, 'src/tmp.txt')).not.toContain('SECRET');
   });
 
-  it.skipIf(!isPosix)('is not blocked by a FIFO an agent creates in the repository', () => {
-    // Opening a FIFO for reading waits for a writer; it froze the whole watchdog, signals included
+  it.skipIf(!isPosix)('is not blocked by a FIFO, and never removes one that was there at the start', () => {
+    // Opening a FIFO for reading waits for a writer; it froze the whole watchdog, signals included.
+    // A FIFO or socket that existed before the session (a dev server's socket) is never removed.
     const repo = makeTmpDir();
     writeFiles(repo, { 'src/a.ts': 'a\n' });
     execFileSync('mkfifo', [path.join(repo, 'src/pipe')]);
@@ -287,19 +306,52 @@ describe('RepoWatcher rollback: what it may touch', () => {
     const script = `
       const mod = await import(${JSON.stringify(watcherModule)});
       const RepoWatcher = mod.RepoWatcher ?? mod.default.RepoWatcher;
+      const { execFileSync } = await import('node:child_process');
       const watcher = new RepoWatcher({ rootDir: ${JSON.stringify(repo)}, keepDiscarded: false });
       watcher.createCheckpoint();
-      watcher.handleFileSystemEvent('add', 'src/pipe');
       watcher.handleFileSystemEvent('change', 'src/pipe');
-      console.log(watcher.rollbackFile('src/pipe') ? 'rolled back' : 'refused');
+      const existing = watcher.rollbackFile('src/pipe') ? 'removed' : 'refused';
+      execFileSync('mkfifo', [${JSON.stringify(path.join(repo, 'src/new-pipe'))}]);
+      watcher.handleFileSystemEvent('add', 'src/new-pipe');
+      const created = watcher.rollbackFile('src/new-pipe') ? 'removed' : 'refused';
+      console.log(existing + ' ' + created);
     `;
     const output = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
       encoding: 'utf-8',
       timeout: 15_000,
     });
-    // created in the session, so revert removes it; unlink never opens it, so nothing blocks
-    expect(output.trim()).toBe('rolled back');
-    expect(exists(repo, 'src/pipe')).toBe(false);
+    expect(output.trim()).toBe('refused removed');
+    expect(fs.lstatSync(path.join(repo, 'src/pipe')).isFIFO()).toBe(true);
+    expect(exists(repo, 'src/new-pipe')).toBe(false);
+  });
+
+  it('refuses to roll back a path that became a directory, without ending the watchdog', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    writeFiles(repo, { out: 'x\n' });
+    watcher.handleFileSystemEvent('add', 'out');
+    fs.rmSync(path.join(repo, 'out'));
+    fs.mkdirSync(path.join(repo, 'out'));
+    expect(() => watcher.rollbackFile('out')).not.toThrow();
+    expect(fs.statSync(path.join(repo, 'out')).isDirectory()).toBe(true);
+    expect(watcher.getRecentEvents()[0].message).toContain('it is a directory now');
+  });
+
+  it.skipIf(!isPosix)('never deletes what replaced a directory link that was there at the start', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'guide.md': 'g\n' });
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    fs.symlinkSync(outside, path.join(repo, 'docs'));
+    const watcher = watcherFor(repo);
+
+    // the agent replaces the link with a plain file of the same name
+    fs.rmSync(path.join(repo, 'docs'));
+    writeFiles(repo, { docs: 'now a file\n' });
+    watcher.handleFileSystemEvent('add', 'docs');
+    expect(watcher.rollbackFile('docs')).toBe(false);
+    expect(read(repo, 'docs')).toBe('now a file\n');
   });
 
   it.skipIf(!isPosix)('never writes to or reads another file through a hard link', () => {
@@ -383,6 +435,31 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(watcher.rollbackFile('readme.md')).toBe(true);
     expect(fs.readdirSync(repo)).toContain('README.md');
     expect(read(repo, 'README.md')).toBe('start\n');
+  });
+
+  it('learns a spelling from the file system, never from a refused revert', () => {
+    const repo = makeTmpDir();
+    writeFiles(repo, { 'a.ts': 'a\n' });
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    const onProtected = vi.fn();
+    watcher.on('protected-file', onProtected);
+    expect(watcher.rollbackFile('Docker-Compose.yml')).toBe(false);
+    writeFiles(repo, { 'docker-compose.yml': 'v1\n' });
+    watcher.handleFileSystemEvent('add', 'docker-compose.yml');
+    expect(watcher.getModifiedFiles()).toEqual(['docker-compose.yml']);
+    expect(onProtected).toHaveBeenCalledTimes(1);
+  });
+
+  it('detects whether case matters from a file inside the repository', () => {
+    // a repository whose own name has no letters, like ~/code/2024
+    const parent = makeTmpDir();
+    const repo = path.join(parent, '2024');
+    writeFiles(repo, { 'README.md': 'start\n' });
+    const caseInsensitive = fs.existsSync(path.join(repo, 'readme.md'));
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    fs.writeFileSync(path.join(repo, 'readme.md'), 'changed\n');
+    watcher.handleFileSystemEvent('change', 'readme.md');
+    expect(watcher.getModifiedFiles()).toEqual([caseInsensitive ? 'README.md' : 'readme.md']);
   });
 
   it('does not let another spelling of a name reach .env or an unchanged file', () => {
@@ -499,6 +576,18 @@ describe('RepoWatcher and .gitignore', () => {
     expect(watcher.getModifiedFiles()).toEqual([]);
     expect(watcher.rollbackFile('data/app.sqlite')).toBe(false);
     expect(read(repo, 'data/app.sqlite')).toBe('db v13');
+  });
+
+  it.skipIf(!isPosix)('notices ignore rules put in place as a link, without reading through an in-repo link', () => {
+    const repo = ignoredRepo();
+    const outside = makeTmpDir('agent-leash-outside-');
+    writeFiles(outside, { rules: '*.gen\n' });
+    const watcher = watcherFor(repo);
+    // .git/info/exclude did not change, but a .gitignore in a subdirectory appears as a link
+    fs.symlinkSync(path.join(outside, 'rules'), path.join(repo, 'src/.gitignore'));
+    writeFiles(repo, { 'src/b.gen': 'x\n' });
+    watcher.handleFileSystemEvent('add', 'src/b.gen');
+    expect(watcher.getModifiedFiles()).toContain('src/b.gen');
   });
 
   it('ignores a file created during the session when git ignores it', () => {

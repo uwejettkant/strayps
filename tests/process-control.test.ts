@@ -287,6 +287,17 @@ describe('ProcessMonitor classification (production rules)', () => {
     expect(alerts).toHaveBeenCalledTimes(1);
   });
 
+  it('lets file activity in the watched repository reset only its own processes', async () => {
+    const { monitor } = setup([agent(100, REPO, { cpuTimeSec: 1 }), agent(200, OTHER, { cpuTimeSec: 1 })]);
+    const t0 = Date.now();
+    await monitor.scan(t0);
+    await monitor.scan(t0 + 60_000);
+    monitor.recordFileActivity(t0 + 60_000);
+    const list = await monitor.scan(t0 + 62_000);
+    expect(list.find((p) => p.pid === 100)!.silenceSec).toBe(2);
+    expect(list.find((p) => p.pid === 200)!.silenceSec).toBeGreaterThanOrEqual(62);
+  });
+
   it('does not take an app started from the Dock or Finder for an orphan', async () => {
     // On macOS launchd (PID 1) is the parent of every app it starts, and makes each one the
     // leader of its own process group. A process whose parent died keeps its old group.
@@ -702,6 +713,13 @@ describe('secrets in command lines', () => {
     expect(redactSecrets('git clone https://user:pw@github.com/a/b')).toBe('git clone https://[redacted]@github.com/a/b');
     // flags that only look alike keep their value when it is another flag
     expect(redactSecrets('node server --auth-mode -v')).toBe('node server --auth-mode -v');
+    // only where a flag starts: a path that contains "auth" keeps the word after it
+    expect(redactSecrets('/srv/mcp-auth-proxy.js /Users/x/repoA')).toBe('/srv/mcp-auth-proxy.js /Users/x/repoA');
+    expect(redactSecrets('node --no-auth server.js')).toBe('node --no-auth server.js');
+    expect(redactSecrets('tool --key abc --openai-key def')).toBe('tool --key [redacted] --openai-key [redacted]');
+    expect(redactSecrets('curl -H x-api-key: v123 -H Authorization: token ghp_abcdefghijklmnop')).toBe(
+      'curl -H x-api-key: [redacted] -H Authorization: token [redacted]',
+    );
   });
 });
 

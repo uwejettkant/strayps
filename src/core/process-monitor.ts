@@ -378,12 +378,23 @@ export async function resolveProcessCwds(
  * where they end up in screenshots and logs. Recognition always uses the original command line.
  */
 export function redactSecrets(cmd: string): string {
-  const secretName = '[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|api[-_]?key|access[-_]?key|private[-_]?key|auth|credential|bearer)[A-Za-z0-9_.-]*';
-  return cmd
-    .replace(new RegExp(`(--?${secretName})(=|\\s+)(?!-)(\\S+)`, 'gi'), '$1$2[redacted]')
-    .replace(new RegExp(`\\b(${secretName})=(\\S+)`, 'gi'), '$1=[redacted]')
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, '$1[redacted]@')
-    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 [redacted]');
+  const secretName =
+    '[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|api[-_]?key|access[-_]?key|private[-_]?key|auth|credential|bearer)[A-Za-z0-9_.-]*|(?:[A-Za-z0-9_.-]*[-_])?key';
+  return (
+    cmd
+      // --token VALUE, --api-key=VALUE: only where a flag starts, not inside a path
+      // (--no-auth is a switch without a value)
+      .replace(new RegExp(`(^|\\s)((?:--(?!no-)|-(?!-))(?:${secretName}))(=|\\s+)(?!-)(\\S+)`, 'gi'), '$1$2$3[redacted]')
+      // API_KEY=VALUE as a word of its own
+      .replace(new RegExp(`(^|\\s)((?:${secretName}))=(\\S+)`, 'gi'), '$1$2=[redacted]')
+      // headers: "Authorization: token ...", "x-api-key: ..."
+      .replace(/\b(authorization:\s*)(?:(bearer|token|basic)\s+)?\S+/gi, (_m, head: string, scheme?: string) => `${head}${scheme ? `${scheme} ` : ''}[redacted]`)
+      .replace(/\b(x-[a-z-]*(?:key|token)\s*:\s*)\S+/gi, '$1[redacted]')
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, '$1[redacted]@')
+      .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 [redacted]')
+      // well-known token formats anywhere
+      .replace(/\b(?:ghp|gho|ghs|ghu|github_pat|sk|xox[abprs])[-_][A-Za-z0-9_-]{10,}/g, '[redacted]')
+  );
 }
 
 function formatReadableCmd(rawName: string, rawCmd: string): string {
@@ -867,11 +878,13 @@ export class ProcessMonitor extends EventEmitter {
       const quietLongEnough =
         usedInWindowSec !== undefined && usedInWindowSec < STALE_CPU_BUDGET_SEC && !startedProcessRecently;
       const idleNote = `idle: no new process and ${formatCpu(usedInWindowSec ?? 0)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
+      // File activity in the watched repository counts for its own processes only
+      const fileActivityAt = belongsToRepo(raw.pid) ? this.lastFileActivityAt : 0;
       const lastActiveAt = existing
         ? hasCpuActivity
           ? now
-          : Math.max(existing.lastActiveAt, this.lastFileActivityAt)
-        : Math.max(now, this.lastFileActivityAt);
+          : Math.max(existing.lastActiveAt, fileActivityAt)
+        : Math.max(now, fileActivityAt);
 
       const silenceSec = Math.max(0, Math.floor((now - lastActiveAt) / 1000));
       const { elapsedSec, formattedUptime } = raw.etime

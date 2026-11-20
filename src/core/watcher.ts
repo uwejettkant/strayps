@@ -166,12 +166,23 @@ const GIT_LIST_TIMEOUT_MS = 10_000;
 const GIT_ASK_TIMEOUT_MS = 2_000;
 
 /** A hash of the file, or 'missing'. Only the hash is kept: git config can hold credentials. */
-function hashFile(file: string): string {
-  // O_NONBLOCK: a FIFO put in place of a .gitignore must not block the watchdog in open()
+/**
+ * Fingerprint of an ignore-rule file. `followLinks` is for the git config files outside the
+ * repository, which dotfile managers often link; a .gitignore inside the repository is never read
+ * through a link (its target could be .env) and is fingerprinted by where the link points, so a
+ * link put there is still a change. O_NONBLOCK: a FIFO put in place must not block the watchdog.
+ */
+function hashFile(file: string, followLinks = false): string {
+  if (!followLinks) {
+    try {
+      if (fs.lstatSync(file).isSymbolicLink()) return `link:${fs.readlinkSync(file)}`;
+    } catch {
+      return 'missing';
+    }
+  }
   let fd: number;
   try {
-    // O_NOFOLLOW: a .gitignore replaced by a link must not make agent-leash read the link's target
-    fd = fs.openSync(file, fs.constants.O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
+    fd = fs.openSync(file, fs.constants.O_RDONLY | O_NONBLOCK | (followLinks ? 0 : O_NOFOLLOW));
   } catch {
     return 'missing';
   }
@@ -627,17 +638,24 @@ export class RepoWatcher extends EventEmitter {
 
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
+      if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) {
+        // Links, FIFOs, sockets, devices: remembered as there at the start so a rollback never
+        // removes them (a dev server's socket once looked new and could be deleted); never read
+        // and never followed. A directory link that leads outside is not crawled, but its name is
+        // remembered as well.
+        if (this.shouldIgnorePath(fullPath) && !this.isDirectoryLinkOutside(fullPath)) continue;
+        const linkPath = this.toRelPath(fullPath, false);
+        this.existedAtStart.add(linkPath);
+        this.rememberSpelling(linkPath);
+        continue;
+      }
       // One rule for what is snapshotted, watched and restorable: the snapshot of a virtual
       // environment once held 224 MB of files nobody would ever restore.
       if (this.shouldIgnorePath(fullPath)) continue;
-      const relPath = this.toRelPath(fullPath);
+      const relPath = this.toRelPath(fullPath, false);
 
       if (entry.isDirectory()) {
         this.captureDirectorySnapshot(fullPath);
-      } else if (entry.isSymbolicLink()) {
-        // Remember that the link existed so a rollback never removes it; its target is not copied.
-        this.existedAtStart.add(relPath);
-        this.rememberSpelling(relPath);
       } else if (entry.isFile()) {
         this.existedAtStart.add(relPath);
         this.rememberSpelling(relPath);
@@ -682,7 +700,9 @@ export class RepoWatcher extends EventEmitter {
     // A link to a directory outside the repository (ln -s ~ src/ext): chokidar follows links, so it
     // would crawl the home directory. A link to a file stays watched: a .env that links to a
     // shared one must still raise its alarm.
-    if (this.isDirectoryLinkOutside(targetPath)) return true;
+    // Unless a protected glob names that directory (secrets/** with secrets linked elsewhere): then
+    // its files still raise alarms. They are never read, since their parent leads outside.
+    if (this.isDirectoryLinkOutside(targetPath) && !this.protectedGlobNamesDirectory(rel)) return true;
 
     if (!this.gitIgnore) return false;
     // A .gitignore is always watched, also one that ignores itself: its edit must reach
@@ -701,6 +721,17 @@ export class RepoWatcher extends EventEmitter {
    * (`.env*`, `docker-compose*.yml`) matches a file name at any depth, a glob with a fixed
    * directory (`secrets/**`) only below that directory.
    */
+  /** True if a protected glob with a fixed directory reaches into `rel` (secrets/** into secrets). */
+  private protectedGlobNamesDirectory(rel: string): boolean {
+    const dir = `${rel}/`;
+    return this.configManager.getConfig().protectedFiles.some((pattern) => {
+      const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
+      if (!normalized.includes('/')) return false;
+      const fixed = normalized.slice(0, normalized.search(/[*?]|$/));
+      return fixed.length > 0 && (fixed.startsWith(dir) || dir.startsWith(fixed));
+    });
+  }
+
   private mayHoldProtectedFiles(rel: string): boolean {
     const dir = `${rel}/`;
     return this.configManager.getConfig().protectedFiles.some((pattern) => {
@@ -772,7 +803,8 @@ export class RepoWatcher extends EventEmitter {
   }
 
   private fingerprint(files: string[]): string {
-    return createHash('sha256').update(files.map(hashFile).join('\n')).digest('hex');
+    // Git config files outside the repository: followed, dotfile managers link them
+    return createHash('sha256').update(files.map((file) => hashFile(file, true)).join('\n')).digest('hex');
   }
 
   /** True if git ignored this path, or a directory above it, when the session started. */
@@ -1063,7 +1095,7 @@ export class RepoWatcher extends EventEmitter {
     now: number = Date.now(),
   ): { relPath: string | null; outcome: RestoreOutcome } {
     const resolved = this.resolveInsideRoot(filePath);
-    const relPath = resolved === null ? null : this.canonicalSpelling(resolved);
+    const relPath = resolved === null ? null : this.canonicalSpelling(resolved, false);
     if (!relPath) {
       return {
         relPath: null,
@@ -1083,7 +1115,15 @@ export class RepoWatcher extends EventEmitter {
     if (!this.modifiedFiles.has(relPath)) {
       return { relPath, outcome: { ok: false, reason: 'it was not changed in this session, left untouched' } };
     }
-    const outcome = this.restoreFile(relPath, now);
+    // A rollback runs from a confirmation in the terminal: an exception there would end the
+    // watchdog while the agent keeps working
+    let outcome: RestoreOutcome;
+    try {
+      outcome = this.restoreFile(relPath, now);
+    } catch (err) {
+      this.ownWrites.delete(relPath);
+      outcome = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
     // A file restored to a version from the middle of the session still differs from the start
     if (outcome.ok && outcome.backAtStart) {
       this.modifiedFiles.delete(relPath);
@@ -1123,7 +1163,7 @@ export class RepoWatcher extends EventEmitter {
     const what =
       outcome.action === 'removed'
         ? outcome.linkRemoved
-          ? `Removed the link ${relPath} (it did not exist before its latest changes; what it pointed to is untouched)`
+          ? `Removed ${relPath}, a link or special file created in this session (what it pointed to is untouched)`
           : `Removed ${relPath} (it did not exist before its latest changes)`
         : outcome.action === 'simulated'
           ? `Demo: would roll back ${relPath} to the version before its latest changes (no files touched)`
@@ -1165,20 +1205,32 @@ export class RepoWatcher extends EventEmitter {
       (target instanceof Buffer && startCopy !== undefined && target.equals(startCopy)) ||
       (target === null && !this.existedAtStart.has(relPath) && !this.wasIgnoredAtStart(relPath));
 
-    let linkOrSpecial: 'symlink' | 'other' | null = null;
+    let kind: 'symlink' | 'directory' | 'other' | null = null;
     try {
       const stat = fs.lstatSync(absPath);
-      if (stat.isSymbolicLink()) linkOrSpecial = 'symlink';
-      else if (!stat.isFile() || stat.nlink !== 1) linkOrSpecial = 'other';
+      if (stat.isSymbolicLink()) kind = 'symlink';
+      else if (stat.isDirectory()) kind = 'directory';
+      else if (!stat.isFile() || stat.nlink !== 1) kind = 'other';
     } catch {
       // Missing: nothing to follow
     }
-    if (linkOrSpecial) {
-      // Created in this session: removing the name is safe, unlink never touches what a link
-      // points to. Nothing is copied, since a copy would have to read the target.
+    if (kind === 'directory') {
+      return { ok: false, reason: 'it is a directory now; agent-leash rolls back files only, left untouched' };
+    }
+    if (kind) {
+      // A link, hard link, FIFO or socket created in this session (target null: the name did not
+      // exist at the start): removing the name is safe, unlink never touches what a link points
+      // to. Nothing is copied, since a copy would have to read the target.
       if (target === null) {
+        if (!this.parentInsideRoot(absPath)) {
+          return { ok: false, reason: 'a directory on its path now leads outside the repository, left untouched' };
+        }
+        try {
+          fs.unlinkSync(absPath);
+        } catch (err) {
+          return { ok: false, reason: `it could not be removed (${(err as NodeJS.ErrnoException).code ?? 'error'}), left untouched` };
+        }
         this.ownWrites.set(relPath, { expectedHash: null, until: Date.now() + OWN_WRITE_WINDOW_MS });
-        fs.unlinkSync(absPath);
         if (history) {
           history.current = null;
           history.currentSince = now;
@@ -1189,7 +1241,7 @@ export class RepoWatcher extends EventEmitter {
       return {
         ok: false,
         reason:
-          linkOrSpecial === 'symlink'
+          kind === 'symlink'
             ? 'it is a symbolic link now; agent-leash never writes through a link or copies its target. Restore it yourself (for example with git checkout)'
             : 'it is not a plain file of its own now (a hard link to another file, or a special file); agent-leash never writes to it',
       };
@@ -1348,16 +1400,29 @@ export class RepoWatcher extends EventEmitter {
 
   /** True when the repository's file system treats README.md and readme.md as one name. */
   private detectCaseInsensitive(): boolean {
-    const base = path.basename(this.rootDir);
-    const flipped = base === base.toUpperCase() ? base.toLowerCase() : base.toUpperCase();
-    if (flipped === base) return false;
+    const flip = (name: string) => (name === name.toUpperCase() ? name.toLowerCase() : name.toUpperCase());
+    const sameEntry = (a: string, b: string): boolean => {
+      try {
+        const x = fs.lstatSync(a);
+        const y = fs.lstatSync(b);
+        return x.ino === y.ino && x.dev === y.dev;
+      } catch {
+        return false;
+      }
+    };
+    // An entry inside the repository decides: the repository may be its own volume (a
+    // case-sensitive one mounted under a case-insensitive parent), and its name may have no letters
+    let entries: string[] = [];
     try {
-      const a = fs.statSync(this.rootDir);
-      const b = fs.statSync(path.join(path.dirname(this.rootDir), flipped));
-      return a.ino === b.ino && a.dev === b.dev;
+      entries = fs.readdirSync(this.rootDir);
     } catch {
-      return false;
+      // fall back to the directory's own name
     }
+    const probe = entries.find((name) => flip(name) !== name);
+    if (probe) return sameEntry(path.join(this.rootDir, probe), path.join(this.rootDir, flip(probe)));
+    const base = path.basename(this.rootDir);
+    if (flip(base) === base) return false;
+    return sameEntry(this.rootDir, path.join(path.dirname(this.rootDir), flip(base)));
   }
 
   private rememberSpelling(relPath: string): void {
@@ -1366,12 +1431,16 @@ export class RepoWatcher extends EventEmitter {
     if (!this.nameByLowercase.has(lower)) this.nameByLowercase.set(lower, relPath);
   }
 
-  /** The spelling this path is known by; on a case-sensitive file system, the path itself. */
-  private canonicalSpelling(relPath: string): string {
+  /**
+   * The spelling this path is known by; on a case-sensitive file system, the path itself. Only a
+   * file system event teaches a new spelling: a refused revert with a typo must not decide how
+   * the file is tracked later.
+   */
+  private canonicalSpelling(relPath: string, remember = true): string {
     if (!this.caseInsensitive) return relPath;
     const known = this.nameByLowercase.get(relPath.toLowerCase());
     if (known) return known;
-    this.nameByLowercase.set(relPath.toLowerCase(), relPath);
+    if (remember) this.nameByLowercase.set(relPath.toLowerCase(), relPath);
     return relPath;
   }
 
@@ -1466,12 +1535,21 @@ export class RepoWatcher extends EventEmitter {
     }
   }
 
-  private toRelPath(absPath: string): string {
+  /**
+   * The path relative to the repository, through the real location of its directory when that is
+   * inside the repository: under an alias (.claude/skills linking to .agents/skills) a file that
+   * existed at the start looked new, and a revert would have deleted it. A directory link that
+   * leads outside keeps its own path. The snapshot walk never passes a link and skips this.
+   */
+  private toRelPath(absPath: string, resolveLinks = true): string {
     let normalizedAbs = absPath;
-    if (!normalizedAbs.startsWith(this.rootDir)) {
+    if (resolveLinks || !normalizedAbs.startsWith(this.rootDir)) {
       try {
-        const realParent = fs.realpathSync(path.dirname(absPath));
-        normalizedAbs = path.join(realParent, path.basename(absPath));
+        const realParent = fs.realpathSync.native(path.dirname(absPath));
+        const inside = realParent === this.rootDir || realParent.startsWith(this.rootDir + path.sep);
+        if (inside || !normalizedAbs.startsWith(this.rootDir)) {
+          normalizedAbs = path.join(realParent, path.basename(absPath));
+        }
       } catch {
         // Keep original absPath if parent dir no longer exists
       }

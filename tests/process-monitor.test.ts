@@ -112,7 +112,7 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     expect(monitor.getProcesses()).toHaveLength(0);
   });
 
-  it('recovers an orphaned FROZEN process when a file event or CPU heartbeat occurs', async () => {
+  it('recovers an orphaned FROZEN process on a CPU heartbeat, not on file activity in the watched repository', async () => {
     const mockProcesses: RawProcessInfo[] = [
       {
         pid: 6001,
@@ -138,9 +138,15 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
     await monitor.scan(t0 + 50_000);
     expect(monitor.getFrozenProcesses()).toHaveLength(1);
 
-    // File activity occurs -> resets silence timer
+    // A file change in the watched repository says nothing about an orphan elsewhere: resetting it
+    // here made the frozen alarm fire again on every scan while an agent worked
     monitor.recordFileActivity(t0 + 51_000);
     await monitor.scan(t0 + 51_000);
+    expect(monitor.getFrozenProcesses()).toHaveLength(1);
+
+    // its own CPU activity does
+    mockProcesses[0].cpu = 3;
+    await monitor.scan(t0 + 52_000);
     expect(monitor.getFrozenProcesses()).toHaveLength(0);
   });
 
