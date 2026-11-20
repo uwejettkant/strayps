@@ -143,7 +143,7 @@ flowchart LR
 
 ### Key Engineering Details
 
-1. **Dual-Layer Session Checkpoint (`git stash create` + Memory Snapshot, Zero-Secret-Access for `.env*`)**: On startup, `agent-leash` creates an invisible Git commit object without touching your working tree or stash reflog, paired with an in-memory snapshot for code files. `.env*` files are strictly metadata-monitored (warn-only): their contents are **never** read into memory or overwritten on disk.
+1. **Dual-Layer Session Checkpoint (`git stash create` + Memory Snapshot, Zero-Secret-Access for `.env*`)**: On startup, `agent-leash` creates an invisible Git commit object without touching your working tree or stash reflog, paired with an in-memory snapshot for code files. `.env*` files are strictly metadata-monitored (warn-only): their contents are **never** read into memory or overwritten on disk. A fixed list of directories (`node_modules`, `.git`, `dist`, `.next`, `coverage`, `playwright-report`, `test-results`) is always skipped. In a git repository, files git ignores (virtual environments, caches, local databases, logs) are not read into memory, raise no alarm and are never restored, except files that match `protectedFiles`: an ignored directory is still searched for them. Ignore rules are read when the watchdog starts. If they change during the session (a `.gitignore`, `.git/info/exclude`, a git config file), a warning is logged, and files created after that are watched whatever git says.
 2. **Rollbacks That Lose Nothing**: agent-leash never rolls a file back on its own. For every changed file it keeps the version from before its latest series of changes, and `revert` restores exactly that one, never anything older. Before a rollback overwrites or removes a file, the version being replaced is copied to a private temp directory (the path is in the log and in the exit summary). A rollback only touches files inside the watched repository, and only deletes a file that did not exist before its latest changes. `agent-leash` recognizes the file system echo of its own rollback by content, so the rollback never triggers a second alert.
 3. **Process Lifecycle (`STANDBY` vs. `STALE` vs. `FROZEN`)**: Naive watchdogs flag every `0% CPU` MCP server as frozen, even though stdio MCP servers legitimately sit at `0% CPU` waiting for tool calls. `ProcessMonitor` inspects the process tree (`PPID`), working directory (`lsof -d cwd`), physical RAM (`RSS` in MB), uptime (`etime`) and the CPU time used between scans (`time`, not the `%cpu` average) to tell **standby MCP children** (`STANDBY`) from **old sessions in other repos** (`STALE`) and **orphaned processes whose parent is gone** (`FROZEN`); a process that is merely quiet is not frozen. The tree also tells which agent started which process, so `pause` holds exactly the agents of the watched repository and what they started.
 
@@ -310,7 +310,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 187 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 198 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

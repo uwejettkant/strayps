@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,6 +19,7 @@ export type WatchEventType =
   | 'checkpoint-created'
   | 'watch-error'
   | 'config-reload'
+  | 'ignore-rules-changed'
   | 'process-alert'
   | 'process-recovered'
   | 'process-killed'
@@ -127,6 +129,56 @@ interface RestoreOutcome {
   fromCheckpoint?: boolean;
 }
 
+/**
+ * Git's view of the repository, read once at session start. Paths below are relative to the
+ * watched directory; directories carry no trailing slash.
+ */
+interface GitIgnoreState {
+  /** Directories git ignores as a whole (`git ls-files --directory` collapses them). */
+  dirs: Set<string>;
+  /** What git ignored at start (`dirs` and `files` grow later): it existed, its content is unknown. */
+  ignoredAtStart: { dirs: Set<string>; files: Set<string> };
+  /** Single ignored files outside those directories. */
+  files: Set<string>;
+  /** Files git does not ignore (tracked or untracked) and every directory above them. */
+  known: Set<string>;
+  /** Answers of `git check-ignore` for paths that appeared later. */
+  asked: Map<string, boolean>;
+  /** Directories git could not answer for (a submodule, an error): not asked again below them. */
+  unanswerable: Set<string>;
+  /** Files outside the watched tree that hold ignore rules (.git/info/exclude, git config). */
+  ruleFiles: string[];
+  /** Hash of their contents at session start; a hash, since git config can hold credentials. */
+  ruleFingerprint: string;
+  /** Hash of each `.gitignore` at session start, by directory ('' is the root). */
+  gitignoreHashes: Map<string, string>;
+  /** Set once the rules changed during the session: from then on git is not asked any more. */
+  rulesChanged: boolean;
+}
+
+/** `git ls-files` of a large repository easily exceeds the 1 MB default of execFileSync. */
+const GIT_LIST_MAX_BUFFER = 256 * 1024 * 1024;
+/** Every git call here runs on the event loop; a hanging git must not freeze the dashboard or pause. */
+const GIT_LIST_TIMEOUT_MS = 10_000;
+const GIT_ASK_TIMEOUT_MS = 2_000;
+
+/** A hash of the file, or 'missing'. Only the hash is kept: git config can hold credentials. */
+function hashFile(file: string): string {
+  try {
+    return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  } catch {
+    return 'missing';
+  }
+}
+
+function isDirectory(absPath: string): boolean {
+  try {
+    return fs.lstatSync(absPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Larger files are restored without keeping the replaced version (they are not in the snapshot either). */
 const DISCARD_MAX_BYTES = 50 * 1024 * 1024;
 /** Upper bound of replaced versions kept per session; the oldest are dropped first. */
@@ -157,6 +209,8 @@ export class RepoWatcher extends EventEmitter {
   private discardSlots: string[] = [];
   private rootCheckTimer: NodeJS.Timeout | null = null;
   private rootMissingReported = false;
+  /** What git ignores in this repository (audit D-06); null outside git or when git fails. */
+  private gitIgnore: GitIgnoreState | null = null;
 
   constructor(options: RepoWatcherOptions) {
     super();
@@ -280,6 +334,7 @@ export class RepoWatcher extends EventEmitter {
       return this.checkpoint;
     }
 
+    this.gitIgnore = this.readGitIgnore();
     this.captureDirectorySnapshot(this.rootDir);
 
     let type: CheckpointInfo['type'] = 'memory-snapshot';
@@ -335,6 +390,7 @@ export class RepoWatcher extends EventEmitter {
       execFileSync('git', ['cat-file', '-e', `${this.checkpointSha}:${relPath}`], {
         cwd: this.rootDir,
         stdio: 'ignore',
+        timeout: GIT_ASK_TIMEOUT_MS,
       });
       return true;
     } catch {
@@ -347,6 +403,7 @@ export class RepoWatcher extends EventEmitter {
       cwd: this.rootDir,
       stdio: ['ignore', 'pipe', 'ignore'],
       encoding: 'utf-8',
+      timeout: GIT_LIST_TIMEOUT_MS,
     }).trim();
   }
 
@@ -359,10 +416,10 @@ export class RepoWatcher extends EventEmitter {
     }
 
     for (const entry of entries) {
-      if (IGNORED_DIRS.has(entry.name)) continue;
-      if (entry.name === CONFIG_FILENAME) continue;
-
       const fullPath = path.join(dir, entry.name);
+      // One rule for what is snapshotted, watched and restorable: the snapshot of a virtual
+      // environment once held 224 MB of files nobody would ever restore (audit D-06).
+      if (this.shouldIgnorePath(fullPath)) continue;
       const relPath = this.toRelPath(fullPath);
 
       if (entry.isDirectory()) {
@@ -415,14 +472,209 @@ export class RepoWatcher extends EventEmitter {
       return true;
     }
 
+    if (!this.gitIgnore) return false;
+    // A .gitignore is always watched, also one that ignores itself: its edit must reach
+    // handleFileSystemEvent, which notes that the rules changed.
+    if (lastSeg === '.gitignore') return false;
+    if (!this.isGitIgnored(rel, segments)) return false;
+    // A protected file stays watched even when git ignores it: .env is in nearly every
+    // .gitignore, and an alarm on it is the point of protecting it. An ignored directory is still
+    // entered when a protected file could be in it; its other files stay ignored.
+    if (this.configManager.isProtectedFile(rel)) return false;
+    return !(isDirectory(targetPath) && this.mayHoldProtectedFiles(rel));
+  }
+
+  /**
+   * True if a protected glob could match below the directory `rel`: a glob without a slash
+   * (`.env*`, `docker-compose*.yml`) matches a file name at any depth, a glob with a fixed
+   * directory (`secrets/**`) only below that directory.
+   */
+  private mayHoldProtectedFiles(rel: string): boolean {
+    const dir = `${rel}/`;
+    return this.configManager.getConfig().protectedFiles.some((pattern) => {
+      const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
+      if (!normalized.includes('/')) return true;
+      const fixed = normalized.slice(0, normalized.search(/[*?]|$/));
+      return fixed.startsWith(dir) || dir.startsWith(fixed);
+    });
+  }
+
+  private isGitIgnored(rel: string, segments: string[]): boolean {
+    const state = this.gitIgnore!;
+    for (let i = 1; i <= segments.length; i++) {
+      if (state.dirs.has(segments.slice(0, i).join('/'))) return true;
+    }
+    if (state.files.has(rel)) return true;
+    if (state.known.has(rel)) return false;
+    const cached = state.asked.get(rel);
+    if (cached !== undefined) return cached;
+    for (let i = 1; i < segments.length; i++) {
+      if (state.unanswerable.has(segments.slice(0, i).join('/'))) return false;
+    }
+
+    // An agent can write ignore rules itself: into .gitignore, or unseen into .git/info/exclude
+    // or the git config. Rules that changed during the session would hide every file it creates
+    // from then on, so a new path is only judged by git while the rules are the ones from the start.
+    if (!this.ignoreRulesUnchanged(segments)) return false;
+
+    // `--` keeps a file named like an option a path. Exit code 0: ignored, 1: not ignored,
+    // anything else (a submodule, an error, a timeout): not answered, so the path stays watched.
+    let ignored = false;
+    try {
+      execFileSync('git', ['check-ignore', '-q', '--', rel], {
+        cwd: this.rootDir,
+        stdio: 'ignore',
+        timeout: GIT_ASK_TIMEOUT_MS,
+      });
+      ignored = true;
+    } catch (err) {
+      if ((err as { status?: number | null }).status !== 1) {
+        state.unanswerable.add(segments.slice(0, -1).join('/') || rel);
+      }
+    }
+    state.asked.set(rel, ignored);
+    if (ignored && isDirectory(path.join(this.rootDir, rel))) state.dirs.add(rel);
+    return ignored;
+  }
+
+  /**
+   * Compares the rules that apply to a new path with the ones from the start: every .gitignore
+   * from the root down to its directory, and the rule files outside the tree. chokidar can ask
+   * about a new file before it reports the new .gitignore next to it, so events alone are too late.
+   */
+  private ignoreRulesUnchanged(segments: string[]): boolean {
+    const state = this.gitIgnore!;
+    if (state.rulesChanged) return false;
+    for (let i = 0; i < segments.length; i++) {
+      const dir = segments.slice(0, i).join('/');
+      const now = hashFile(path.join(this.rootDir, dir, '.gitignore'));
+      if (now !== (state.gitignoreHashes.get(dir) ?? 'missing')) {
+        this.markIgnoreRulesChanged(dir ? `${dir}/.gitignore` : '.gitignore');
+        return false;
+      }
+    }
+    if (this.fingerprint(state.ruleFiles) !== state.ruleFingerprint) {
+      this.markIgnoreRulesChanged('the git ignore settings');
+    }
+    return !state.rulesChanged;
+  }
+
+  private fingerprint(files: string[]): string {
+    return createHash('sha256').update(files.map(hashFile).join('\n')).digest('hex');
+  }
+
+  /** True if git ignored this path, or a directory above it, when the session started. */
+  private wasIgnoredAtStart(relPath: string): boolean {
+    const start = this.gitIgnore?.ignoredAtStart;
+    if (!start) return false;
+    if (start.files.has(relPath)) return true;
+    const segments = relPath.split('/');
+    for (let i = 1; i <= segments.length; i++) {
+      if (start.dirs.has(segments.slice(0, i).join('/'))) return true;
+    }
     return false;
+  }
+
+  private markIgnoreRulesChanged(where: string): void {
+    const state = this.gitIgnore;
+    if (!state || state.rulesChanged) return;
+    state.rulesChanged = true;
+    this.recordActivity({
+      type: 'ignore-rules-changed',
+      message: `Ignore rules changed during the session (${where}); files created from now on are watched even if git ignores them`,
+      severity: 'warn',
+    });
+  }
+
+  /** Reads what git ignores. Outside a git work tree, or if git fails, the fixed list alone applies. */
+  private readGitIgnore(): GitIgnoreState | null {
+    const run = (args: string[], maxBuffer = 1024 * 1024): string =>
+      execFileSync('git', args, {
+        cwd: this.rootDir,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf-8',
+        maxBuffer,
+        timeout: GIT_LIST_TIMEOUT_MS,
+      });
+    const list = (args: string[]): string[] =>
+      run(['ls-files', '-z', ...args], GIT_LIST_MAX_BUFFER)
+        .split('\0')
+        .filter((entry) => entry.length > 0);
+    try {
+      if (run(['rev-parse', '--is-inside-work-tree']).trim() !== 'true') return null;
+      // A directory that the enclosing repository ignores (a scratch folder) would be ignored as
+      // a whole: watch it like a directory outside git instead of not at all.
+      try {
+        run(['check-ignore', '-q', '--', '.']);
+        return null;
+      } catch {
+        // not ignored: go on
+      }
+      const ignored = list(['--others', '--ignored', '--exclude-standard', '--directory']);
+      const notIgnored = list(['--cached', '--others', '--exclude-standard']);
+      const gitPath = (name: string) => path.resolve(this.rootDir, run(['rev-parse', '--git-path', name]).trim());
+      let excludesFile: string;
+      try {
+        excludesFile = path.resolve(this.rootDir, run(['config', '--path', '--get', 'core.excludesFile']).trim());
+      } catch {
+        excludesFile = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'git', 'ignore');
+      }
+      // Every config file git reads (system, global, includes, worktree), as git reports them:
+      // with -z the output alternates origin and entry. A config file that does not exist yet
+      // (the global one) is watched too, since creating it can set core.excludesFile.
+      const configOrigins = new Set<string>([
+        gitPath('config'),
+        process.env.GIT_CONFIG_GLOBAL || path.join(os.homedir(), '.gitconfig'),
+        path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'git', 'config'),
+      ]);
+      try {
+        const tokens = run(['config', '--list', '--show-origin', '-z']).split('\0');
+        for (let i = 0; i < tokens.length; i += 2) {
+          if (tokens[i].startsWith('file:')) configOrigins.add(path.resolve(this.rootDir, tokens[i].slice(5)));
+        }
+      } catch {
+        // the fixed candidates above still apply
+      }
+      const ruleFiles = [gitPath('info/exclude'), excludesFile, ...configOrigins];
+      const state: GitIgnoreState = {
+        dirs: new Set(),
+        ignoredAtStart: { dirs: new Set(), files: new Set() },
+        files: new Set(),
+        known: new Set(),
+        asked: new Map(),
+        unanswerable: new Set(),
+        ruleFiles,
+        ruleFingerprint: this.fingerprint(ruleFiles),
+        gitignoreHashes: new Map(),
+        rulesChanged: false,
+      };
+      for (const entry of ignored) {
+        if (entry.endsWith('/')) state.dirs.add(entry.slice(0, -1));
+        else state.files.add(entry);
+      }
+      state.ignoredAtStart = { dirs: new Set(state.dirs), files: new Set(state.files) };
+      for (const entry of [...notIgnored, ...state.files]) {
+        const parts = entry.split('/');
+        if (parts[parts.length - 1] === '.gitignore') {
+          const dir = parts.slice(0, -1).join('/');
+          state.gitignoreHashes.set(dir, hashFile(path.join(this.rootDir, entry)));
+        }
+      }
+      for (const entry of notIgnored) {
+        const parts = entry.split('/');
+        for (let i = 1; i <= parts.length; i++) state.known.add(parts.slice(0, i).join('/'));
+      }
+      return state;
+    } catch {
+      return null;
+    }
   }
 
   /** The version a file had at session start (see VersionContent). */
   private initialVersion(relPath: string): VersionContent {
     const copy = this.initialSnapshot.get(relPath);
     if (copy) return copy;
-    return this.existedAtStart.has(relPath) ? undefined : null;
+    return this.existedAtStart.has(relPath) || this.wasIgnoredAtStart(relPath) ? undefined : null;
   }
 
   /** Reads the file as it is now; undefined when it is too large or unreadable to keep a copy. */
@@ -476,9 +728,10 @@ export class RepoWatcher extends EventEmitter {
       : path.join(this.rootDir, fullOrRelPath);
     const relPath = this.toRelPath(absPath);
 
-    if (!relPath || relPath.startsWith('..') || this.shouldIgnorePath(absPath)) {
-      return;
-    }
+    if (!relPath || relPath.startsWith('..')) return;
+    // Checked before the ignore rules, which this very edit may change
+    if (path.posix.basename(relPath) === '.gitignore') this.markIgnoreRulesChanged(relPath);
+    if (this.shouldIgnorePath(absPath)) return;
 
     // Ignore events generated by our own rollback operations
     if (this.isOwnWriteEcho(relPath)) {
@@ -678,7 +931,7 @@ export class RepoWatcher extends EventEmitter {
     const backAtStart =
       targetIsStart ||
       (target instanceof Buffer && startCopy !== undefined && target.equals(startCopy)) ||
-      (target === null && !this.existedAtStart.has(relPath));
+      (target === null && !this.existedAtStart.has(relPath) && !this.wasIgnoredAtStart(relPath));
     // After a rollback the restored version is the file's current one
     const remember = (content: VersionContent) => {
       if (!history) return;
@@ -735,7 +988,7 @@ export class RepoWatcher extends EventEmitter {
           execFileSync(
             'git',
             ['restore', `--source=${this.checkpointSha}`, '--worktree', '--', relPath],
-            { cwd: this.rootDir, stdio: ['ignore', 'pipe', 'ignore'] },
+            { cwd: this.rootDir, stdio: ['ignore', 'pipe', 'ignore'], timeout: GIT_LIST_TIMEOUT_MS },
           );
           this.ownWrites.set(relPath, {
             expected: fs.readFileSync(absPath),

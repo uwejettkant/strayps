@@ -238,6 +238,189 @@ describe('RepoWatcher protected files', () => {
   });
 });
 
+describe('RepoWatcher and .gitignore', () => {
+  // Audit D-06: a repository with a virtual environment and a local database was snapshotted with
+  // 10,769 files (224 MB), 10,723 of them ignored by git, and a SQLite file written more than five
+  // times a minute raised the thrashing alarm while the application had it open.
+  function ignoredRepo() {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    writeFiles(repo, {
+      '.gitignore': '.venv/\n*.sqlite\n*.log\nsecrets/\n.env\n',
+      'src/app.py': 'print(1)\n',
+      '.venv/lib/site.py': 'x = 1\n',
+      'data/app.sqlite': 'db v1',
+      'secrets/key.pem': 'original key\n',
+      '.env': 'TOKEN=[PLACEHOLDER]\n',
+    });
+    commitAll(repo);
+    return repo;
+  }
+
+  it('does not snapshot, watch or roll back files that git ignores', () => {
+    const repo = ignoredRepo();
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    // .gitignore and src/app.py only; .env is protected and watched, but its contents are never read
+    expect(watcher.getCheckpoint()?.snapshottedFiles).toBe(2);
+
+    // the directory is entered, since the default .env* could match a file in it; its files are not
+    expect(watcher.shouldIgnorePath(path.join(repo, '.venv'))).toBe(false);
+    expect(watcher.shouldIgnorePath(path.join(repo, '.venv/lib/site.py'))).toBe(true);
+    expect(watcher.shouldIgnorePath(path.join(repo, 'src/app.py'))).toBe(false);
+
+    const onLoop = vi.fn();
+    watcher.on('loop-detected', onLoop);
+    for (let i = 0; i < 12; i++) {
+      writeFiles(repo, { 'data/app.sqlite': `db v${i + 2}` });
+      watcher.handleFileSystemEvent('change', 'data/app.sqlite', Date.now() + i);
+    }
+    expect(onLoop).not.toHaveBeenCalled();
+    expect(watcher.getModifiedFiles()).toEqual([]);
+    expect(watcher.rollbackFile('data/app.sqlite')).toBe(false);
+    expect(read(repo, 'data/app.sqlite')).toBe('db v13');
+  });
+
+  it('ignores a file created during the session when git ignores it', () => {
+    const repo = ignoredRepo();
+    const watcher = watcherFor(repo);
+    writeFiles(repo, { 'src/debug.log': 'line\n', 'src/new.py': 'print(2)\n' });
+    watcher.handleFileSystemEvent('add', 'src/debug.log');
+    watcher.handleFileSystemEvent('add', 'src/new.py');
+    expect(watcher.getModifiedFiles()).toEqual(['src/new.py']);
+  });
+
+  it('keeps watching a tracked file even if it matches .gitignore', () => {
+    const repo = ignoredRepo();
+    writeFiles(repo, { 'fixtures/seed.sqlite': 'seed v1' });
+    git(repo, 'add', '-f', 'fixtures/seed.sqlite');
+    git(repo, 'commit', '-q', '-m', 'seed');
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+
+    writeFiles(repo, { 'fixtures/seed.sqlite': 'seed v2' });
+    watcher.handleFileSystemEvent('change', 'fixtures/seed.sqlite');
+    expect(watcher.getModifiedFiles()).toEqual(['fixtures/seed.sqlite']);
+    expect(watcher.rollbackFile('fixtures/seed.sqlite')).toBe(true);
+    expect(read(repo, 'fixtures/seed.sqlite')).toBe('seed v1');
+  });
+
+  it('keeps watching protected files that git ignores, also inside an ignored directory named by the glob', () => {
+    const repo = ignoredRepo();
+    const configManager = new GuardConfigManager(repo, { protectedFiles: ['.env*', 'secrets/**'] });
+    const watcher = new RepoWatcher({ rootDir: repo, configManager, keepDiscarded: false });
+    watcher.createCheckpoint();
+    const onProtected = vi.fn();
+    watcher.on('protected-file', onProtected);
+
+    expect(watcher.shouldIgnorePath(path.join(repo, 'secrets'))).toBe(false);
+    writeFiles(repo, { 'secrets/key.pem': 'tampered\n', '.env': 'TOKEN=[OTHER]\n' });
+    watcher.handleFileSystemEvent('change', 'secrets/key.pem');
+    watcher.handleFileSystemEvent('change', '.env');
+
+    expect(onProtected.mock.calls.map((call) => call[0].filePath)).toEqual(['secrets/key.pem', '.env']);
+    // the protected file was snapshotted, so revert can restore it
+    expect(watcher.rollbackFile('secrets/key.pem')).toBe(true);
+    expect(read(repo, 'secrets/key.pem')).toBe('original key\n');
+  });
+
+  it('keeps raising alarms for protected files matched by name inside an ignored directory', () => {
+    const repo = ignoredRepo();
+    writeFiles(repo, { '.gitignore': 'local/\n', 'local/.env.production': 'A=[PLACEHOLDER]\n', 'local/docker-compose.yml': 'v1\n', 'local/cache.db': 'c1' });
+    commitAll(repo, 'local');
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    const onProtected = vi.fn();
+    watcher.on('protected-file', onProtected);
+
+    expect(watcher.shouldIgnorePath(path.join(repo, 'local'))).toBe(false);
+    expect(watcher.shouldIgnorePath(path.join(repo, 'local/cache.db'))).toBe(true);
+    // created during the session, in the ignored directory
+    writeFiles(repo, { 'local/docker-compose.yml': 'v2\n', 'local/.env.staging': 'B=[PLACEHOLDER]\n' });
+    watcher.handleFileSystemEvent('change', 'local/docker-compose.yml');
+    watcher.handleFileSystemEvent('add', 'local/.env.staging');
+    watcher.handleFileSystemEvent('change', 'local/cache.db');
+
+    expect(onProtected.mock.calls.map((call) => call[0].filePath)).toEqual(['local/docker-compose.yml', 'local/.env.staging']);
+    expect(watcher.rollbackFile('local/docker-compose.yml')).toBe(true);
+    expect(read(repo, 'local/docker-compose.yml')).toBe('v1\n');
+  });
+
+  it('opens an ignored directory only for the protected files a glob names in it', () => {
+    const repo = ignoredRepo();
+    writeFiles(repo, { 'secrets/cache.sqlite': 'c1' });
+    const configManager = new GuardConfigManager(repo, { protectedFiles: ['secrets/*.pem'] });
+    const watcher = new RepoWatcher({ rootDir: repo, configManager, keepDiscarded: false });
+    watcher.createCheckpoint();
+
+    writeFiles(repo, { 'secrets/cache.sqlite': 'c2' });
+    watcher.handleFileSystemEvent('change', 'secrets/cache.sqlite');
+    expect(watcher.getModifiedFiles()).toEqual([]);
+    expect(watcher.rollbackFile('secrets/cache.sqlite')).toBe(false);
+    expect(read(repo, 'secrets/cache.sqlite')).toBe('c2');
+  });
+
+  it('does not let ignore rules written during the session hide new files', () => {
+    const repo = ignoredRepo();
+    const watcher = watcherFor(repo);
+    // .git is never watched, so this edit itself leaves no trace
+    fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\n*.gen\n');
+    writeFiles(repo, { 'src/a.gen': 'x\n' });
+    watcher.handleFileSystemEvent('add', 'src/a.gen');
+
+    writeFiles(repo, { '.gitignore': '.venv/\n*.sqlite\n*.log\nsecrets/\n.env\n*.out\n' });
+    watcher.handleFileSystemEvent('change', '.gitignore');
+    writeFiles(repo, { 'src/b.out': 'x\n' });
+    watcher.handleFileSystemEvent('add', 'src/b.out');
+
+    expect(watcher.getModifiedFiles().sort()).toEqual(['.gitignore', 'src/a.gen', 'src/b.out']);
+  });
+
+  it('never deletes an ignored file that existed at start, even after a reload protects it', () => {
+    const repo = ignoredRepo();
+    const configManager = new GuardConfigManager(repo);
+    const watcher = new RepoWatcher({ rootDir: repo, configManager, keepDiscarded: false });
+    watcher.createCheckpoint();
+    const onProtected = vi.fn();
+    watcher.on('protected-file', onProtected);
+
+    writeFiles(repo, { '.agentguard.json': JSON.stringify({ protectedFiles: ['.env*', 'data/*.sqlite'] }) });
+    expect(configManager.reload().applied).toBe(true);
+    writeFiles(repo, { 'data/app.sqlite': 'db v2' });
+    watcher.handleFileSystemEvent('change', 'data/app.sqlite');
+    expect(onProtected).toHaveBeenCalledTimes(1);
+
+    // no copy of it exists, but it did exist: revert refuses instead of removing it
+    expect(watcher.rollbackFile('data/app.sqlite')).toBe(false);
+    expect(read(repo, 'data/app.sqlite')).toBe('db v2');
+  });
+
+  it('does not let a new .gitignore that ignores itself hide the files next to it', () => {
+    const repo = ignoredRepo();
+    const watcher = watcherFor(repo);
+    writeFiles(repo, { 'src/.gitignore': '*\n', 'src/hidden.ts': 'x\n' });
+    // chokidar may ask about the new file before it reports the new .gitignore
+    expect(watcher.shouldIgnorePath(path.join(repo, 'src/hidden.ts'))).toBe(false);
+    expect(watcher.shouldIgnorePath(path.join(repo, 'src/.gitignore'))).toBe(false);
+  });
+
+  it('watches a directory that the enclosing repository ignores like a directory outside git', () => {
+    const repo = ignoredRepo();
+    writeFiles(repo, { '.gitignore': 'scratch/\n', 'scratch/a.ts': 'a\n', 'scratch/node_modules/x.js': 'x\n' });
+    const watcher = watcherFor(path.join(repo, 'scratch'));
+    expect(watcher.getCheckpoint()?.snapshottedFiles).toBe(1);
+    writeFiles(repo, { 'scratch/a.ts': 'b\n' });
+    watcher.handleFileSystemEvent('change', 'a.ts');
+    expect(watcher.getModifiedFiles()).toEqual(['a.ts']);
+  });
+
+  it('treats a file name that looks like an option as a path when it asks git', () => {
+    const repo = ignoredRepo();
+    const watcher = watcherFor(repo);
+    writeFiles(repo, { '--help.log': 'x\n', '-q': 'x\n' });
+    watcher.handleFileSystemEvent('add', '--help.log');
+    watcher.handleFileSystemEvent('add', '-q');
+    expect(watcher.getModifiedFiles()).toEqual(['-q']);
+  });
+});
+
 describe('RepoWatcher rollback: bookkeeping', () => {
   it('raises one alarm per series of edits, and revert restores the version before the series', () => {
     const repo = makeTmpDir();
