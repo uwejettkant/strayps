@@ -116,7 +116,7 @@ describe('ProcessMonitor classification (production rules)', () => {
   });
 
   it('flags an old session in another repository as STALE once it has used no CPU time for the quiet window', async () => {
-    const { monitor, procs } = setup([
+    const { monitor, procs, alive } = setup([
       { pid: 500, ppid: 1, name: 'Code', cmd: '/Applications/Visual Studio Code.app/Contents/MacOS/Code' },
       { pid: 501, ppid: 500, name: 'Code Helper (Plugin)', cmd: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)' },
       // ps %cpu still shows a decaying average; the CPU time does not move
@@ -136,7 +136,7 @@ describe('ProcessMonitor classification (production rules)', () => {
     expect(session.status).toBe('STALE');
     expect(session.host).toBe('VS Code');
     expect(session.reason).toBe(
-      'Session in /work/other-repo, running for 2d 15h, idle: 0.05 s CPU time in the last 10m, attached to VS Code',
+      'Session in /work/other-repo, running for 2d 15h, idle: no new process and 0.05 s CPU time in the last 10m, attached to VS Code',
     );
     // an observation, not a verdict: age alone has been wrong about sessions still in use
     expect(session.reason).not.toMatch(/safe to kill/i);
@@ -145,11 +145,63 @@ describe('ProcessMonitor classification (production rules)', () => {
     // the editor itself is not an agent process
     expect((await monitor.scan(t0 + STALE_QUIET_SEC * 1000)).map((p) => p.pid).sort()).toEqual([502, 503]);
 
-    // as soon as it works again, it is no longer stale
-    procs.find((p) => p.pid === 502)!.cpuTimeSec = 813.0;
+    // as soon as it works again, it is no longer stale: a tool call starts a process
+    procs.push({ pid: 504, ppid: 502, name: 'git', cmd: 'git status' });
+    alive.add(504);
     const working = await at(STALE_QUIET_SEC + 2);
-    expect(working.status).toBe('ACTIVE');
-    expect(working.reason).toContain('in use: 0.60 s CPU time in the last 10m');
+    expect(working.status).not.toBe('STALE');
+    expect(working.reason).toContain('in use: started a process 0s ago');
+    // and it stays in use for the whole window after that, even when the process is gone again
+    procs.splice(procs.findIndex((p) => p.pid === 504), 1);
+    expect((await at(STALE_QUIET_SEC * 2)).status).not.toBe('STALE');
+    expect((await at(STALE_QUIET_SEC * 2 + 4)).status).toBe('STALE');
+  });
+
+  it('calls a resting agent stale although it ticks: idle agents used up to 6.5 s of CPU time per 10 minutes', async () => {
+    // Measured on 20.11.2026: idle agy 0.8 to 1.0 s, idle claude in a terminal 1.4 to 5.5 s, idle
+    // claude in Claude Desktop 4.6 to 6.5 s per 10 minutes; none of them started a process
+    const { monitor, procs } = setup([agent(502, OTHER, { etime: '02-15:40:05', cpuTimeSec: 100 }), mcp(503, 502, { cwd: OTHER, cpuTimeSec: 0.4 })]);
+    const t0 = Date.now();
+    for (let minute = 0; minute <= 10; minute++) {
+      procs[0].cpuTimeSec = 100 + minute * 0.65;
+      await monitor.scan(t0 + minute * 60_000);
+    }
+    const session = (await monitor.scan(t0 + 10 * 60_000)).find((p) => p.pid === 502)!;
+    expect(session.status).toBe('STALE');
+    expect(session.reason).toContain('idle: no new process and 6.50 s CPU time in the last 10m');
+  });
+
+  it('never calls a session stale while it starts processes, however little CPU time it uses', async () => {
+    // a working agent runs tools (a shell, git, rg, tests); a resting one starts nothing
+    const { monitor, procs, alive } = setup([agent(502, OTHER, { etime: '02-15:40:05', cpuTimeSec: 100 })]);
+    const t0 = Date.now();
+    for (let minute = 0; minute <= 60; minute++) {
+      if (minute % 8 === 0) {
+        procs.push({ pid: 9000 + minute, ppid: 502, name: 'zsh', cmd: '/bin/zsh -c git diff' });
+        alive.add(9000 + minute);
+      }
+      const [session] = (await monitor.scan(t0 + minute * 60_000)).filter((p) => p.pid === 502);
+      expect(session.status, `minute ${minute}`).not.toBe('STALE');
+    }
+  });
+
+  it('does not count the processes agent-leash starts itself as work of the agent that started it', async () => {
+    // agent-leash runs ps every 2 s; started from an agent's shell, that agent looked busy forever
+    const { monitor, procs, alive } = setup(
+      [
+        agent(502, OTHER, { etime: '02-15:40:05', cpuTimeSec: 100 }),
+        { pid: 600, ppid: 502, name: 'node', cmd: 'node agent-leash watch' },
+      ],
+      { selfPid: 600 },
+    );
+    const t0 = Date.now();
+    for (let minute = 0; minute <= 10; minute++) {
+      procs.push({ pid: 7000 + minute, ppid: 600, name: 'ps', cmd: 'ps -Ao pid,comm' });
+      alive.add(7000 + minute);
+      await monitor.scan(t0 + minute * 60_000);
+    }
+    const session = (await monitor.scan(t0 + 10 * 60_000)).find((p) => p.pid === 502)!;
+    expect(session.status).toBe('STALE');
   });
 
   it('never calls an old session in another repository stale while it keeps using CPU time', async () => {
@@ -157,11 +209,17 @@ describe('ProcessMonitor classification (production rules)', () => {
     const { monitor, procs } = setup([agent(502, OTHER, { etime: '02-15:40:05', cpuTimeSec: 100 })]);
     const t0 = Date.now();
     for (let minute = 0; minute <= 60; minute += 5) {
-      // a session at an open editor that is used now and then: 0.6 s of CPU time per minute
-      procs[0].cpuTimeSec = 100 + minute * 0.6;
+      // working without starting a process (a long answer): 1 s of CPU time per minute
+      procs[0].cpuTimeSec = 100 + minute * 1.0;
       const [session] = await monitor.scan(t0 + minute * 60_000);
       expect(session.status, `minute ${minute}`).not.toBe('STALE');
     }
+  });
+
+  it('says where a young session in another repository works instead of calling it the current one', async () => {
+    const { monitor } = setup([agent(502, OTHER, { etime: '30:00', cpuTimeSec: 1 })]);
+    const [session] = await monitor.scan(Date.now());
+    expect(session.reason).toBe('Session in /work/other-repo (open for 30m 0s)');
   });
 
   it('never calls a session stale when its CPU time cannot be read', async () => {

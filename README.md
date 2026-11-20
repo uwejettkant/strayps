@@ -68,7 +68,7 @@ The process list covers the whole machine, not just the watched repository. Each
 | `ACTIVE` | It used CPU time since the last scan |
 | `IDLE` | It used none; an agent of the watched repository is only ever `ACTIVE` or `IDLE` |
 | `STANDBY` | An MCP server whose parent is alive, waiting for its next tool call. An MCP server of an editor or desktop app that is still running stays `STANDBY`, however long it waits |
-| `STALE` | Older than 6 hours and used less than half a second of CPU time in ten minutes of watching: a session in another repository, or an MCP server that no running app holds |
+| `STALE` | Older than 6 hours, and in ten minutes of watching it started no new process (a working agent runs tools: a shell, `git`, tests) and used less than 8 seconds of CPU time: a session in another repository, or an MCP server that no running app holds |
 | `FROZEN` | Its parent is gone (an app that macOS started from the Dock or Finder does not count), it is at least 45 seconds old and used no CPU time since the last scan |
 
 These are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. An idle session at an editor window you will come back to tomorrow looks the same as a forgotten one. You end a process with `kill <pid>` in the terminal or from its row in the dashboard, after a confirmation: SIGTERM first, SIGKILL only if it does not exit.
@@ -210,7 +210,7 @@ npx agent-leash init                         # or write a file with every defaul
 | `limits.maxFilesHardStop` | `40` | Files modified in this session before the hard-stop alarm |
 | `limits.maxEditsPerFilePerMinute` | `5` | Edits to one file within 60 seconds before the circuit breaker raises an alarm |
 | `limits.mcpSilenceTimeoutSec` | `45` | Seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen |
-| `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale, if it is also measured idle for ten minutes |
+| `limits.staleSessionHours` | `6` | Hours after which an agent session in another repository counts as stale, if in ten minutes of watching it also started no new process and used less than 8 s of CPU time |
 | `protectedFiles` | `.env*`, `docker-compose*.yml` | Globs relative to the repository root. Your list replaces the default one, so keep `.env*` in it if you want those warnings |
 | `agents` | none | More program names to treat as coding agents, e.g. `vibe`. Not needed for agents that start MCP servers, nor for Claude Code, Codex and Aider ([how agents are recognized](#which-processes-count-as-agents)) |
 
@@ -325,7 +325,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 226 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 230 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

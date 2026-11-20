@@ -216,15 +216,18 @@ const CPU_TIME_TICK_SEC = 0.005;
 
 /**
  * A session in another repository is called stale only after agent-leash has watched it for this
- * long and it used less than STALE_CPU_BUDGET_SEC of CPU time in that window. A freshly started
- * watchdog therefore calls nothing stale for this long.
+ * long, it started no new process in that window, and it used less than STALE_CPU_BUDGET_SEC of
+ * CPU time in it. A freshly started watchdog therefore calls nothing stale for this long.
  */
 export const STALE_QUIET_SEC = 10 * 60;
 /**
- * Idle is not zero: measured on 19.11.2026, idle agent processes used 0.00 to 0.2 s of CPU time
- * per 2 minutes (timers, housekeeping), working ones 2 to 17 s.
+ * Idle is not zero. Measured on 20.11.2026 over 25 minutes, per 10 minutes: idle agy 0.8 to
+ * 1.0 s, idle claude in a terminal 1.4 to 5.5 s, idle claude in Claude Desktop 4.6 to 6.5 s; working
+ * claude 4.2 to 19.5 s. CPU time alone overlaps, so the main sign of work is a new child process
+ * (a tool call: a shell, git, rg, tests), which no idle session started; this budget only catches
+ * an agent that works for 10 minutes without starting anything.
  */
-export const STALE_CPU_BUDGET_SEC = 0.5;
+export const STALE_CPU_BUDGET_SEC = 8;
 /** Spacing of the CPU time samples kept per process for the window. */
 const CPU_SAMPLE_SPACING_MS = 30_000;
 
@@ -507,6 +510,8 @@ export class ProcessMonitor extends EventEmitter {
   /** CPU time samples per PID, oldest first, spaced CPU_SAMPLE_SPACING_MS apart. */
   private cpuSamples: Map<number, Array<{ at: number; cpuTimeSec: number }>> = new Map();
   private exitHookInstalled = false;
+  /** Per monitored process: the descendants seen so far and when a new one last appeared. */
+  private children: Map<number, { known: Set<number>; lastNewAt?: number }> = new Map();
   private readonly continueOnExit = (): void => {
     this.resumePaused();
   };
@@ -710,6 +715,30 @@ export class ProcessMonitor extends EventEmitter {
       candidateByPid.set(clientPid, client);
     }
 
+    // Descendants of every candidate, for "did it start a process?". agent-leash's own subtree is
+    // left out: its ps calls would make the agent that started it look busy forever.
+    const descendantsOf = new Map<number, number[]>();
+    for (const r of rawList) {
+      if (r.pid === this.selfPid) continue;
+      const chain: number[] = [];
+      let underSelf = false;
+      for (let cur = r.ppid, depth = 0; cur && cur > 1 && depth < 32; depth++) {
+        if (cur === this.selfPid) {
+          underSelf = true;
+          break;
+        }
+        chain.push(cur);
+        cur = parentByPid.get(cur);
+      }
+      if (underSelf) continue;
+      for (const ancestor of chain) {
+        if (!candidateByPid.has(ancestor)) continue;
+        const list = descendantsOf.get(ancestor);
+        if (list) list.push(r.pid);
+        else descendantsOf.set(ancestor, [r.pid]);
+      }
+    }
+
     const nearestAgent = (pid: number): number | undefined => {
       let cur = parentByPid.get(pid);
       for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
@@ -790,7 +819,12 @@ export class ProcessMonitor extends EventEmitter {
       // Undefined when the CPU time is unknown or the process has not been watched that long:
       // then there is no evidence of inactivity at all.
       const usedInWindowSec = this.cpuUsedInWindow(raw.pid, cpuTimeSec, now);
-      const quietLongEnough = usedInWindowSec !== undefined && usedInWindowSec < STALE_CPU_BUDGET_SEC;
+      const lastNewChildAt = this.trackChildren(raw.pid, descendantsOf.get(raw.pid) ?? [], now, reusedPid);
+      const startedProcessRecently =
+        lastNewChildAt !== undefined && now - lastNewChildAt < this.staleQuietSec * 1000;
+      const quietLongEnough =
+        usedInWindowSec !== undefined && usedInWindowSec < STALE_CPU_BUDGET_SEC && !startedProcessRecently;
+      const idleNote = `idle: no new process and ${formatCpu(usedInWindowSec ?? 0)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
       const lastActiveAt = existing
         ? hasCpuActivity
           ? now
@@ -852,7 +886,13 @@ export class ProcessMonitor extends EventEmitter {
       // STALE and FROZEN describe what is observed. They are never presented as "safe to kill":
       // age and silence alone have been wrong about sessions that were still in use.
       let status: ProcessHealthStatus = hasCpuActivity ? 'ACTIVE' : 'IDLE';
-      let reason = 'Active in current repository';
+      // The default when no rule below says more: where the process works, never a claim that it
+      // is in the watched repository when it is not
+      let reason = isOtherRepo
+        ? `Session in ${displayCwd} (open for ${formattedUptime})${hostNote}`
+        : belongsToWatchedRepo
+          ? 'Active in current repository'
+          : `Running for ${formattedUptime}${hostNote}`;
 
       if (!isOtherRepo && isDevServer) {
         status = 'ACTIVE';
@@ -862,14 +902,16 @@ export class ProcessMonitor extends EventEmitter {
         // a session in another repository is stale only when it is old AND has used no CPU time
         // for a measured window.
         status = 'STALE';
-        reason = `Session in ${displayCwd}, running for ${formattedUptime}, idle: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}${hostNote}`;
+        reason = `Session in ${displayCwd}, running for ${formattedUptime}, ${idleNote}${hostNote}`;
       } else if (isOtherRepo && isStaleByAge) {
         reason =
           cpuTimeSec === undefined
             ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; its CPU time cannot be read, so it is never called stale`
             : usedInWindowSec === undefined
               ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; watching for ${formatDuration(this.staleQuietSec)} whether it is still in use`
-              : `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; in use: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
+              : startedProcessRecently
+                ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; in use: started a process ${formatDuration(Math.floor((now - lastNewChildAt!) / 1000))} ago`
+                : `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; in use: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
       } else if (
         !belongsToWatchedRepo &&
         !rawCwd &&
@@ -880,7 +922,7 @@ export class ProcessMonitor extends EventEmitter {
       ) {
         // Detached MCP process without a repository cwd, older than staleSessionHours
         status = 'STALE';
-        reason = `MCP process without a working directory, running for ${formattedUptime}, idle: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}${hostNote}`;
+        reason = `MCP process without a working directory, running for ${formattedUptime}, ${idleNote}${hostNote}`;
       } else if (isOrphaned && !hasCpuActivity && elapsedSec >= this.mcpSilenceTimeoutSec) {
         status = 'FROZEN';
         reason = `Orphaned: its parent is gone (PPID 1), running for ${formattedUptime}`;
@@ -962,12 +1004,31 @@ export class ProcessMonitor extends EventEmitter {
         this.paused.delete(pid);
         this.alertedPids.delete(pid);
         this.cpuSamples.delete(pid);
+        this.children.delete(pid);
       }
     }
 
     const processes = this.getProcesses();
     this.emit('scan-complete', processes);
     return processes;
+  }
+
+  /**
+   * Remembers the descendants of a process and returns when a new one last appeared. The ones
+   * there when watching starts are not new: an agent's MCP servers run all the time.
+   */
+  private trackChildren(pid: number, current: number[], now: number, reusedPid: boolean): number | undefined {
+    const state = this.children.get(pid);
+    if (!state || reusedPid) {
+      this.children.set(pid, { known: new Set(current) });
+      return undefined;
+    }
+    for (const child of current) {
+      if (!state.known.has(child)) state.lastNewAt = now;
+    }
+    // Only the living ones: a PID used again later is a new process
+    state.known = new Set(current);
+    return state.lastNewAt;
   }
 
   /**
