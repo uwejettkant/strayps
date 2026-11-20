@@ -22,8 +22,11 @@ export interface CommandResult {
   showHelp?: boolean;
   /** The front end should print or show the current status. */
   showStatus?: boolean;
-  /** The command changes or destroys something and only runs after an explicit yes. */
-  confirm?: { prompt: string; run: () => CommandResult };
+  /**
+   * The command changes or destroys something and only runs after an explicit yes. `details` are
+   * lines a front end shows in full before the question, one per process that the answer affects.
+   */
+  confirm?: { prompt: string; details?: string[]; run: () => CommandResult };
 }
 
 export const COMMAND_NAMES = ['help', 'status', 'revert', 'kill', 'pause', 'resume', 'exit'];
@@ -31,7 +34,7 @@ export const COMMAND_NAMES = ['help', 'status', 'revert', 'kill', 'pause', 'resu
 export const HELP_LINES: Array<[string, string]> = [
   ['exit, quit, q', 'stop the watchdog (Ctrl+C works too)'],
   ['revert <file>', 'roll one file back to the version before its latest changes'],
-  ['kill <pid>', 'terminate one monitored process (SIGTERM, then SIGKILL)'],
+  ['kill <pid>', 'terminate one process; for an agent, its session (asks first)'],
   ['pause', "hold this repo's agents (nothing is lost)"],
   ['resume', 'continue what pause held'],
   ['status', 'list all monitored processes'],
@@ -51,6 +54,12 @@ function describeProcesses(processes: MonitoredProcess[], shown: number = 3): st
   const names = processes.slice(0, shown).map((p) => `${sanitize(shortName(p))} ${p.pid}`);
   const more = processes.length > shown ? `, … (+${processes.length - shown} more)` : '';
   return `${names.join(', ')}${more}`;
+}
+
+/** One line per process in a confirmation: what it is, where it works, what it holds. */
+function describeForConfirmation(proc: MonitoredProcess): string {
+  const where = proc.cwd ? `  ${sanitize(proc.cwd)}` : '';
+  return `PID ${proc.pid}  ${proc.category}  ${sanitize(shortName(proc))}${where}  ${proc.memoryMb.toFixed(0)} MB`;
 }
 
 const EXIT_WORDS = new Set(['exit', 'quit', 'q', ':q', 'stop', 'bye']);
@@ -174,16 +183,55 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
     }
 
     case 'kill': {
-      const proc = session.getSnapshot().processes.find((p) => p.pid === command.pid);
-      if (!proc) {
+      const plan = session.getKillPlan(command.pid);
+      if (!plan) {
         return {
           message: `PID ${command.pid} is not in the monitored process list`,
           level: 'error',
         };
       }
+      const proc = plan.target;
       const where = proc.cwd ? `, ${sanitize(proc.cwd)}` : '';
       const attached =
         proc.host && proc.host !== 'detached' ? ` It is attached to ${sanitize(proc.host)}.` : '';
+      if (plan.alsoEnds.length > 0) {
+        // The question stays short and the processes go into lines of their own: the question is
+        // one line in the full-screen view, and a list in it was cut off at the terminal width
+        const others = plan.alsoEnds;
+        const confirmations = others.map((p) => ({ pid: p.pid, firstSeenAt: p.firstSeenAt }));
+        const totalMb = [proc, ...others].reduce((sum, p) => sum + (p.memoryMb || 0), 0);
+        const count = `${others.length} process${others.length === 1 ? '' : 'es'}`;
+        return {
+          message: '',
+          level: 'warn',
+          confirm: {
+            // Short enough that [y/N] stays visible at 80 columns
+            prompt: `End PID ${proc.pid} and the ${count} it started (${totalMb.toFixed(0)} MB)?`,
+            details: [
+              `${describeForConfirmation(proc)}${proc.host && proc.host !== 'detached' ? `  attached to ${sanitize(proc.host)}` : ''}`,
+              ...others.map(describeForConfirmation),
+            ],
+            run: () => {
+              const result = session.killProcess(proc.pid, { firstSeenAt: proc.firstSeenAt, also: confirmations });
+              if (!result.ok) return { message: result.error, level: 'error' };
+              const ended = result.alsoEnded?.length ?? 0;
+              const endedText = `${ended} process${ended === 1 ? '' : 'es'} it started`;
+              const parts = [
+                result.targetSignalled === false
+                  ? `PID ${proc.pid} had already exited; sent SIGTERM to the ${endedText}`
+                  : `Sent SIGTERM to PID ${proc.pid} and the ${endedText}`,
+              ];
+              const left = result.leftRunning ?? [];
+              if (left.length > 0) parts.push(`PID ${left.join(', ')} ${left.length === 1 ? 'was' : 'were'} not in the confirmation and ${left.length === 1 ? 'keeps' : 'keep'} running`);
+              const gone = result.notFound ?? [];
+              if (gone.length > 0) parts.push(`PID ${gone.join(', ')} had exited or no longer ${gone.length === 1 ? 'belongs' : 'belong'} to the session, nothing sent`);
+              const failed = result.failed ?? [];
+              if (failed.length > 0) parts.push(`PID ${failed.join(', ')} could not be signalled`);
+              return { message: parts.join('; '), level: left.length > 0 || failed.length > 0 ? 'warn' : 'info' };
+            },
+          },
+        };
+      }
       const agentNote = proc.category === 'agent' ? ' Its agent session ends.' : '';
       return {
         message: '',
@@ -191,7 +239,7 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
         confirm: {
           prompt: `Terminate PID ${proc.pid} (${sanitize(proc.cmd)}${where}, ${proc.memoryMb.toFixed(0)} MB)?${agentNote}${attached}`,
           run: () => {
-            const result = session.killProcess(proc.pid);
+            const result = session.killProcess(proc.pid, { firstSeenAt: proc.firstSeenAt });
             return result.ok
               ? { message: `Sent SIGTERM to PID ${proc.pid}`, level: 'info' }
               : { message: result.error, level: 'error' };

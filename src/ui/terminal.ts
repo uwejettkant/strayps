@@ -74,6 +74,8 @@ export interface FrameView {
   input: string;
   notice: FrameNotice | null;
   confirmPrompt: string | null;
+  /** Lines naming everything the open question affects, shown in full instead of the body. */
+  confirmDetails?: string[] | null;
   /** Full-height view replacing the normal body until the next key press. */
   overlay: 'help' | 'processes' | null;
   palette: Palette;
@@ -85,6 +87,8 @@ export interface Frame {
   lines: string[];
   /** 1-based cursor position inside the input line. */
   cursor: { row: number; col: number };
+  /** Lines of the open question that did not fit the screen; the question is not answerable then. */
+  hiddenConfirmDetails: number;
 }
 
 function metricCells(view: FrameView): Seg[][] {
@@ -258,6 +262,26 @@ function helpRows(view: FrameView): Seg[][] {
 }
 
 /**
+ * What the open question affects, one line each. When the lines do not fit, the question cannot be
+ * answered with yes (TerminalUI refuses it): a person must see everything that ends.
+ */
+function confirmRows(view: FrameView, details: string[], available: number): { rows: Seg[][]; hidden: number } {
+  const p = view.palette;
+  const rows: Seg[][] = [[seg(' ENDS WHEN YOU ANSWER y', p.strong)]];
+  const room = Math.max(0, available - 3);
+  const shown = details.length <= room ? details : details.slice(0, Math.max(0, room - 1));
+  for (const line of shown) rows.push([seg(`   ${line}`, p.warn)]);
+  const hidden = details.length - shown.length;
+  rows.push([seg('')]);
+  rows.push(
+    hidden > 0
+      ? [seg(` ${hidden} more do not fit: make the terminal taller to see them, or press any key to cancel`, p.danger)]
+      : [seg(' y ends them · any other key cancels', p.dim)],
+  );
+  return { rows: rows.slice(0, Math.max(0, available)), hidden };
+}
+
+/**
  * Renders the whole screen for the given state. Pure: same input, same lines.
  */
 export function renderFrame(view: FrameView): Frame {
@@ -316,7 +340,12 @@ export function renderFrame(view: FrameView): Frame {
 
   const available = rows - header.length - footer.length;
 
-  if (view.overlay === 'help') {
+  let hiddenConfirmDetails = 0;
+  if (view.confirmPrompt && view.confirmDetails && view.confirmDetails.length > 0 && !view.overlay) {
+    const confirm = confirmRows(view, view.confirmDetails, available);
+    body.push(...confirm.rows);
+    hiddenConfirmDetails = confirm.hidden;
+  } else if (view.overlay === 'help') {
     body.push(...helpRows(view).slice(0, Math.max(0, available)));
   } else if (view.overlay === 'processes') {
     body.push(...processOverlayRows(view, available));
@@ -382,7 +411,7 @@ export function renderFrame(view: FrameView): Frame {
     : Math.min(cols, prompt.length + Array.from(shownInput).length + 1);
   const cursorRow = view.confirmPrompt ? rows - 1 : rows;
 
-  return { lines: lines.slice(0, rows), cursor: { row: cursorRow, col: cursorCol } };
+  return { lines: lines.slice(0, rows), cursor: { row: cursorRow, col: cursorCol }, hiddenConfirmDetails };
 }
 
 // --- Interactive controller ---------------------------------------------------------------------
@@ -439,7 +468,7 @@ export class TerminalUI {
   private exitRequested = false;
   private input = '';
   private notice: FrameNotice | null = null;
-  private confirm: { prompt: string; run: () => ReturnType<typeof runCommand> } | null = null;
+  private confirm: { prompt: string; details?: string[]; run: () => ReturnType<typeof runCommand> } | null = null;
   private overlay: 'help' | 'processes' | null = null;
   private history: string[] = [];
   private historyIndex = -1;
@@ -510,7 +539,15 @@ export class TerminalUI {
 
   public renderNow(): void {
     if (!this.active) return;
-    const frame = renderFrame({
+    const frame = this.currentFrame();
+    // One write per frame; synchronized-output markers avoid tearing where supported.
+    this.stdout.write(
+      `${ESC}[?2026h${ESC}[?25l${ESC}[H${frame.lines.join(`${ESC}[K\r\n`)}${ESC}[K${ESC}[${frame.cursor.row};${frame.cursor.col}H${ESC}[?25h${ESC}[?2026l`,
+    );
+  }
+
+  private currentFrame(): Frame {
+    return renderFrame({
       snapshot: this.session.getSnapshot(),
       cols: this.stdout.columns ?? 80,
       rows: this.stdout.rows ?? 24,
@@ -520,14 +557,11 @@ export class TerminalUI {
       input: this.input,
       notice: this.notice,
       confirmPrompt: this.confirm?.prompt ?? null,
+      confirmDetails: this.confirm?.details ?? null,
       overlay: this.overlay,
       palette: this.palette,
       now: Date.now(),
     });
-    // One write per frame; synchronized-output markers avoid tearing where supported.
-    this.stdout.write(
-      `${ESC}[?2026h${ESC}[?25l${ESC}[H${frame.lines.join(`${ESC}[K\r\n`)}${ESC}[K${ESC}[${frame.cursor.row};${frame.cursor.col}H${ESC}[?25h${ESC}[?2026l`,
-    );
   }
 
   /** Feeds raw terminal input (keys, pasted text, escape sequences) into the UI. */
@@ -600,9 +634,16 @@ export class TerminalUI {
     if (this.dismissOverlay()) return;
 
     if (this.confirm) {
+      // Everything that ends must have been on the screen: with lines cut off, yes is not taken
+      const hidden = char === 'y' || char === 'Y' ? this.currentFrame().hiddenConfirmDetails : 0;
       const pending = this.confirm;
       this.confirm = null;
-      if (char === 'y' || char === 'Y') {
+      if (hidden > 0) {
+        this.notice = {
+          text: `Nothing was ended: ${hidden} of the processes did not fit on the screen. Make the terminal taller and ask again.`,
+          level: 'warn',
+        };
+      } else if (char === 'y' || char === 'Y') {
         this.applyResult(pending.run());
       } else {
         this.notice = { text: 'Cancelled — nothing was changed', level: 'info' };

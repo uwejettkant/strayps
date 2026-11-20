@@ -78,7 +78,7 @@ node dist/cli.js watch --demo --no-dashboard < /dev/null &   # must keep running
 Start `node dist/cli.js watch --demo --port 47381` and open `http://localhost:47381/`.
 
 - No console errors; styles applied; `stream: connected`.
-- `revert` on an event and `Kill PID` on any process open the dialog first, cancel changes nothing, confirm acts. Pause names the processes it holds, cancels and confirms; while something is held the button reads Resume and continues without a dialog. A `rollback` line has no `revert` button. No button or label offers a bulk cleanup or says "safe to kill".
+- `revert` on an event and `Kill PID` / `End session` on any process open the dialog first (`End session` lists every process that ends with the agent), cancel changes nothing, confirm acts. Pause names the processes it holds, cancels and confirms; while something is held the button reads Resume and continues without a dialog. A `rollback` line has no `revert` button. No button or label offers a bulk cleanup or says "safe to kill".
 - From a shell: `curl -X POST http://127.0.0.1:47381/api/rollback-file -d '{"filePath":"a.ts"}'` must answer 403 (no token).
 
 Hostile names, in a sandbox without `--demo` (read the page, click nothing that kills):

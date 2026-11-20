@@ -41,7 +41,7 @@ Activity is measured, not read from `ps %cpu`: the lister reads the CPU time a p
 
 "Belongs to the watched repository" (`inWatchedRepo`) means: its own working directory is inside the repository, **or** one of its ancestors in the process tree is such a process. MCP servers often run in `/` or in their install directory; only the tree tells whose they are.
 
-`agentPid` is the nearest monitored agent a process descends from. `pauseTarget` is true for the agents of the watched repository and for the processes they started; `pause` holds exactly those (SIGSTOP) and `resume` continues them. A dev server started from the user's terminal, an editor and its MCP servers, and every session in another repository are never paused. A held process is never reported `STALE` or `FROZEN`.
+`agentPid` is the nearest monitored agent a process descends from. It also decides what ends with an agent (`WatchdogSession.getKillPlan`): every monitored process whose `agentPid` chain leads to it. A mistake in `agentPid` therefore changes what `kill` on an agent ends, not only what `pause` holds. `pauseTarget` is true for the agents of the watched repository and for the processes they started; `pause` holds exactly those (SIGSTOP) and `resume` continues them. A dev server started from the user's terminal, an editor and its MCP servers, and every session in another repository are never paused. A held process is never reported `STALE` or `FROZEN`.
 
 `host` names the application a process tree hangs off (VS Code, Claude Desktop, a terminal …). It is shown to the user, keeps rule 3 of section 1 away from apps, and keeps rule 3 of section 2 away from MCP servers of an app that is still running. It changes nothing else in the classification.
 

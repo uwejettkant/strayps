@@ -353,12 +353,37 @@
       return data;
     }
 
-    async function killProcess(pid) {
-      const data = await post('/api/kill/' + pid);
+    async function killProcess(pid, firstSeenAt, also) {
+      const body = {};
+      if (typeof firstSeenAt === 'number') body.firstSeenAt = firstSeenAt;
+      if (also && also.length > 0) body.also = also;
+      const data = await post('/api/kill/' + pid, Object.keys(body).length > 0 ? body : undefined);
       if (data) {
         renderStatus(data.status);
-        setToast('sent SIGTERM to PID ' + pid, true);
+        const ended = (data.alsoEnded || []).length;
+        const endedText = ended + ' process' + (ended === 1 ? '' : 'es') + ' it started';
+        const left = data.leftRunning || [];
+        const gone = data.notFound || [];
+        setToast(
+          (also && also.length > 0
+            ? data.targetSignalled === false
+              ? 'PID ' + pid + ' had already exited; sent SIGTERM to the ' + endedText
+              : 'sent SIGTERM to PID ' + pid + ' and the ' + endedText
+            : 'sent SIGTERM to PID ' + pid) +
+            (left.length > 0 ? '; PID ' + left.join(', ') + ' not in the confirmation, still running' : '') +
+            (gone.length > 0 ? '; PID ' + gone.join(', ') + ' had exited or left the session, nothing sent' : '') +
+            ((data.failed || []).length > 0 ? '; PID ' + data.failed.join(', ') + ' could not be signalled' : ''),
+          true,
+        );
       }
+    }
+
+    // What ends with an agent comes from the server's snapshot (one source); the server checks
+    // the confirmed list against its own view again before it ends anything.
+    function sessionProcesses(pid, state) {
+      const members = ((state && state.sessionMembers) || {})[pid] || [];
+      const processes = (state && state.processes) || [];
+      return members.map((member) => processes.find((p) => p.pid === member)).filter(Boolean);
     }
 
     async function rollbackFile(filePath) {
@@ -437,8 +462,26 @@
         });
       } else if (action === 'kill') {
         const pid = Number(target.getAttribute('data-pid'));
-        const proc = ((lastStatus && lastStatus.processes) || []).find((p) => p.pid === pid);
+        const processes = (lastStatus && lastStatus.processes) || [];
+        const proc = processes.find((p) => p.pid === pid);
         if (!proc) return;
+        const others = sessionProcesses(pid, lastStatus);
+        if (others.length > 0) {
+          const totalMb = [proc, ...others].reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
+          confirmAction({
+            heading: 'End the session of PID ' + pid + '?',
+            body:
+              proc.cmd + (proc.cwd ? ' in ' + proc.cwd : '') + '. ' + (proc.reason ? proc.reason + '. ' : '') +
+              'It started ' + others.length + ' process' + (others.length === 1 ? '' : 'es') + ' that end with it: ' +
+              others
+                .map((p) => 'PID ' + p.pid + ' (' + p.cmd + (p.category === 'agent' && p.cwd ? ' in ' + p.cwd : '') + ')')
+                .join(', ') + '. ' +
+              totalMb.toFixed(0) + ' MB together. Each gets SIGTERM first and SIGKILL only if it does not exit.',
+            confirmLabel: 'End session',
+            run: () => killProcess(pid, proc.firstSeenAt, others.map((p) => ({ pid: p.pid, firstSeenAt: p.firstSeenAt }))),
+          });
+          return;
+        }
         confirmAction({
           heading: 'Terminate PID ' + pid + '?',
           body:
@@ -446,7 +489,7 @@
             (proc.category === 'agent' ? 'Its agent session ends. ' : '') +
             'It gets SIGTERM first and SIGKILL only if it does not exit.',
           confirmLabel: 'Terminate PID ' + pid,
-          run: () => killProcess(pid),
+          run: () => killProcess(pid, proc.firstSeenAt),
         });
       }
     });
@@ -566,6 +609,7 @@
       container.innerHTML = procs
         .map((proc) => {
           const flagged = isStaleOrFrozen(proc);
+          const endsSession = sessionProcesses(proc.pid, lastStatus).length > 0;
           const statusBadge =
             proc.status === 'FROZEN'
               ? 'bg-red-950 text-red-300 border-red-500/50 animate-pulse'
@@ -629,9 +673,9 @@
                 data-action="kill"
                 data-pid="${pid}"
                 class="shrink-0 px-2.5 py-1.5 rounded border border-[#2E4237] text-[#B4C3BA] hover:border-red-400 hover:text-red-300 cursor-pointer"
-                title="Terminate this process (asks first)"
+                title="${endsSession ? 'End this agent and the processes it started (asks first)' : 'Terminate this process (asks first)'}"
               >
-                Kill PID
+                ${endsSession ? 'End session' : 'Kill PID'}
               </button>
             </div>
           `;

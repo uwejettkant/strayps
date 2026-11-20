@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StatusSnapshot } from '../src/core/session.js';
 import { cleanupTmpDirs, createHarness, exists, read, writeFiles } from './helpers/harness.js';
@@ -69,6 +70,150 @@ describe('WatchdogSession', () => {
       type: 'process-killed',
       message: expect.stringContaining('Sent SIGTERM to PID 300'),
     });
+  });
+
+  it('ends an agent session together with the processes it started, exactly the ones confirmed', async () => {
+    // Ending only the agent left its MCP servers behind as orphans, to be found and ended one by one
+    const h = createHarness({
+      procs: [
+        { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', cpuTimeSec: 1.5 },
+        { pid: 401, ppid: 400, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '03-00:00:00' },
+        { pid: 402, ppid: 400, name: 'codex', cmd: 'codex exec', cwd: OTHER, etime: '01:00:00' },
+        { pid: 403, ppid: 402, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-fetch', etime: '01:00:00' },
+        { pid: 404, ppid: 400, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-time', etime: '01:00:00' },
+        // another session and an editor's MCP server stay untouched
+        { pid: 500, name: 'claude', cmd: 'claude', cwd: '/work/third-repo', etime: '01:00:00' },
+        { pid: 501, ppid: 500, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '01:00:00' },
+        { pid: 600, ppid: 1, pgid: 600, name: 'Code', cmd: '/Applications/Visual Studio Code.app/Contents/MacOS/Code' },
+        { pid: 601, ppid: 600, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '01:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+
+    const plan = h.session.getKillPlan(400)!;
+    expect(plan.target.pid).toBe(400);
+    // agents first: they are what a person most needs to see before saying yes
+    expect(plan.alsoEnds[0].pid).toBe(402);
+    expect(plan.alsoEnds.map((p) => p.pid).sort()).toEqual([401, 402, 403, 404]);
+    // a nested agent's plan leaves out its parent and its siblings
+    expect(h.session.getKillPlan(402)!.alsoEnds.map((p) => p.pid)).toEqual([403]);
+    // a process that is not an agent ends alone
+    expect(h.session.getKillPlan(401)!.alsoEnds).toEqual([]);
+    expect(h.session.getKillPlan(4242)).toBeNull();
+    expect(h.session.getSnapshot().sessionMembers).toEqual({
+      400: plan.alsoEnds.map((p) => p.pid),
+      402: [403],
+      500: [501],
+    });
+
+    const shown = (pid: number) => ({ pid, firstSeenAt: plan.alsoEnds.find((p) => p.pid === pid)?.firstSeenAt ?? 0 });
+    // 501 and 601 are not part of this session; 404 was not confirmed; 999 is gone
+    const result = h.session.killProcess(400, {
+      also: [shown(401), shown(402), shown(403), { pid: 501, firstSeenAt: 0 }, { pid: 601, firstSeenAt: 0 }, { pid: 999, firstSeenAt: 0 }],
+    });
+    expect(result).toMatchObject({ ok: true, pid: 400, targetSignalled: true, leftRunning: [404], notFound: [501, 601, 999], failed: [] });
+    expect(result.ok && [...(result.alsoEnded ?? [])].sort()).toEqual([401, 402, 403]);
+    expect(h.kills.map((k) => k.pid).sort()).toEqual([400, 401, 402, 403]);
+    expect(h.kills[0]).toEqual({ pid: 400, signal: 'SIGTERM' });
+    expect(h.session.getSnapshot().events[0]).toMatchObject({
+      type: 'process-alert',
+      severity: 'warn',
+      message: 'PID 404 belongs to the session of PID 400 but was not in the confirmation, so it keeps running',
+    });
+  });
+
+  it('takes an agent it started only when that agent works in the same directory, never in home or /', async () => {
+    // An editor that starts MCP servers and is not a known host counts as an agent; the sessions
+    // in its terminal, in other repositories, must not end with it
+    const home = os.homedir();
+    const h = createHarness({
+      procs: [
+        { pid: 700, name: 'nvim', cmd: 'nvim', cwd: '/work', etime: '05:00:00' },
+        { pid: 701, ppid: 700, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-hub', etime: '05:00:00' },
+        // a repository below the target's directory is still another session
+        { pid: 702, ppid: 700, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '04:00:00' },
+        { pid: 703, ppid: 702, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '04:00:00' },
+        // no working directory: not known to be the same directory either
+        { pid: 704, ppid: 700, name: 'codex', cmd: 'codex', etime: '04:00:00' },
+        // the same directory: part of the session
+        { pid: 705, ppid: 700, name: 'codex', cmd: 'codex exec', cwd: '/work', etime: '04:00:00' },
+        // started from the home directory, both of them: home is not a shared repository
+        { pid: 800, name: 'nvim', cmd: 'nvim', cwd: home, etime: '05:00:00' },
+        { pid: 801, ppid: 800, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-hub', etime: '05:00:00' },
+        { pid: 802, ppid: 800, name: 'claude', cmd: 'claude', cwd: home, etime: '04:00:00' },
+        { pid: 803, ppid: 800, name: 'claude', cmd: 'claude', cwd: `${home}/work/other`, etime: '04:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+    expect(h.session.getKillPlan(700)!.alsoEnds.map((p) => p.pid)).toEqual([705, 701]);
+    expect(h.session.getKillPlan(800)!.alsoEnds.map((p) => p.pid)).toEqual([801]);
+  });
+
+  it('ends nothing of a session whose agent is gone or whose PIDs were reused since the question', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' },
+        { pid: 401, ppid: 400, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '03-00:00:00' },
+      ],
+    });
+    const t0 = Date.now();
+    await h.monitor.scan(t0);
+    const shown = h.session.getKillPlan(400)!.alsoEnds.map((p) => ({ pid: p.pid, firstSeenAt: p.firstSeenAt }));
+
+    // 401 exits and a different process gets the same PID while the question is open
+    h.procs.splice(1, 1);
+    await h.monitor.scan(t0 + 2000);
+    h.procs.push({ pid: 401, ppid: 400, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-time', etime: '00:01' });
+    await h.monitor.scan(t0 + 4000);
+    expect(h.session.killProcess(400, { also: shown })).toMatchObject({ ok: true, alsoEnded: [], leftRunning: [401] });
+    expect(h.kills.map((k) => k.pid)).toEqual([400]);
+
+    // the agent itself is gone by the time the answer comes
+    const g = createHarness({
+      procs: [
+        { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' },
+        { pid: 401, ppid: 400, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '03-00:00:00' },
+      ],
+    });
+    await g.monitor.scan();
+    const confirmed = g.session.getKillPlan(400)!.alsoEnds.map((p) => ({ pid: p.pid, firstSeenAt: p.firstSeenAt }));
+    g.procs.splice(0, 1);
+    g.procs[0].ppid = 1;
+    await g.monitor.scan();
+    expect(g.session.killProcess(400, { also: confirmed })).toEqual({
+      ok: false,
+      pid: 400,
+      error: 'PID 400 is no longer running, so nothing was ended; the processes it started are listed on their own now',
+    });
+    expect(g.kills).toEqual([]);
+  });
+
+  it('ends nothing when the named PID belongs to a different process than the one shown', async () => {
+    const h = createHarness({ procs: [{ pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' }] });
+    const t0 = Date.now();
+    await h.monitor.scan(t0);
+    const shown = h.session.getKillPlan(400)!.target.firstSeenAt;
+    // within one scan interval the PID goes to a new process: it is younger than the old one was
+    h.procs[0] = { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '00:01' };
+    await h.monitor.scan(t0 + 2000);
+    expect(h.session.killProcess(400, { firstSeenAt: shown })).toEqual({
+      ok: false,
+      pid: 400,
+      error: 'PID 400 now belongs to a different process than the one shown, so nothing was ended',
+    });
+    expect(h.kills).toEqual([]);
+  });
+
+  it('ends only the named process when no other PIDs are confirmed', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', cpuTimeSec: 1.5 },
+        { pid: 401, ppid: 400, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '03-00:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+    expect(h.session.killProcess(400)).toEqual({ ok: true, pid: 400 });
+    expect(h.kills).toEqual([{ pid: 400, signal: 'SIGTERM' }]);
   });
 
   it('reports stale and frozen processes, but never terminates one because of its status', async () => {

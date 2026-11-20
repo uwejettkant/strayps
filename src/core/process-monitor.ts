@@ -737,7 +737,14 @@ export class ProcessMonitor extends EventEmitter {
           ? Number((raw.rssKb / 1024).toFixed(1))
           : Number((memory * 16).toFixed(1));
 
-      const existing = this.tracked.get(raw.pid);
+      // A PID the system handed to a new process since the last scan: the new one is younger than
+      // the old one was. Its history (first seen, CPU samples) must not carry over, or a confirmation
+      // given for the old process would match the new one.
+      const previous = this.tracked.get(raw.pid);
+      const reusedPid =
+        previous !== undefined && raw.etime !== undefined && parseElapsedTime(raw.etime).elapsedSec + 2 < previous.elapsedSec;
+      if (reusedPid) this.cpuSamples.delete(raw.pid);
+      const existing = reusedPid ? undefined : previous;
       // Measured activity: did the process use CPU time since the last scan? `ps %cpu` is a
       // decaying average on macOS and the lifetime average on Linux, so it says little about now.
       // It is the fallback only for the first scan and for a lister without CPU time.

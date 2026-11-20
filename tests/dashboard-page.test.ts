@@ -101,6 +101,24 @@ function loadDashboard() {
 
 const HOSTILE = `<img src=x onerror="fetch('/api/panic',{method:'POST'})">`;
 
+/** The dashboard plus a click on a rendered button and an answer to the confirmation dialog. */
+function loadDashboardWithClicks() {
+  const loaded = loadDashboard();
+  const ElementClass = (loaded.api as unknown as { Element: new () => object }).Element;
+  const click = (attributes: Record<string, string>) => {
+    const button = { getAttribute: (name: string) => attributes[name] ?? null };
+    const target = Object.assign(new ElementClass(), { closest: () => button });
+    for (const listener of loaded.documentListeners.click ?? []) listener({ target });
+  };
+  const dialog = loaded.getElementById('confirm-dialog');
+  const answer = async (choice: string) => {
+    dialog.returnValue = choice;
+    dialog.open = false;
+    for (const listener of dialog.listeners.close ?? []) await listener({});
+  };
+  return { ...loaded, click, answer };
+}
+
 function stateWith(overrides: Record<string, unknown> = {}) {
   return {
     rootDir: '/work/repo',
@@ -303,6 +321,53 @@ describe('dashboard page', () => {
     const markup = getElementById('activity-list').innerHTML;
     expect(markup).toContain('data-path="a.ts"');
     expect(markup).not.toContain('data-path="b.ts"');
+  });
+
+  it('offers to end an agent session with the processes it started and names each one first', async () => {
+    const { api, getElementById, requests, click, answer } = loadDashboardWithClicks();
+    api.renderStatus(
+      stateWith({
+        processes: [
+          { pid: 4711, status: 'IDLE', category: 'agent', cmd: 'claude', cwd: '/work/other', memoryMb: 300, cpu: 0, firstSeenAt: 11 },
+          { pid: 4714, status: 'IDLE', category: 'agent', cmd: 'codex exec', cwd: '/work/other/api', memoryMb: 50, cpu: 0, firstSeenAt: 14, agentPid: 4711 },
+          { pid: 4712, status: 'STANDBY', category: 'mcp', cmd: 'node mcp-server-git', memoryMb: 40, cpu: 0, firstSeenAt: 12, agentPid: 4711 },
+          { pid: 4713, status: 'STANDBY', category: 'mcp', cmd: 'node <img src=x>', memoryMb: 10, cpu: 0, firstSeenAt: 13, agentPid: 4714 },
+          { pid: 4800, status: 'IDLE', category: 'agent', cmd: 'claude', memoryMb: 200, cpu: 0, firstSeenAt: 80 },
+        ],
+        // the server decides what belongs to a session; the page only shows it
+        sessionMembers: { 4711: [4714, 4712, 4713], 4714: [4713] },
+      }),
+    );
+    const list = getElementById('process-list').innerHTML;
+    expect(list.match(/End session/g)).toHaveLength(2);
+    expect(list).not.toContain('<img src=x>');
+
+    // an agent the server lists no session for ends alone
+    click({ 'data-action': 'kill', 'data-pid': '4800' });
+    expect(getElementById('confirm-dialog-heading').textContent).toBe('Terminate PID 4800?');
+
+    click({ 'data-action': 'kill', 'data-pid': '4711' });
+    expect(getElementById('confirm-dialog-heading').textContent).toBe('End the session of PID 4711?');
+    expect(getElementById('confirm-dialog-body').textContent).toBe(
+      'claude in /work/other. It started 3 processes that end with it: PID 4714 (codex exec in /work/other/api), PID 4712 (node mcp-server-git), PID 4713 (node <img src=x>). 400 MB together. Each gets SIGTERM first and SIGKILL only if it does not exit.',
+    );
+    expect(getElementById('confirm-dialog-confirm').textContent).toBe('End session');
+    await answer('confirm');
+    const posts = requests.filter((r) => r.init?.method === 'POST');
+    expect(posts.map((r) => [r.url, r.init?.body])).toEqual([
+      [
+        '/api/kill/4711',
+        JSON.stringify({
+          firstSeenAt: 11,
+          also: [
+            { pid: 4714, firstSeenAt: 14 },
+            { pid: 4712, firstSeenAt: 12 },
+            { pid: 4713, firstSeenAt: 13 },
+          ],
+        }),
+      ],
+    ]);
+
   });
 
   it('sends the token with every state-changing request', async () => {

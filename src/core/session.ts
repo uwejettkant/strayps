@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import os from 'node:os';
 import {
   CONFIG_FILENAME,
   type ConfigReloadResult,
@@ -35,6 +36,8 @@ export interface StatusSnapshot {
   limitState: 'ok' | 'warn' | 'hard-stop';
   events: WatchActivityEvent[];
   processes: MonitoredProcess[];
+  /** For every agent that started monitored processes: the PIDs that end with it (`getKillPlan`). */
+  sessionMembers: Record<number, number[]>;
   timestamp: number;
 }
 
@@ -43,7 +46,47 @@ export interface PauseResult {
   pids: number[];
 }
 
-export type KillResult = { ok: true; pid: number } | { ok: false; pid: number; error: string };
+/**
+ * One process a person confirmed for ending, as it was shown: PID and the time agent-leash first
+ * saw it. A PID that exited and was reused by another process while the question was open has a
+ * different `firstSeenAt` and is not ended.
+ */
+export interface KillConfirmation {
+  pid: number;
+  firstSeenAt: number;
+}
+
+export type KillResult =
+  | {
+      ok: true;
+      pid: number;
+      /** False when the named process had already exited, so only its session was signalled. */
+      targetSignalled?: boolean;
+      /** Processes of the agent's session that were confirmed and signalled with it. */
+      alsoEnded?: number[];
+      /** Processes of the session that were not in the confirmation: left alone. */
+      leftRunning?: number[];
+      /** Confirmed processes that had exited or no longer belong to the session: nothing sent. */
+      notFound?: number[];
+      /** Confirmed processes of the session whose signal could not be delivered. */
+      failed?: number[];
+    }
+  | { ok: false; pid: number; error: string };
+
+/** How a kill was confirmed: the process as it was shown, and for an agent its session. */
+export interface KillOptions {
+  /** `firstSeenAt` of the named process when the question was shown; a reused PID is refused. */
+  firstSeenAt?: number;
+  /** The processes of the agent's session the person confirmed. */
+  also?: readonly KillConfirmation[];
+}
+
+/** What `kill` on a PID would end. For an agent: the monitored processes it started, too. */
+export interface KillPlan {
+  target: MonitoredProcess;
+  /** Agents first, then the rest; each in the order of the process list. */
+  alsoEnds: MonitoredProcess[];
+}
 
 const MAX_SNAPSHOT_EVENTS = 80;
 const MAX_SESSION_EVENTS = 200;
@@ -149,6 +192,7 @@ export class WatchdogSession extends EventEmitter {
 
   public getSnapshot(): StatusSnapshot {
     const config = this.configManager.getConfig();
+    const processes = this.processMonitor.getProcesses();
     const modifiedFiles = this.watcher.getModifiedFiles();
     const events = [...this.sessionEvents, ...this.watcher.getRecentEvents(MAX_SNAPSHOT_EVENTS)]
       .sort((a, b) => b.timestamp - a.timestamp)
@@ -162,7 +206,8 @@ export class WatchdogSession extends EventEmitter {
       trippedFiles: this.watcher.loopDetector.getTrippedFiles(),
       limitState: this.configManager.evaluateFileLimit(modifiedFiles.length),
       events,
-      processes: this.processMonitor.getProcesses(),
+      processes,
+      sessionMembers: this.sessionMembersOf(processes),
       timestamp: Date.now(),
     };
   }
@@ -255,19 +300,106 @@ export class WatchdogSession extends EventEmitter {
     return restored;
   }
 
-  /** Terminates one process from the monitored list (SIGTERM, then SIGKILL after the grace period). */
-  public killProcess(pid: number): KillResult {
+  /**
+   * What `kill` would end, to show before it is confirmed. Ending only an agent left its MCP
+   * servers behind as orphans, to be found and ended one by one; so for an agent the plan also
+   * holds every monitored process it started, directly or through an agent it started. The tree
+   * decides, never a status. An agent it started counts only when it works in the same directory,
+   * and never when that directory is the home directory or `/`: an editor taken for an agent (one
+   * that starts MCP servers and is not a known host) is often started there, and the sessions in
+   * its terminals, in other repositories, must not end with it.
+   */
+  public getKillPlan(pid: number): KillPlan | null {
+    return this.killPlanFrom(this.processMonitor.getProcesses(), pid);
+  }
+
+  private killPlanFrom(processes: MonitoredProcess[], pid: number): KillPlan | null {
+    const target = processes.find((p) => p.pid === pid);
+    if (!target) return null;
+    if (target.category !== 'agent') return { target, alsoEnds: [] };
+    const byPid = new Map(processes.map((p) => [p.pid, p]));
+    const home = os.homedir();
+    const sharedDirectory = (agent: MonitoredProcess): boolean =>
+      Boolean(agent.cwd && agent.cwd === target.cwd && !['/', '~', home].includes(agent.cwd));
+    const belongs = (proc: MonitoredProcess): boolean => {
+      if (proc.category === 'agent' && !sharedDirectory(proc)) return false;
+      let cur = proc.agentPid;
+      for (let depth = 0; cur !== undefined && depth < 32; depth++) {
+        if (cur === pid) return true;
+        const agent = byPid.get(cur);
+        if (!agent || !sharedDirectory(agent)) return false;
+        cur = agent.agentPid;
+      }
+      return false;
+    };
+    const members = processes.filter((p) => p.pid !== pid && belongs(p));
+    return {
+      target,
+      alsoEnds: [...members.filter((p) => p.category === 'agent'), ...members.filter((p) => p.category !== 'agent')],
+    };
+  }
+
+  /**
+   * Terminates one process from the monitored list (SIGTERM, then SIGKILL after the grace period).
+   * With `firstSeenAt`, only if the PID still names the process that was shown. For an agent,
+   * `also` holds the processes of its session the person confirmed, as they were shown: only those
+   * that still belong to the session now, and are still the same process, end with it. Anything
+   * else in the session was not confirmed and keeps running.
+   */
+  public killProcess(pid: number, options: KillOptions = {}): KillResult {
     if (!Number.isInteger(pid) || pid <= 0) {
       return { ok: false, pid, error: 'Invalid PID' };
     }
-    if (!this.processMonitor.isTracked(pid)) {
-      return { ok: false, pid, error: 'PID is not a monitored agent or MCP process' };
+    const also = options.also;
+    const confirmedSession = also !== undefined && also.length > 0;
+    const current = this.processMonitor.getProcesses().find((p) => p.pid === pid);
+    if (!current || !this.processMonitor.isTracked(pid)) {
+      return {
+        ok: false,
+        pid,
+        error: confirmedSession
+          ? `PID ${pid} is no longer running, so nothing was ended; the processes it started are listed on their own now`
+          : 'PID is not a monitored agent or MCP process',
+      };
     }
+    if (options.firstSeenAt !== undefined && current.firstSeenAt !== options.firstSeenAt) {
+      return { ok: false, pid, error: `PID ${pid} now belongs to a different process than the one shown, so nothing was ended` };
+    }
+    const plan = confirmedSession ? this.getKillPlan(pid) : null;
     const killed = this.processMonitor.killProcess(pid);
+
+    if (!plan) {
+      this.scheduleUpdate();
+      return killed
+        ? { ok: true, pid }
+        : { ok: false, pid, error: 'Signal could not be delivered (already gone or not permitted)' };
+    }
+
+    const confirmed = new Map(also!.map((c) => [c.pid, c.firstSeenAt]));
+    const alsoEnded: number[] = [];
+    const leftRunning: number[] = [];
+    const failed: number[] = [];
+    const inPlan = new Set<number>();
+    for (const proc of plan.alsoEnds) {
+      inPlan.add(proc.pid);
+      if (confirmed.get(proc.pid) !== proc.firstSeenAt) leftRunning.push(proc.pid);
+      else if (this.processMonitor.killProcess(proc.pid)) alsoEnded.push(proc.pid);
+      else failed.push(proc.pid);
+    }
+    const notFound = also!.map((c) => c.pid).filter((p) => !inPlan.has(p));
+    if (leftRunning.length > 0) {
+      const one = leftRunning.length === 1;
+      this.addEvent({
+        type: 'process-alert',
+        message: `PID ${leftRunning.join(', ')} ${one ? 'belongs' : 'belong'} to the session of PID ${pid} but ${one ? 'was' : 'were'} not in the confirmation, so ${one ? 'it keeps' : 'they keep'} running`,
+        severity: 'warn',
+      });
+    }
     this.scheduleUpdate();
-    return killed
-      ? { ok: true, pid }
-      : { ok: false, pid, error: 'Signal could not be delivered (already gone or not permitted)' };
+    if (!killed && alsoEnded.length === 0) {
+      return { ok: false, pid, error: 'Signal could not be delivered (already gone or not permitted)' };
+    }
+    return { ok: true, pid, targetSignalled: killed, alsoEnded, leftRunning, notFound, failed };
   }
 
   /** The processes `pause` would hold right now, to show before it is confirmed. */
@@ -309,6 +441,17 @@ export class WatchdogSession extends EventEmitter {
     this.emit('event', event);
     this.scheduleUpdate();
     return event;
+  }
+
+  /** The kill plan of every agent that has one, so the dashboard shows what the session would end. */
+  private sessionMembersOf(processes: MonitoredProcess[]): Record<number, number[]> {
+    const members: Record<number, number[]> = {};
+    for (const proc of processes) {
+      if (proc.category !== 'agent') continue;
+      const plan = this.killPlanFrom(processes, proc.pid);
+      if (plan && plan.alsoEnds.length > 0) members[proc.pid] = plan.alsoEnds.map((p) => p.pid);
+    }
+    return members;
   }
 
   /** Detaches from watcher, monitor and config file. The session must not be used afterwards. */

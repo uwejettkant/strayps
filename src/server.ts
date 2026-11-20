@@ -5,12 +5,18 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
 import { type Context, Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { GuardConfigManager } from './core/guard-config.js';
 import { ProcessMonitor } from './core/process-monitor.js';
-import { type StatusSnapshot, WatchdogSession } from './core/session.js';
+import { type KillConfirmation, type StatusSnapshot, WatchdogSession } from './core/session.js';
 import { RepoWatcher } from './core/watcher.js';
 import { getVersion } from './version.js';
+
+/** Upper bound for a request body; the largest legitimate one is a list of confirmed processes. */
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+/** More processes than any agent session starts; a longer list is not a confirmation from the page. */
+const MAX_CONFIRMED_PROCESSES = 512;
 
 export interface WatchdogServerDeps {
   rootDir: string;
@@ -148,6 +154,16 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     await next();
   });
 
+  // Request bodies are a file path or a short list of PIDs. Whoever holds the token could otherwise
+  // make the watchdog read an unbounded body into memory.
+  app.use(
+    '/api/*',
+    bodyLimit({
+      maxSize: MAX_REQUEST_BODY_BYTES,
+      onError: (c) => c.json({ error: 'Request body too large' }, 413),
+    }),
+  );
+
   // --- Routes ---------------------------------------------------------------------------------
 
   // Serve Single-Page Dashboard
@@ -195,21 +211,61 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
   });
 
 
-  // 1-Click Kill for a specific monitored PID
-  app.post('/api/kill/:pid', (c) => {
+  // Terminate one monitored PID. For an agent, the body may list the processes of its session the
+  // person confirmed in the dialog ({ "also": [{ "pid": 1, "firstSeenAt": 0 }] }); the session ends
+  // only those that still belong to that agent and are still the same process, so a list naming
+  // other processes cannot reach them.
+  app.post('/api/kill/:pid', async (c) => {
     const pid = Number(c.req.param('pid'));
     if (!Number.isInteger(pid) || pid <= 0) {
       return c.json({ error: 'Invalid PID' }, 400);
     }
-    const result = session.killProcess(pid);
+    let also: KillConfirmation[] | undefined;
+    let firstSeenAt: number | undefined;
+    const raw = await c.req.text();
+    if (raw.trim().length > 0) {
+      let body: unknown;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return c.json({ error: 'Body must be JSON' }, 400);
+      }
+      const record = body !== null && typeof body === 'object' ? (body as { also?: unknown; firstSeenAt?: unknown }) : {};
+      if (record.firstSeenAt !== undefined) {
+        if (!Number.isFinite(record.firstSeenAt)) {
+          return c.json({ error: 'firstSeenAt must be a number' }, 400);
+        }
+        firstSeenAt = record.firstSeenAt as number;
+      }
+      const list = record.also;
+      if (list !== undefined) {
+        const valid =
+          Array.isArray(list) &&
+          list.length <= MAX_CONFIRMED_PROCESSES &&
+          list.every(
+            (entry) =>
+              entry !== null &&
+              typeof entry === 'object' &&
+              Number.isInteger((entry as KillConfirmation).pid) &&
+              (entry as KillConfirmation).pid > 0 &&
+              Number.isFinite((entry as KillConfirmation).firstSeenAt),
+          );
+        if (!valid) {
+          return c.json({ error: 'also must be a list of { pid, firstSeenAt }' }, 400);
+        }
+        also = (list as KillConfirmation[]).map((entry) => ({ pid: entry.pid, firstSeenAt: entry.firstSeenAt }));
+      }
+    }
+    const result = session.killProcess(pid, { firstSeenAt, also });
     if (!result.ok) {
       return c.json({ ok: false, pid, error: result.error, status: getStatusSnapshot() }, 404);
     }
-    return c.json({ ok: true, pid, status: getStatusSnapshot() });
+    return c.json({ ...result, status: getStatusSnapshot() });
   });
 
   // There is deliberately no bulk "kill everything stale" route: the stale/frozen verdict has been
-  // wrong about sessions that were still in use. Processes are terminated one PID at a time.
+  // wrong about sessions that were still in use. Processes are terminated one PID, or one agent
+  // session the person chose, at a time.
 
   // Rollback a single file
   app.post('/api/rollback-file', async (c) => {

@@ -4,7 +4,7 @@
 
 <br />
 
-**See every AI coding agent and MCP server running on your machine, find the forgotten ones, and end them one at a time. While agents work, agent-leash raises an alarm when one loops on a file or touches `.env`, and pauses them without losing any work. Local only: no account, no telemetry.**
+**See every AI coding agent and MCP server running on your machine, find the forgotten ones, and end them one session at a time. While agents work, agent-leash raises an alarm when one loops on a file or touches `.env`, and pauses them without losing any work. Local only: no account, no telemetry.**
 
 [![npm version](https://img.shields.io/badge/npm-v0.1.0-5BE49B?style=flat-square&logo=npm&labelColor=0D120F)](https://www.npmjs.com/package/agent-leash)
 [![package size](https://img.shields.io/badge/package-73.8%20kB-5BE49B?style=flat-square&labelColor=0D120F)](#)
@@ -29,7 +29,7 @@ Coding agents run for hours, in several repositories at once, and each one start
 
 | What happens | Without `agent-leash` | With `agent-leash` |
 | :--- | :--- | :--- |
-| **Forgotten sessions** *(agent and MCP processes from repositories you left days ago)* | RAM held by processes nobody uses, and no way to tell which ones are still in use | **One process list for the whole machine**: directory, app, age, RAM and measured activity. Old idle sessions are marked `STALE`, orphans `FROZEN`; you end them one PID at a time, after a confirmation |
+| **Forgotten sessions** *(agent and MCP processes from repositories you left days ago)* | RAM held by processes nobody uses, and no way to tell which ones are still in use | **One process list for the whole machine**: directory, app, age, RAM and measured activity. Old idle sessions are marked `STALE`, orphans `FROZEN`. You end one session, the agent together with the MCP servers it started, after one confirmation that names each process |
 | **Edit loops** *(an agent rewrites the same file six times in 30 s to fix a test)* | Burned tokens and a broken file | **Circuit breaker** raises an alarm on edit 6; `revert` brings back the version before the series |
 | **Protected files** *(an agent edits `.env.local` or `docker-compose.yml`)* | Secrets or container configs change silently | **Alarm** at once. `.env*` contents are never read; `revert` restores `docker-compose.yml` |
 | **A run going wrong** *(an agent changes 40 files you did not expect)* | Stop it and lose the work, or let it go on | **`pause`** holds the agents of this repository where they are; nothing is lost, `resume` continues them, and you `revert` single files |
@@ -73,6 +73,8 @@ The process list covers the whole machine, not just the watched repository. Each
 
 These are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. An idle session at an editor window you will come back to tomorrow looks the same as a forgotten one. You end a process with `kill <pid>` in the terminal or from its row in the dashboard, after a confirmation: SIGTERM first, SIGKILL only if it does not exit.
 
+Ending an agent ends its session: the confirmation lists every monitored process the agent started, one line each, and the RAM they hold together, and they end with it. Otherwise they would stay behind as orphans. That includes its MCP servers and an agent it started in the same directory, with that agent's servers; an agent it started anywhere else (another repository, a subdirectory, or when both run in your home directory) is a session of its own and keeps running. Only what the confirmation listed is ended: a server the agent starts while the question is open keeps running, and a PID that meanwhile belongs to another process is not touched; the log says so. If the list does not fit your terminal, the answer is not taken: make the terminal taller and ask again. Other sessions, editors and their MCP servers are never part of it. To end only one MCP server, `kill` its own PID.
+
 ### Which processes count as agents
 
 agent-leash keeps no list of AI products, and it does not care which model an agent talks to. A coding agent is recognized in one of three ways:
@@ -93,7 +95,7 @@ Started in a terminal, `agent-leash` shows a full-screen live view of the same s
 | :--- | :--- |
 | `exit`, `quit`, `q` | Stop the watchdog (Ctrl+C and Ctrl+D work too) |
 | `revert <file>` | Roll one file back to the version before its latest series of changes (Tab completes file names) |
-| `kill <pid>` | Terminate one process from the list: SIGTERM first, SIGKILL if it does not exit |
+| `kill <pid>` | Terminate one process from the list: SIGTERM first, SIGKILL if it does not exit. For an agent, the processes it started end with it ([details](#finding-forgotten-processes)) |
 | `pause` | Hold the coding agents of this repository and the processes they started (SIGSTOP); nothing is terminated, no file is touched |
 | `resume` | Continue what `pause` held |
 | `status` | List all monitored processes |
@@ -273,7 +275,7 @@ console.log(dashboard.url);
 
 - The dashboard server binds to `127.0.0.1` and answers only when addressed as this machine.
 - Every state-changing request needs a token that is only handed to the dashboard page, and must come from that page's own origin. A web page in another tab cannot trigger anything.
-- Only processes from the monitored list can be terminated, one PID at a time; `pause` holds only the agents of the watched repository and the processes they started, and agent-leash continues them when it exits. Only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
+- Only processes from the monitored list can be terminated: one process, or one agent with the processes it started, exactly as the confirmation listed them; `pause` holds only the agents of the watched repository and the processes they started, and agent-leash continues them when it exits. Only paths inside the watched repository can be rolled back. `.env*` files are never read, written or copied.
 - File names and command lines are treated as untrusted text in the dashboard and in the terminal.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
 - Known limits: another user account on the same machine, or the watched agent itself, can still reach the local dashboard. The watched agent can also edit `.agentguard.json`; a running agent-leash applies the edit and logs it as a warning. The dashboard loads nothing from another host: its styles are generated when the package is built and served by agent-leash itself. It needs a current browser (Chrome 111, Safari 16.4, Firefox 128 or newer).
@@ -323,7 +325,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 199 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 209 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, touches nothing

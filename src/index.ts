@@ -48,6 +48,9 @@ export {
   type RawProcessInfo,
 } from './core/process-monitor.js';
 export {
+  type KillConfirmation,
+  type KillOptions,
+  type KillPlan,
   type KillResult,
   type PauseResult,
   type StatusSnapshot,

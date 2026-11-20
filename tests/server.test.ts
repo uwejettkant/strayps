@@ -147,6 +147,52 @@ describe('dashboard API: what the actions do', () => {
     expect(h.kills).toEqual([{ pid: 100, signal: 'SIGTERM' }]);
   });
 
+  it('ends an agent session only with the processes the dashboard confirmed, and only those of that session', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 100, name: 'claude', cmd: 'claude', cpu: 1 },
+        { pid: 101, ppid: 100, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git' },
+        { pid: 200, name: 'claude', cmd: 'claude', cpu: 1, cwd: '/work/other-repo' },
+      ],
+    });
+    await h.monitor.scan();
+    const { app, token } = appFor(h);
+    const seen = (pid: number) => h.session.getSnapshot().processes.find((p) => p.pid === pid)!.firstSeenAt;
+    const request = (body: string) => app.request('/api/kill/100', { method: 'POST', headers: withToken(token), body });
+
+    const tooMany = Array.from({ length: 513 }, (_, i) => ({ pid: i + 1, firstSeenAt: 0 }));
+    for (const body of [
+      '{"also": "101"}',
+      '{"also": [101]}',
+      '{"also": [{"pid": -1, "firstSeenAt": 0}]}',
+      '{"also": [{"pid": 1.5, "firstSeenAt": 0}]}',
+      '{"also": [{"pid": 101}]}',
+      '{"also": [null]}',
+      '{"also": null}',
+      '{"firstSeenAt": "yesterday"}',
+      json({ also: tooMany }),
+      '{not json',
+    ]) {
+      expect((await request(body)).status, body.slice(0, 40)).toBe(400);
+    }
+    const huge = await request(json({ also: [], padding: 'x'.repeat(70 * 1024) }));
+    expect(huge.status).toBe(413);
+    expect(h.kills).toEqual([]);
+
+    // the PID no longer names the process the dialog showed
+    const other = await request(json({ firstSeenAt: seen(100) + 1 }));
+    expect(other.status).toBe(404);
+    expect(await other.json()).toMatchObject({ error: expect.stringContaining('different process') });
+    expect(h.kills).toEqual([]);
+
+    const res = await request(
+      json({ firstSeenAt: seen(100), also: [{ pid: 101, firstSeenAt: seen(101) }, { pid: 200, firstSeenAt: seen(200) }] }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, pid: 100, targetSignalled: true, alsoEnded: [101], leftRunning: [], notFound: [200], failed: [] });
+    expect(h.kills.map((k) => k.pid)).toEqual([100, 101]);
+  });
+
   it('has no route that terminates processes in bulk because of their status', async () => {
     const h = createHarness({
       procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: '/work/other-repo', etime: '03-00:00:00', cpuTimeSec: 1.5 }],

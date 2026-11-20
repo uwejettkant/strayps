@@ -141,6 +141,60 @@ describe('running commands against a session', () => {
     expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGCONT' });
   });
 
+  it('ends an agent session with the processes it started after one confirmation that names them', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, rssKb: 128_000, etime: '11-19:42:10', cpuTimeSec: 1.5 },
+        { pid: 301, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', rssKb: 40_000, etime: '11-19:42:00' },
+        { pid: 302, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-fetch', rssKb: 30_000, etime: '11-19:42:00' },
+        { pid: 303, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-\u001b[2Jserver-evil', rssKb: 10_000, etime: '11-19:42:00' },
+        { pid: 304, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-time', rssKb: 10_000, etime: '11-19:42:00' },
+        // the most consequential member, an agent it started, is never folded away
+        { pid: 305, ppid: 300, name: 'codex', cmd: 'codex exec', cwd: OTHER, rssKb: 90_000, etime: '01:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+
+    const kill = runCommand(h.session, parseCommand('kill 300'));
+    expect(kill.confirm?.prompt).toBe('End PID 300 and the 5 processes it started (301 MB)?');
+    const details = kill.confirm?.details ?? [];
+    expect(details).toHaveLength(6);
+    expect(details[0]).toBe('PID 300  agent  claude  /work/other-repo  125 MB');
+    expect(details[1]).toBe('PID 305  agent  codex  /work/other-repo  88 MB');
+    for (const pid of [301, 302, 303, 304]) expect(details.join('\n')).toContain(`PID ${pid}  mcp`);
+    expect(details.join('\n')).not.toContain('\u001b');
+    expect(h.kills).toEqual([]);
+
+    // the full-screen view shows every line in full and keeps the question with [y/N] visible
+    const frame = renderFrame({
+      snapshot: h.session.getSnapshot(),
+      cols: 80,
+      rows: 24,
+      version: '9.9.9',
+      dashboardUrl: null,
+      demo: false,
+      input: '',
+      notice: null,
+      confirmPrompt: kill.confirm!.prompt,
+      confirmDetails: details,
+      overlay: null,
+      palette: createPalette(false),
+      now: Date.now(),
+    });
+    const screen = frame.lines.join('\n');
+    for (const line of details) expect(screen).toContain(line);
+    expect(frame.lines.at(-2)).toContain('[y/N]');
+
+    // a server the agent starts while the question is open is not part of what was confirmed
+    h.procs.push({ pid: 306, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-later', etime: '00:01' });
+    await h.monitor.scan();
+    expect(kill.confirm!.run()).toEqual({
+      level: 'warn',
+      message: 'Sent SIGTERM to PID 300 and the 5 processes it started; PID 306 was not in the confirmation and keeps running',
+    });
+    expect(h.kills.map((k) => k.pid).sort()).toEqual([300, 301, 302, 303, 304, 305]);
+  });
+
   it('refuses targets that are not on the lists', async () => {
     const h = await busyHarness();
     for (const line of ['kill 4242', 'revert ../../etc/passwd', 'revert README.md']) {
@@ -455,6 +509,29 @@ describe('interactive terminal view', () => {
     ui.stop();
   });
 
+  it('does not take yes for a session whose processes do not all fit on the screen', async () => {
+    const procs = [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '01:00:00' }];
+    for (let i = 1; i <= 30; i++) {
+      procs.push({ pid: 300 + i, ppid: 300, name: 'node', cmd: `node /x/node_modules/.bin/mcp-server-${i}`, etime: '01:00:00' } as never);
+    }
+    const h = createHarness({ procs });
+    await h.monitor.scan();
+    const { tty, ui, type } = await startUi(h);
+    type('kill 300\r');
+    expect(tty.screen).toContain('ENDS WHEN YOU ANSWER y');
+    expect(tty.screen).toContain('more do not fit');
+    type('y');
+    expect(h.kills).toEqual([]);
+    expect(tty.screen).toContain('Nothing was ended');
+
+    // with room for every line, the same answer ends the session
+    tty.rows = 50;
+    type('kill 300\r');
+    type('y');
+    expect(h.kills.map((k) => k.pid)).toHaveLength(31);
+    ui.stop();
+  });
+
   it('asks y/N before destructive commands and treats everything but y as no', async () => {
     const { tty, ui, type, h } = await startUi();
     type('kill 300\r');
@@ -561,6 +638,21 @@ describe('plain output', () => {
     h.watcher.handleFileSystemEvent('change', '.env');
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('protected-file');
+  });
+
+  it('names every process of an agent session before it asks', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '01:00:00' },
+        { pid: 301, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '01:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+    const { lines, send } = startPlain(h, { quiet: true });
+    await send('kill 300\n');
+    const asked = lines.findIndex((line) => line.includes('End PID 300 and the 1 process it started'));
+    expect(lines.slice(asked - 2, asked)).toEqual(['  PID 300  agent  claude  /work/other-repo  0 MB', '  PID 301  mcp  mcp-server-git  0 MB']);
+    expect(h.kills).toEqual([]);
   });
 
   it('accepts commands line by line and stops on exit', async () => {
