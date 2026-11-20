@@ -284,6 +284,25 @@ describe('full-screen frame', () => {
     expect(screen.indexOf('first entry')).toBeLessThan(screen.indexOf('second entry'));
   });
 
+  it('marks memory that is only RSS with a tilde, in rows and in every sum it is part of', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 100, name: 'claude', cmd: 'claude', rssKb: 102_400, etime: '10:00' },
+        // no footprint for it (the harness reads none without rssKb): RSS from the %MEM column
+        { pid: 101, ppid: 100, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', memory: 1, etime: '10:00' },
+      ],
+    });
+    h.procs[0].cwd = h.dir;
+    await h.monitor.scan();
+    const screen = renderFrame(viewFor(h)).lines.join('\n');
+    expect(screen).toMatch(/100\s+\w+\s+THIS REPO\s+100\.0 MB/);
+    expect(screen).toMatch(/101\s+\w+\s+THIS REPO\s+~16\.0 MB/);
+    expect(screen).toMatch(/AGENTS\s+1 session\s+100 MB/);
+    expect(screen).toMatch(/MCP\s+1 server\s+~16 MB/);
+    expect(screen).toContain('2 monitored · ~116 MB');
+    expect(renderFrame(viewFor(h, { overlay: 'help' })).lines.join('\n')).toContain('~ marks RSS');
+  });
+
   it('never produces a line wider than the terminal, at any size', async () => {
     const h = await busyHarness();
     for (const [cols, rows] of [[200, 60], [120, 34], [100, 18], [80, 24], [58, 12], [40, 8], [20, 6], [10, 3]]) {
@@ -600,15 +619,15 @@ describe('plain output', () => {
   it('names every process of an agent session before it asks', async () => {
     const h = createHarness({
       procs: [
-        { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '01:00:00' },
-        { pid: 301, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '01:00:00' },
+        { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, rssKb: 128_000, etime: '01:00:00' },
+        { pid: 301, ppid: 300, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', rssKb: 40_000, etime: '01:00:00' },
       ],
     });
     await h.monitor.scan();
     const { lines, send } = startPlain(h, { quiet: true });
     await send('kill 300\n');
     const asked = lines.findIndex((line) => line.includes('End PID 300 and the 1 process it started'));
-    expect(lines.slice(asked - 2, asked)).toEqual(['  PID 300  agent  claude  /work/other-repo  0 MB', '  PID 301  mcp  mcp-server-git  0 MB']);
+    expect(lines.slice(asked - 2, asked)).toEqual(['  PID 300  agent  claude  /work/other-repo  125 MB', '  PID 301  mcp  mcp-server-git  39 MB']);
     expect(h.kills).toEqual([]);
   });
 

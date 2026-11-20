@@ -238,19 +238,23 @@ describe('dashboard page', () => {
       stateWith({
         config: { agents: ['vibe'], limits: { mcpSilenceTimeoutSec: 45, staleSessionHours: 9 } },
         processes: [
-          { pid: 1, status: 'ACTIVE', category: 'agent', cmd: 'claude', memoryMb: 300, cpu: 1, inWatchedRepo: true },
-          { pid: 2, status: 'STALE', category: 'agent', cmd: 'claude', memoryMb: 120, cpu: 0, inWatchedRepo: false },
-          { pid: 3, status: 'STANDBY', category: 'mcp', cmd: 'node mcp-server-git', memoryMb: 25, cpu: 0, inWatchedRepo: false },
-          { pid: 4, status: 'FROZEN', category: 'mcp', cmd: 'node mcp-server-fetch', memoryMb: 30, cpu: 0, inWatchedRepo: false },
+          { pid: 1, status: 'ACTIVE', category: 'agent', cmd: 'claude', memoryMb: 300, memorySource: 'footprint', cpu: 1, inWatchedRepo: true },
+          { pid: 2, status: 'STALE', category: 'agent', cmd: 'claude', memoryMb: 120, memorySource: 'footprint', cpu: 0, inWatchedRepo: false },
+          { pid: 3, status: 'STANDBY', category: 'mcp', cmd: 'node mcp-server-git', memoryMb: 25, memorySource: 'footprint', cpu: 0, inWatchedRepo: false },
+          // RSS, where the footprint could not be read: only approximate, and so is every sum with it
+          { pid: 4, status: 'FROZEN', category: 'mcp', cmd: 'node mcp-server-fetch', memoryMb: 30, memorySource: 'rss', cpu: 0, inWatchedRepo: false },
         ],
       }),
     );
     expect(getElementById('metric-agents').textContent).toBe('2');
     expect(getElementById('metric-agents-mb').textContent).toBe('420 MB');
     expect(getElementById('metric-mcp').textContent).toBe('2');
-    expect(getElementById('metric-mcp-mb').textContent).toBe('55 MB');
+    expect(getElementById('metric-mcp-mb').textContent).toBe('~55 MB');
     expect(getElementById('metric-procs').textContent).toBe('2');
-    expect(getElementById('metric-frozen').textContent).toBe('stale/frozen · 150 MB');
+    expect(getElementById('metric-frozen').textContent).toBe('stale/frozen · ~150 MB');
+    const rows = getElementById('process-list').innerHTML;
+    expect(rows).toContain('>300.0 MB<');
+    expect(rows).toContain('>~30.0 MB<');
     expect(getElementById('metric-silence-limit').textContent).toContain('older than 9h');
     expect(getElementById('agent-names').textContent).toBe('vibe');
 

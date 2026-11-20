@@ -1,5 +1,5 @@
 import os from 'node:os';
-import type { MonitoredProcess } from '../core/process-monitor.js';
+import { formatMemory, type MonitoredProcess, sumMemory } from '../core/process-monitor.js';
 import type { StatusSnapshot } from '../core/session.js';
 import type { ActivityEvent } from '../core/events.js';
 
@@ -141,15 +141,20 @@ export interface ProcessTotals {
   totalMb: number;
   staleCount: number;
   staleMb: number;
+  /** "477 MB", with a "~" when one of the values is only RSS */
+  total: string;
+  stale: string;
 }
 
-export function processTotals(processes: MonitoredProcess[]): ProcessTotals {
+export function processTotals(processes: MonitoredProcess[], digits = 0): ProcessTotals {
   const stale = processes.filter(isStaleOrFrozen);
   return {
     count: processes.length,
     totalMb: processes.reduce((sum, p) => sum + p.memoryMb, 0),
     staleCount: stale.length,
     staleMb: stale.reduce((sum, p) => sum + p.memoryMb, 0),
+    total: sumMemory(processes, digits),
+    stale: sumMemory(stale, digits),
   };
 }
 
@@ -179,7 +184,7 @@ export function formatProcessTable(
     const where = proc.cwd ? ` · ${sanitize(proc.cwd)}` : '';
     const host = proc.host && proc.host !== 'detached' ? ` [${sanitize(proc.host)}]` : '';
     const fixed = `  ${padEnd(String(proc.pid), 7)} `;
-    const tail = `${padStart(`${proc.memoryMb.toFixed(1)} MB`, 9)} ${padStart(sanitize(proc.uptime), 8)}  `;
+    const tail = `${padStart(formatMemory(proc.memoryMb, proc.memorySource !== 'footprint'), 9)} ${padStart(sanitize(proc.uptime), 8)}  `;
     const used = fixed.length + 8 + 1 + 13 + 1 + tail.length;
     const rest = truncate(`${sanitize(proc.cmd)}${where}${host}`, Math.max(10, width - used));
     lines.push(
@@ -195,10 +200,10 @@ export function formatStatusReport(
   palette: Palette,
   width: number = 120,
 ): string[] {
-  const totals = processTotals(snapshot.processes);
+  const totals = processTotals(snapshot.processes, 1);
   const lines = [
     `  Repo:        ${sanitize(tildify(snapshot.rootDir))}`,
-    `  Processes:   ${totals.count} monitored (${totals.totalMb.toFixed(1)} MB) · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(1)} MB)`,
+    `  Processes:   ${totals.count} monitored (${totals.total}) · ${totals.staleCount} stale/frozen (${totals.stale})`,
     '',
     ...formatProcessTable(snapshot.processes, palette, width),
   ];

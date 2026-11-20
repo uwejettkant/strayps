@@ -1,4 +1,4 @@
-import type { MonitoredProcess } from '../core/process-monitor.js';
+import { formatMemory, type MonitoredProcess, sumMemory } from '../core/process-monitor.js';
 import type { WatchdogSession } from '../core/session.js';
 import { sanitize } from './format.js';
 
@@ -57,7 +57,7 @@ function describeProcesses(processes: MonitoredProcess[], shown: number = 3): st
 /** One line per process in a confirmation: what it is, where it works, what it holds. */
 function describeForConfirmation(proc: MonitoredProcess): string {
   const where = proc.cwd ? `  ${sanitize(proc.cwd)}` : '';
-  return `PID ${proc.pid}  ${proc.category}  ${sanitize(shortName(proc))}${where}  ${proc.memoryMb.toFixed(0)} MB`;
+  return `PID ${proc.pid}  ${proc.category}  ${sanitize(shortName(proc))}${where}  ${formatMemory(proc.memoryMb, proc.memorySource !== 'footprint', 0)}`;
 }
 
 const EXIT_WORDS = new Set(['exit', 'quit', 'q', ':q', 'stop', 'bye']);
@@ -155,14 +155,13 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
         // one line in the full-screen view, and a list in it was cut off at the terminal width
         const others = plan.alsoEnds;
         const confirmations = others.map((p) => ({ pid: p.pid, firstSeenAt: p.firstSeenAt }));
-        const totalMb = [proc, ...others].reduce((sum, p) => sum + (p.memoryMb || 0), 0);
         const count = `${others.length} process${others.length === 1 ? '' : 'es'}`;
         return {
           message: '',
           level: 'warn',
           confirm: {
             // Short enough that [y/N] stays visible at 80 columns
-            prompt: `End PID ${proc.pid} and the ${count} it started (${totalMb.toFixed(0)} MB)?`,
+            prompt: `End PID ${proc.pid} and the ${count} it started (${sumMemory([proc, ...others])})?`,
             details: [
               `${describeForConfirmation(proc)}${proc.host && proc.host !== 'detached' ? `  attached to ${sanitize(proc.host)}` : ''}`,
               ...others.map(describeForConfirmation),
@@ -193,7 +192,7 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `Terminate PID ${proc.pid} (${sanitize(proc.cmd)}${where}, ${proc.memoryMb.toFixed(0)} MB)?${agentNote}${attached}`,
+          prompt: `Terminate PID ${proc.pid} (${sanitize(proc.cmd)}${where}, ${formatMemory(proc.memoryMb, proc.memorySource !== 'footprint', 0)})?${agentNote}${attached}`,
           run: () => {
             const result = session.killProcess(proc.pid, { firstSeenAt: proc.firstSeenAt });
             return result.ok

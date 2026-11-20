@@ -98,7 +98,7 @@ Builds, packs, installs the tarball into an empty project, imports it as CommonJ
 node dist/cli.js status
 ```
 
-Read the table as a skeptic. Is every agent you have open listed as one (CLI agents with MCP servers are found by those)? Is any editor, desktop app or dev server listed as an agent? For every `STALE` or `FROZEN` row: is it attached to an open application (`[VS Code]`, `[Claude Desktop]`)? Would the user be surprised if it died? Every surprise is a finding for `process-classification`, with the row as evidence. Do not paste full command lines into documents; they can contain tokens.
+Read the table as a skeptic. On macOS every memory value of your own processes is the footprint, without `~`; compare one with Activity Monitor's Memory column. Is every agent you have open listed as one (CLI agents with MCP servers are found by those)? Is any editor, desktop app or dev server listed as an agent? For every `STALE` or `FROZEN` row: is it attached to an open application (`[VS Code]`, `[Claude Desktop]`)? Would the user be surprised if it died? Every surprise is a finding for `process-classification`, with the row as evidence. Do not paste full command lines into documents; they can contain tokens.
 
 ## 8. Findings list
 

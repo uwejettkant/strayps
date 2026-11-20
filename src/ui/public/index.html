@@ -219,6 +219,7 @@
         <span class="text-[#5BE49B]">extra agent names:</span>
         <span id="agent-names" class="text-[#C9D6CE] ml-1">none</span>
       </div>
+      <div>Memory is the physical footprint, as Activity Monitor shows it; ~ marks RSS, which is only approximate.</div>
     </footer>
   </div>
 
@@ -238,6 +239,13 @@
     // An observation (old, orphaned, silent), never a verdict that a process may be killed
     const isStaleOrFrozen = (p) => p.status === 'FROZEN' || p.status === 'STALE';
 
+    // "~" marks RSS, shown where the physical footprint (Activity Monitor's Memory) cannot be read
+    function memoryOf(list, digits) {
+      const mb = list.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
+      const approximate = list.some((p) => p.memorySource !== 'footprint');
+      return (approximate ? '~' : '') + mb.toFixed(digits) + ' MB';
+    }
+
     function renderStatus(state) {
       if (!state) return;
       lastStatus = state;
@@ -247,12 +255,10 @@
 
       const procs = state.processes || [];
       const stale = procs.filter(isStaleOrFrozen);
-      const staleMb = stale.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
-      const totalMb = procs.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0);
 
       const agents = procs.filter((p) => p.category === 'agent');
       const mcp = procs.filter((p) => p.category === 'mcp');
-      const mbOf = (list) => list.reduce((sum, p) => sum + (Number(p.memoryMb) || 0), 0).toFixed(0) + ' MB';
+      const mbOf = (list) => memoryOf(list, 0);
       document.getElementById('metric-agents').textContent = String(agents.length);
       document.getElementById('metric-agents-mb').textContent = mbOf(agents);
       document.getElementById('metric-mcp').textContent = String(mcp.length);
@@ -261,8 +267,8 @@
       const frozenEl = document.getElementById('metric-frozen');
       frozenEl.textContent =
         stale.length > 0
-          ? 'stale/frozen · ' + staleMb.toFixed(0) + ' MB'
-          : 'none seen · ' + totalMb.toFixed(0) + ' MB monitored';
+          ? 'stale/frozen · ' + mbOf(stale)
+          : 'none seen · ' + mbOf(procs) + ' monitored';
       frozenEl.className = stale.length > 0 ? 'text-xs text-amber-400 font-semibold' : 'text-xs text-[#8FA197]';
       document.getElementById('metric-silence-limit').textContent =
         'frozen: orphaned and quiet for ' + cfg.limits.mcpSilenceTimeoutSec + 's · stale: other repo, older than ' +
@@ -353,8 +359,7 @@
             ? `<div class="text-[11px] ${flagged ? 'text-amber-300' : 'text-[#8FA197]'} truncate max-w-md" title="${esc(proc.reason)}">${esc(proc.reason)}</div>`
             : '';
 
-          const mbDisplay =
-            typeof proc.memoryMb === 'number' ? proc.memoryMb.toFixed(1) + ' MB' : Number(proc.memory || 0).toFixed(1) + '%';
+          const mbDisplay = memoryOf([proc], 1);
           const uptimeDisplay = proc.uptime || (Number(proc.silenceSec) || 0) + 's';
           const pid = Number(proc.pid) || 0;
 
@@ -372,7 +377,7 @@
                 <div class="text-[#C9D6CE] truncate max-w-md" title="${esc(proc.cmd)}">${esc(proc.cmd)}</div>
                 ${cwdLine}
                 <div class="text-[11px] text-[#8FA197]">
-                  RAM: <span class="text-[#F2F7F4] font-semibold">${esc(mbDisplay)}</span> · Age: <span class="text-[#C9D6CE]">${esc(uptimeDisplay)}</span> · CPU: ${(Number(proc.cpu) || 0).toFixed(1)}%
+                  Memory: <span class="text-[#F2F7F4] font-semibold">${esc(mbDisplay)}</span> · Age: <span class="text-[#C9D6CE]">${esc(uptimeDisplay)}</span> · CPU: ${(Number(proc.cpu) || 0).toFixed(1)}%
                 </div>
                 ${reasonLine}
               </div>

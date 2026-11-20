@@ -14,6 +14,13 @@ export type ProcessHealthStatus = 'ACTIVE' | 'IDLE' | 'STANDBY' | 'STALE' | 'FRO
  */
 export type ProcessCategory = 'agent' | 'mcp' | 'child';
 /**
+ * Where a memory value comes from. `footprint` is the physical footprint, what Activity Monitor
+ * shows as Memory. `rss` stands in where it cannot be read: it counts shared pages in full and
+ * misses compressed memory (an idle MCP server showed 12 KB RSS and 24 MB footprint), so it is
+ * shown as approximate.
+ */
+export type MemorySource = 'footprint' | 'rss';
+/**
  * How a process was recognized as a coding agent: by a built-in program name, by a name from the
  * `agents` setting, or because it started an MCP server (whatever the agent is called).
  */
@@ -44,7 +51,9 @@ export interface MonitoredProcess {
   category: ProcessCategory;
   cpu: number;
   memory: number;
+  /** Memory in MB: the physical footprint where it can be read, otherwise RSS (see `memorySource`). */
   memoryMb: number;
+  memorySource: MemorySource;
   uptime: string;
   elapsedSec: number;
   firstSeenAt: number;
@@ -106,6 +115,12 @@ export interface ProcessMonitorOptions {
   killGraceMs?: number;
   /** More program names to treat as coding agents (the `agents` setting); matched exactly. */
   agentNames?: string[];
+  /**
+   * Physical footprint in bytes per PID. Defaults to macOS `footprint` with the built-in lister, and
+   * to none when a custom `processLister` is supplied: its PIDs are not real ones (tests, demo).
+   * Without a value for a PID its RSS is shown, marked as approximate.
+   */
+  memoryReader?: (pids: number[]) => Promise<Map<number, number>>;
 }
 
 export interface ProcessKilledEvent {
@@ -179,6 +194,64 @@ export function programNames(raw: Pick<RawProcessInfo, 'name' | 'cmd'>): string[
 }
 
 const MCP_KEYWORDS = ['mcp', 'modelcontextprotocol'];
+
+/** "125.0 MB", or "~125.0 MB" when the value is RSS and so only approximate. */
+export function formatMemory(mb: number, approximate: boolean, digits = 1): string {
+  return `${approximate ? '~' : ''}${mb.toFixed(digits)} MB`;
+}
+
+/** Memory of several processes together: approximate as soon as one value is. */
+export function sumMemory(processes: Array<Pick<MonitoredProcess, 'memoryMb' | 'memorySource'>>, digits = 0): string {
+  const mb = processes.reduce((sum, p) => sum + (p.memoryMb || 0), 0);
+  return formatMemory(mb, processes.some((p) => p.memorySource !== 'footprint'), digits);
+}
+
+/** How often the physical footprint is read: `footprint` takes about a second for 30 processes. */
+export const MEMORY_READ_INTERVAL_MS = 15_000;
+
+/**
+ * Footprint per PID from `footprint -f bytes` output: the `phys_footprint` line of each process
+ * block (what Activity Monitor shows), or the block header's footprint when that line is missing.
+ */
+export function parseFootprintOutput(stdout: string): Map<number, number> {
+  const result = new Map<number, number>();
+  let current: number | undefined;
+  for (const line of stdout.split('\n')) {
+    const header = line.match(/\[(\d+)\]:\s+\S+\s+Footprint:\s*(\d+)\s*B\b/);
+    if (header) {
+      current = Number(header[1]);
+      result.set(current, Number(header[2]));
+      continue;
+    }
+    if (/^\s*Summary\b/.test(line)) {
+      current = undefined;
+      continue;
+    }
+    const phys = line.match(/^\s*phys_footprint:\s*(\d+)\s*B\b/);
+    if (phys && current !== undefined) result.set(current, Number(phys[1]));
+  }
+  return result;
+}
+
+/** Reads the physical footprint with macOS `footprint`; it only reads, and needs no root for own processes. */
+async function readFootprints(pids: number[]): Promise<Map<number, number>> {
+  if (pids.length === 0) return new Map();
+  const args = ['-f', 'bytes', ...pids.flatMap((pid) => ['-p', String(pid)])];
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync('footprint', args, {
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 16 * 1024 * 1024,
+    }));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err;
+    // A PID that is gone or belongs to another user makes it fail; the others are still printed
+    stdout = String((err as { stdout?: unknown }).stdout ?? '');
+  }
+  const requested = new Set(pids);
+  return new Map([...parseFootprintOutput(stdout)].filter(([pid]) => requested.has(pid)));
+}
 
 /**
  * How old a process an agent started must be before it is listed. The shells, git and rg calls of
@@ -570,6 +643,10 @@ export class ProcessMonitor extends EventEmitter {
     this.resumePaused();
   };
   private scanInFlight: Promise<MonitoredProcess[]> | null = null;
+  private memoryReader: ((pids: number[]) => Promise<Map<number, number>>) | undefined;
+  /** Footprint in bytes per PID from the last read, for processes still listed. */
+  private footprints: Map<number, number> = new Map();
+  private lastMemoryReadAt = -Infinity;
   /** PIDs that received SIGTERM and are inside their grace period. */
   private terminating: Map<number, { timer: NodeJS.Timeout; process: MonitoredProcess; sentAt: number }> = new Map();
 
@@ -597,6 +674,9 @@ export class ProcessMonitor extends EventEmitter {
     this.cwdResolver =
       options.cwdResolver ??
       (options.processLister ? async () => new Map<number, string>() : resolveProcessCwds);
+    this.memoryReader =
+      options.memoryReader ??
+      (options.processLister || process.platform !== 'darwin' ? undefined : readFootprints);
     this.setAgentNames(options.agentNames ?? []);
   }
 
@@ -818,6 +898,21 @@ export class ProcessMonitor extends EventEmitter {
     };
 
     const cwdMap = await this.cwdResolver(candidates.map((c) => c.raw.pid));
+
+    // A value of a PID that is not listed any more must not end up on a new process with that PID
+    for (const pid of this.footprints.keys()) {
+      if (!candidateByPid.has(pid)) this.footprints.delete(pid);
+    }
+    if (this.memoryReader && now - this.lastMemoryReadAt >= MEMORY_READ_INTERVAL_MS) {
+      this.lastMemoryReadAt = now;
+      try {
+        this.footprints = await this.memoryReader(candidates.map((c) => c.raw.pid));
+      } catch (err) {
+        // No footprint tool on this system: RSS from now on. Any other failure: RSS until the next read.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') this.memoryReader = undefined;
+        this.footprints = new Map();
+      }
+    }
     const homeDir = os.homedir();
 
     const isInsideRoot = (cwd: string | undefined): boolean => {
@@ -862,10 +957,14 @@ export class ProcessMonitor extends EventEmitter {
       seenPids.add(raw.pid);
       const cpu = Number(raw.cpu ?? 0);
       const memory = Number(raw.memory ?? 0);
+      const footprintBytes = this.footprints.get(raw.pid);
+      const memorySource: MemorySource = footprintBytes !== undefined ? 'footprint' : 'rss';
       const memoryMb =
-        typeof raw.rssKb === 'number'
-          ? Number((raw.rssKb / 1024).toFixed(1))
-          : Number((memory * 16).toFixed(1));
+        footprintBytes !== undefined
+          ? Number((footprintBytes / (1024 * 1024)).toFixed(1))
+          : typeof raw.rssKb === 'number'
+            ? Number((raw.rssKb / 1024).toFixed(1))
+            : Number((memory * 16).toFixed(1));
 
       // A PID the system handed to a new process since the last scan: the new one is younger than
       // the old one was. Its history (first seen, CPU samples) must not carry over, or a confirmation
@@ -1036,6 +1135,7 @@ export class ProcessMonitor extends EventEmitter {
         cpu,
         memory,
         memoryMb,
+        memorySource,
         uptime: formattedUptime,
         elapsedSec,
         firstSeenAt: existing?.firstSeenAt ?? now,

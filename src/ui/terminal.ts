@@ -1,3 +1,4 @@
+import { formatMemory, sumMemory } from '../core/process-monitor.js';
 import type { StatusSnapshot, WatchdogSession } from '../core/session.js';
 import { completeInput, HELP_LINES, parseCommand, runCommand } from './commands.js';
 import {
@@ -97,22 +98,21 @@ function metricCells(view: FrameView): Seg[][] {
   const agents = snapshot.processes.filter((proc) => proc.category === 'agent');
   const mcp = snapshot.processes.filter((proc) => proc.category === 'mcp');
   const paused = snapshot.processes.filter((proc) => proc.paused).length;
-  const mb = (list: typeof agents) => list.reduce((sum, proc) => sum + (proc.memoryMb || 0), 0).toFixed(0);
 
   const agentCell: Seg[] = [
     seg(' AGENTS     ', p.dim),
     seg(`${agents.length} session${agents.length === 1 ? '' : 's'}`, p.strong),
-    seg(`  ${mb(agents)} MB`, p.dim),
+    seg(`  ${sumMemory(agents)}`, p.dim),
   ];
   const mcpCell: Seg[] = [
     seg(' MCP        ', p.dim),
     seg(`${mcp.length} server${mcp.length === 1 ? '' : 's'}`, p.strong),
-    seg(`  ${mb(mcp)} MB`, p.dim),
+    seg(`  ${sumMemory(mcp)}`, p.dim),
   ];
   const leftCell: Seg[] = [
     seg(' LEFT BEHIND', p.dim),
     totals.staleCount > 0
-      ? seg(` ${totals.staleCount} stale/frozen · ${totals.staleMb.toFixed(0)} MB`, p.warn)
+      ? seg(` ${totals.staleCount} stale/frozen · ${totals.stale}`, p.warn)
       : seg(' none seen', p.ok),
   ];
   const pausedCell: Seg[] = [
@@ -131,7 +131,7 @@ function compactMetrics(view: FrameView): Seg[] {
   return [
     seg(` ${agents} agents · ${mcp} MCP`),
     totals.staleCount > 0
-      ? seg(` · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(0)} MB)`, p.warn)
+      ? seg(` · ${totals.staleCount} stale/frozen (${totals.stale})`, p.warn)
       : seg(''),
     paused > 0 ? seg(` · ${paused} paused`, p.warn) : seg(''),
   ];
@@ -174,7 +174,7 @@ function processRows(view: FrameView, count: number): Seg[][] {
       seg(padEnd(proc.paused ? 'PAUSED' : proc.status, 8), proc.paused ? p.warn : statusStyle(p, proc)),
       seg(` ${padEnd(whereLabel(proc), 13)}`, p.dim),
       seg(
-        ` ${padStart(`${proc.memoryMb.toFixed(1)} MB`, 9)} ${padStart(sanitize(proc.uptime), 8)} ${padStart(`${proc.cpu.toFixed(1)}%`, 6)}  `,
+        ` ${padStart(formatMemory(proc.memoryMb, proc.memorySource !== 'footprint'), 9)} ${padStart(sanitize(proc.uptime), 8)} ${padStart(`${proc.cpu.toFixed(1)}%`, 6)}  `,
       ),
       seg(sanitize(proc.cmd)),
       seg(`${where}${host}`, p.dim),
@@ -208,7 +208,7 @@ function processOverlayRows(view: FrameView, available: number): Seg[][] {
     [
       seg(' ALL PROCESSES', p.strong),
       seg(
-        `  ${totals.count} monitored · ${totals.totalMb.toFixed(0)} MB · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(0)} MB)`,
+        `  ${totals.count} monitored · ${totals.total} · ${totals.staleCount} stale/frozen (${totals.stale})`,
         p.dim,
       ),
     ],
@@ -233,6 +233,9 @@ function helpRows(view: FrameView): Seg[][] {
   rows.push([seg('')]);
   rows.push([
     seg(' Commands that change something (kill, pause) always ask before they act.', p.dim),
+  ]);
+  rows.push([
+    seg(' Memory (RAM) is the physical footprint, as Activity Monitor shows it; ~ marks RSS, only approximate.', p.dim),
   ]);
   rows.push([seg(' Press any key to return.', p.dim)]);
   return rows;
@@ -375,7 +378,7 @@ export function renderFrame(view: FrameView): Frame {
     body.push([seg('')]);
     body.push([
       seg(' PROCESSES', p.strong),
-      seg(`  ${totals.count} monitored · ${totals.totalMb.toFixed(0)} MB`, p.dim),
+      seg(`  ${totals.count} monitored · ${totals.total}`, p.dim),
     ]);
     body.push(...processRows(view, procRowCount));
   }

@@ -201,6 +201,13 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
             return demoProcesses.length < before;
           },
           processAlive: () => false,
+          // The demo's own numbers as the footprint: footprint must never inspect a made-up PID
+          memoryReader: async (pids: number[]) =>
+            new Map(
+              demoProcesses
+                .filter((p) => pids.includes(p.pid) && p.rssKb !== undefined)
+                .map((p) => [p.pid, p.rssKb! * 1024]),
+            ),
         }
       : {}),
   });

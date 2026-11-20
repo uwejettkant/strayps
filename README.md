@@ -47,7 +47,7 @@ Stop it by typing `exit` (or `q`, or Ctrl+C).
 
 ## Finding Processes Left Behind
 
-Each row shows the process, its working directory, the app or terminal it is attached to (VS Code, Claude Desktop, a terminal …), its age, its RAM, and a status:
+Each row shows the process, its working directory, the app or terminal it is attached to (VS Code, Claude Desktop, a terminal …), its age, its memory, and a status. Memory is the physical footprint, the value Activity Monitor shows; where it cannot be read (on Linux, or for another user's process) the resident size (RSS) stands in, marked with `~` because it can be far off in both directions:
 
 | Status | What agent-leash observed |
 | :--- | :--- |
@@ -122,7 +122,7 @@ flowchart LR
   SRV --> DASH["Dashboard\n(read-only)"]
 ```
 
-Naive watchdogs flag every MCP server at `0% CPU` as frozen, even though stdio MCP servers legitimately sit idle waiting for tool calls. `ProcessMonitor` reads the process tree (`PPID`), the working directory (`lsof -d cwd`), the RAM (`RSS`), the age (`etime`) and the CPU time used between scans (`time`, not the `%cpu` average) to tell MCP servers waiting for their agent (`STANDBY`) from old sessions in other repositories (`STALE`) and orphans whose parent is gone (`FROZEN`); a process that is merely quiet is not frozen. The tree also tells which agent started which process, so ending a session and `pause` reach exactly the processes of that agent.
+Naive watchdogs flag every MCP server at `0% CPU` as frozen, even though stdio MCP servers legitimately sit idle waiting for tool calls. `ProcessMonitor` reads the process tree (`PPID`), the working directory (`lsof -d cwd`), the age (`etime`) and the CPU time used between scans (`time`, not the `%cpu` average) to tell MCP servers waiting for their agent (`STANDBY`) from old sessions in other repositories (`STALE`) and orphans whose parent is gone (`FROZEN`); a process that is merely quiet is not frozen. The tree also tells which agent started which process, so ending a session and `pause` reach exactly the processes of that agent. Memory comes from macOS `footprint`, read for the listed processes at most every 15 seconds; it only reads, and needs no root for your own processes.
 
 ---
 
@@ -238,7 +238,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 163 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 169 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real

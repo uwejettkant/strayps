@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  MEMORY_READ_INTERVAL_MS,
   parseCpuTime,
+  parseFootprintOutput,
   parsePsOutput,
   redactSecrets,
   parseLsofCwdOutput,
@@ -774,6 +776,107 @@ describe('secrets in command lines', () => {
     expect(redactSecrets('tool --key abc --openai-key def')).toBe('tool --key [redacted] --openai-key [redacted]');
     expect(redactSecrets('curl -H x-api-key: v123 -H Authorization: token ghp_abcdefghijklmnop')).toBe(
       'curl -H x-api-key: [redacted] -H Authorization: token [redacted]',
+    );
+  });
+});
+
+describe('memory', () => {
+  // RSS was wrong both ways: an idle MCP server showed 12 KB RSS and 24 MB footprint, a Claude
+  // session 486 MB RSS and 263 MB footprint (measured on 20.11.2026)
+  function withReader(reader: (pids: number[]) => Promise<Map<number, number>>) {
+    const procs = [agent(100, REPO, { cpu: 1, rssKb: 486_000 }), mcp(101, 100, { rssKb: 12 })];
+    const calls: number[][] = [];
+    const monitor = new ProcessMonitor({
+      rootDir: REPO,
+      selfPid: 999_999,
+      processLister: async () => procs,
+      memoryReader: async (pids) => {
+        calls.push([...pids].sort((a, b) => a - b));
+        return reader(pids);
+      },
+    });
+    return { monitor, calls, procs };
+  }
+  const MB = 1024 * 1024;
+
+  it('shows the physical footprint, and RSS marked as approximate where it cannot be read', async () => {
+    const { monitor } = withReader(async () => new Map([[100, 263 * MB]]));
+    const byPid = new Map((await monitor.scan(1_000)).map((p) => [p.pid, p]));
+    expect(byPid.get(100)).toMatchObject({ memoryMb: 263, memorySource: 'footprint' });
+    // 12 KB RSS: shown, but not as the footprint
+    expect(byPid.get(101)).toMatchObject({ memoryMb: 0, memorySource: 'rss' });
+  });
+
+  it('reads the footprint at most every 15 seconds, and forgets the value of a PID that left the list', async () => {
+    const { monitor, calls, procs } = withReader(async (pids) => new Map(pids.map((pid) => [pid, 50 * MB])));
+    const t0 = 1_000_000;
+    await monitor.scan(t0);
+    await monitor.scan(t0 + 2_000);
+    await monitor.scan(t0 + MEMORY_READ_INTERVAL_MS - 1);
+    expect(calls).toEqual([[100, 101]]);
+
+    // 101 exits and a new MCP server gets the same PID before the next read
+    const gone = procs.splice(1, 1)[0];
+    await monitor.scan(t0 + MEMORY_READ_INTERVAL_MS - 500);
+    procs.push({ ...gone, cmd: 'node /x/node_modules/.bin/mcp-server-time', rssKb: 20_480, etime: '00:01' });
+    const reused = (await monitor.scan(t0 + MEMORY_READ_INTERVAL_MS - 200)).find((p) => p.pid === 101)!;
+    expect(reused).toMatchObject({ memoryMb: 20, memorySource: 'rss' });
+
+    await monitor.scan(t0 + MEMORY_READ_INTERVAL_MS);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('falls back to RSS for good when the system has no footprint tool, and for one read on any other failure', async () => {
+    let failure: NodeJS.ErrnoException | null = Object.assign(new Error('spawn footprint ENOENT'), { code: 'ENOENT' });
+    const { monitor, calls } = withReader(async () => {
+      if (failure) throw failure;
+      return new Map([[100, 263 * MB]]);
+    });
+    const [first] = await monitor.scan(1_000);
+    expect(first.memorySource).toBe('rss');
+    failure = null;
+    await monitor.scan(1_000 + MEMORY_READ_INTERVAL_MS);
+    expect(calls).toHaveLength(1);
+
+    const flaky = withReader(async () => {
+      if (failure) throw failure;
+      return new Map([[100, 263 * MB]]);
+    });
+    failure = Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' });
+    expect((await flaky.monitor.scan(1_000))[0].memorySource).toBe('rss');
+    failure = null;
+    expect((await flaky.monitor.scan(1_000 + MEMORY_READ_INTERVAL_MS))[0]).toMatchObject({ memorySource: 'footprint', memoryMb: 263 });
+  });
+
+  it('never inspects the memory of a PID from a custom process table', async () => {
+    // tests and the demo make PIDs up; on a real machine they can name anyone's process
+    const monitor = new ProcessMonitor({ rootDir: REPO, selfPid: 999_999, processLister: async () => [agent(100, REPO, { rssKb: 2048 })] });
+    const [proc] = await monitor.scan(1_000);
+    expect(proc).toMatchObject({ memoryMb: 2, memorySource: 'rss' });
+  });
+});
+
+describe('footprint output', () => {
+  it('takes phys_footprint per process, skips the summary, and ignores PIDs it was not asked about', () => {
+    const output = [
+      '======================================================================',
+      'claude [41926]: 64-bit    Footprint: 275152896 B (4096 bytes per page)',
+      '======================================================================',
+      '      Dirty         Clean   Reclaimable    Regions    Category',
+      '   303104 B           0 B           0 B          4    MALLOC_SMALL',
+      '    phys_footprint: 277094400 B',
+      '    phys_footprint_peak: 335994880 B',
+      '',
+      'Code Helper (Plugin) [512]: 64-bit    Footprint: 25165824 B (16384 bytes per page)',
+      '      Dirty         Clean   Reclaimable    Regions    Category',
+      'Summary Footprint: 302318720 B',
+      '    phys_footprint: 1 B',
+    ].join('\n');
+    expect(parseFootprintOutput(output)).toEqual(
+      new Map([
+        [41926, 277094400],
+        [512, 25165824],
+      ]),
     );
   });
 });

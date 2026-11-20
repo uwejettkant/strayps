@@ -9,6 +9,7 @@ import {
 } from './guard-config.js';
 import type { ActivityEvent, ActivityEventType } from './events.js';
 import {
+  formatMemory,
   type MonitoredProcess,
   type ProcessKilledEvent,
   ProcessMonitor,
@@ -119,7 +120,7 @@ export class WatchdogSession extends EventEmitter {
     this.listen(this.processMonitor, 'process-frozen', (proc: MonitoredProcess) => {
       this.addEvent({
         type: 'process-alert',
-        message: `${proc.status}: PID ${proc.pid} (${proc.cmd}, ${proc.memoryMb} MB) — ${proc.reason}`,
+        message: `${proc.status}: PID ${proc.pid} (${proc.cmd}, ${formatMemory(proc.memoryMb, proc.memorySource !== 'footprint')}) — ${proc.reason}`,
         severity: proc.status === 'FROZEN' ? 'critical' : 'warn',
       });
     });
