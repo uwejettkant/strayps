@@ -97,10 +97,22 @@ describe('running commands against a session', () => {
     expect(kill.confirm?.prompt).toContain('PID 300');
     expect(kill.confirm?.prompt).toContain('Its agent session ends.');
     expect(kill.confirm?.prompt).not.toMatch(/stale|safe/i);
+    expect(kill.confirm?.details).toEqual([
+      'PID 300  agent  claude  /work/other-repo  125 MB',
+      '  claude',
+    ]);
     const pause = runCommand(h.session, parseCommand('pause'));
-    expect(pause.confirm?.prompt).toBe(
-      "Pause 1 process of this repo's agents (claude 100)? Nothing is lost; resume continues them.",
-    );
+    expect(pause.confirm?.prompt).toBe("Pause 1 process of this repo's agents? resume continues them.");
+    expect(pause.confirm?.details).toEqual([`PID 100  agent  claude  ${h.dir}`]);
+    // short enough that the answer keys stay visible on an 80-column terminal (scenario pass, 20.11.2026)
+    for (const confirm of [kill.confirm!, pause.confirm!]) {
+      const frame = renderFrame({
+        snapshot: h.session.getSnapshot(), cols: 80, rows: 24, version: '9.9.9', dashboardUrl: null, demo: false,
+        input: '', notice: null, confirmPrompt: confirm.prompt, confirmDetails: confirm.details, overlay: null,
+        palette: createPalette(false), now: Date.now(),
+      });
+      expect(frame.lines.at(-2), confirm.prompt).toContain('[y/N]');
+    }
 
     // nothing happened yet
     expect(h.kills).toEqual([]);

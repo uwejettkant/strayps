@@ -11,6 +11,7 @@ import type { ActivityEvent, ActivityEventType } from './events.js';
 import {
   formatMemory,
   type MonitoredProcess,
+  type PauseTarget,
   type ProcessKilledEvent,
   ProcessMonitor,
 } from './process-monitor.js';
@@ -360,8 +361,11 @@ export class MonitorSession extends EventEmitter {
     return { ok: true, pid, targetSignalled: killed, alsoEnded, leftRunning, notFound, failed };
   }
 
-  /** The processes `pause` would hold right now, to show before it is confirmed. */
-  public getPauseTargets(): MonitoredProcess[] {
+  /**
+   * The processes `pause` would hold right now, to show before it is confirmed: the listed pause
+   * targets and what the agents run beyond the list (a shell around a tool call, a young call).
+   */
+  public getPauseTargets(): PauseTarget[] {
     return this.processMonitor.getPauseTargets();
   }
 

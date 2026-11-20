@@ -748,6 +748,85 @@ describe('ProcessMonitor pause and exit', () => {
     expect(process.listeners('exit').filter((listener) => !before.includes(listener))).toEqual([]);
   });
 
+  it('keeps listing and holding a paused process that loses its place in the tree, and continues it', async () => {
+    // A held browser whose MCP server was ended moved to PID 1, left the list, left the set of
+    // held processes, and stayed stopped: resume and the exit hook no longer knew it (review, 20.11.2026)
+    const { monitor, kills, procs, alive } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      mcp(101, 100, { cwd: '/' }),
+      { pid: 121, ppid: 101, name: 'Chromium', cmd: 'Chromium --headless', etime: '05:00' },
+    ]);
+    const t0 = 1_000_000;
+    await monitor.scan(t0);
+    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101, 121]);
+
+    alive.delete(101);
+    Object.assign(procs.find((p) => p.pid === 121)!, { ppid: 1, pgid: 101, etime: '05:02' });
+    const held = (await monitor.scan(t0 + 2_000)).find((p) => p.pid === 121);
+    expect(held).toMatchObject({ paused: true });
+    expect(monitor.getPausedPids()).toContain(121);
+
+    expect(monitor.resumePaused()).toContain(121);
+    expect(kills.filter((k) => k.signal === 'SIGCONT').map((k) => k.pid)).toContain(121);
+  });
+
+  it('holds the whole tree of this repository\'s agents, shells and young tool calls included, and lists what it holds', async () => {
+    // A tool call younger than 5 s, and the shell running a loop around it, kept running while
+    // the agent was held: neither was listed, so neither was held (review, 20.11.2026)
+    const { monitor, kills } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 105, ppid: 100, name: 'bash', cmd: 'bash -c while true; do rm -f out.txt; sleep 1; done', cwd: REPO, etime: '01:00' },
+      { pid: 106, ppid: 105, name: 'sleep', cmd: 'sleep 1', cwd: REPO, etime: '00:00' },
+      agent(200, OTHER, { cpu: 1 }),
+      { pid: 201, ppid: 200, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: OTHER, etime: '01:00' },
+    ]);
+    const t0 = 1_000_000;
+    const listed = await monitor.scan(t0);
+    expect(listed.some((p) => p.pid === 105 || p.pid === 106)).toBe(false);
+
+    const targets = monitor.getPauseTargets();
+    expect(targets.map((t) => [t.pid, t.listed]).sort()).toEqual([[100, true], [105, false], [106, false]]);
+    expect(targets.find((t) => t.pid === 105)?.cmd).toContain('bash -c while true');
+    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 105, 106]);
+    expect(kills.map((k) => k.pid).sort((a, b) => a - b)).toEqual([100, 105, 106]);
+
+    // what is held stays in view until it is continued
+    const byPid = new Map((await monitor.scan(t0 + 2_000)).map((p) => [p.pid, p]));
+    expect(byPid.get(105)).toMatchObject({ paused: true, category: 'child', agentPid: 100 });
+    expect(byPid.get(106)).toMatchObject({ paused: true, category: 'child' });
+    expect(monitor.resumePaused().sort((a, b) => a - b)).toEqual([100, 105, 106]);
+  });
+
+  it('never holds strayps itself, the wrappers that started it or what it runs, even under an agent it holds', async () => {
+    const { monitor } = setup(
+      [
+        agent(100, REPO, { cpu: 1 }),
+        { pid: 140, ppid: 100, name: 'node', cmd: `node ${REPO}/node_modules/.bin/tsx src/cli.ts watch`, etime: '20:00' },
+        { pid: 141, ppid: 140, name: 'node', cmd: 'node src/cli.ts watch', etime: '20:00' },
+        { pid: 142, ppid: 141, name: 'lsof', cmd: 'lsof -a -d cwd -p 100', etime: '00:00' },
+      ],
+      { selfPid: 141 },
+    );
+    await monitor.scan(1_000);
+    expect(monitor.getPauseTargets().map((t) => t.pid)).toEqual([100]);
+    expect(monitor.pauseTargets()).toEqual([100]);
+  });
+
+  it('does not count a new process as held when the PID it held was handed on', async () => {
+    const { monitor, procs } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 105, ppid: 100, name: 'bash', cmd: 'bash -c make', cwd: REPO, etime: '01:00' },
+    ]);
+    const t0 = 1_000_000;
+    await monitor.scan(t0);
+    monitor.pauseTargets();
+    // 105 ended, and an unrelated process got the PID
+    Object.assign(procs.find((p) => p.pid === 105)!, { ppid: 1, pgid: 1, name: 'cupsd', cmd: '/usr/sbin/cupsd', etime: '00:01' });
+    const list = await monitor.scan(t0 + 2_000);
+    expect(list.some((p) => p.pid === 105)).toBe(false);
+    expect(monitor.getPausedPids()).toEqual([100]);
+  });
+
   it('removes its exit hook again once everything held is continued', async () => {
     const { monitor } = setup([agent(100, REPO, { cpu: 1 })]);
     await monitor.scan(1_000);

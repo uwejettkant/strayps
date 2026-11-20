@@ -148,6 +148,21 @@ describe('strayps CLI', () => {
     await run.waitFor('Resumed 3 processes');
     run.child.stdin.write('quit\n');
     expect((await run.exit).code).toBe(0);
+    expect(run.output()).not.toContain('Continued the');
+  });
+
+  it('says on exit that it continued what it held', async () => {
+    const dir = makeTmpDir();
+    const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
+    await run.waitFor(READY);
+    run.child.stdin.write('pause\n');
+    // the processes are named one per line before the question
+    await run.waitFor(/PID 48110 {2}agent {2}claude/);
+    run.child.stdin.write('yes\n');
+    await run.waitFor('Paused 3 processes');
+    run.child.stdin.write('exit\n');
+    expect((await run.exit).code).toBe(0);
+    expect(run.output()).toMatch(/Continued the 3 held processes on exit \(PID [\d, ]+\)/);
   });
 
   it('keeps running when its input closes, and stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT', async () => {

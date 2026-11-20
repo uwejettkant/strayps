@@ -1,4 +1,4 @@
-import { formatMemory, type MonitoredProcess, sumMemory } from '../core/process-monitor.js';
+import { formatMemory, type MonitoredProcess, type PauseTarget, sumMemory } from '../core/process-monitor.js';
 import type { MonitorSession } from '../core/session.js';
 import { sanitize } from './format.js';
 
@@ -40,7 +40,7 @@ export const HELP_LINES: Array<[string, string]> = [
 ];
 
 /** A short name for a process: the npm binary it runs, or the file name of its program. */
-function shortName(proc: MonitoredProcess): string {
+function shortName(proc: Pick<MonitoredProcess, 'cmd'>): string {
   const bin = proc.cmd.match(/\.bin\/(\S+)/);
   if (bin) return bin[1];
   const first = proc.cmd.trim().split(/\s+/)[0] ?? '';
@@ -48,10 +48,11 @@ function shortName(proc: MonitoredProcess): string {
 }
 
 /** "claude-code 48110, mcp-server-git 48244, … (+2 more)" for a confirmation prompt. */
-function describeProcesses(processes: MonitoredProcess[], shown: number = 3): string {
-  const names = processes.slice(0, shown).map((p) => `${sanitize(shortName(p))} ${p.pid}`);
-  const more = processes.length > shown ? `, … (+${processes.length - shown} more)` : '';
-  return `${names.join(', ')}${more}`;
+/** One line per process pause would hold. */
+function describePauseTarget(target: PauseTarget): string {
+  const where = target.cwd ? `  ${sanitize(target.cwd)}` : '';
+  const note = target.listed ? '' : '  not in the list yet';
+  return `PID ${target.pid}  ${target.category}  ${sanitize(shortName(target))}${where}${note}`;
 }
 
 /** One line per process in a confirmation: what it is, where it works, what it holds. */
@@ -147,7 +148,6 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
         };
       }
       const proc = plan.target;
-      const where = proc.cwd ? `, ${sanitize(proc.cwd)}` : '';
       const attached =
         proc.host && proc.host !== 'detached' ? ` It is attached to ${sanitize(proc.host)}.` : '';
       if (plan.alsoEnds.length > 0) {
@@ -192,7 +192,9 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `Terminate PID ${proc.pid} (${sanitize(proc.cmd)}${where}, ${formatMemory(proc.memoryMb, proc.memorySource !== 'footprint', 0)})?${agentNote}${attached}`,
+          // Short, so that [y/N] stays visible at 80 columns; what the process is goes into its own lines
+          prompt: `Terminate PID ${proc.pid} (${formatMemory(proc.memoryMb, proc.memorySource !== 'footprint', 0)})?${agentNote}`,
+          details: [`${describeForConfirmation(proc)}${attached ? `  attached to ${sanitize(proc.host)}` : ''}`, `  ${sanitize(proc.cmd)}`],
           run: () => {
             const result = session.killProcess(proc.pid, { firstSeenAt: proc.firstSeenAt });
             return result.ok
@@ -212,7 +214,8 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `Pause ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents (${describeProcesses(targets)})? Nothing is lost; resume continues them.`,
+          prompt: `Pause ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents? resume continues them.`,
+          details: targets.map(describePauseTarget),
           run: () => {
             const { pids } = session.pause();
             return {

@@ -101,7 +101,7 @@ Started in a terminal, `strayps` shows a full-screen live view: agent sessions, 
 | `status` | List all monitored processes |
 | `help` | Show the commands |
 
-`kill` and `pause` ask `[y/N]` before they act and name the processes first. `resume` needs no confirmation. `pause` holds only the agents of the repository strayps was started in and what they started: your dev server, your editor and the sessions in other repositories keep running.
+`kill` and `pause` ask `[y/N]` before they act and name the processes first. `resume` needs no confirmation. `pause` holds only the agents of the repository strayps was started in and everything they run right now, down to the shell around a tool call that just started: your dev server, your editor and the sessions in other repositories keep running. What it holds stays in the list, marked `PAUSED`, until `resume` continues it, even if the process it hangs under has ended.
 
 Without a terminal (a pipe, a log file, a background job, or `--no-tui`) the same information is printed as one line per event, and the same commands are read from stdin, one per line. The end of the input does not stop strayps; `kill -TERM` does.
 
@@ -245,7 +245,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 169 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 174 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real

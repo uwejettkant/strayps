@@ -145,6 +145,7 @@ function summaryLines(
   session: MonitorSession,
   startedAt: number,
   palette: Palette,
+  continuedOnExit: number[] = [],
 ): string[] {
   const counters = session.getCounters();
   const n = (type: ActivityEventType) => counters[type] ?? 0;
@@ -160,6 +161,14 @@ function summaryLines(
     `${palette.accent('strayps')} stopped after ${duration} — ${sanitize(tildify(session.rootDir))}`,
     `  ${n('process-alert')} process alerts · ${n('process-killed')} processes terminated`,
   ];
+  // The last alert may still say "Paused": without this line a person may think they are still held
+  if (continuedOnExit.length > 0) {
+    lines.push(
+      palette.warn(
+        `  Continued the ${continuedOnExit.length} held process${continuedOnExit.length === 1 ? '' : 'es'} on exit (PID ${continuedOnExit.join(', ')})`,
+      ),
+    );
+  }
   const alerts = snapshot.events.filter((e) => e.severity !== 'info').slice(0, 5).reverse();
   if (alerts.length > 0) {
     lines.push('  Last alerts:');
@@ -262,13 +271,15 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     if (!interactive) {
       process.stdout.write(`\nShutting down strayps (${reason})...\n`);
     }
+    const held = processMonitor.getPausedPids();
     processMonitor.stop();
+    const continued = held.filter((pid) => !processMonitor.getPausedPids().includes(pid));
     const within = <T>(work: Promise<T>, ms: number) =>
       Promise.race([work, new Promise<void>((resolve) => setTimeout(resolve, ms).unref())]);
     if (running) {
       await within(running.close(), 1500);
     }
-    const summary = summaryLines(session, startedAt, palette).join('\n');
+    const summary = summaryLines(session, startedAt, palette, continued).join('\n');
     session.dispose();
     process.stdout.write(`${summary}\n`, () => process.exit(exitCode));
   };
