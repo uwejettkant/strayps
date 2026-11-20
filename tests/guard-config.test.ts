@@ -116,6 +116,19 @@ describe('.agentguard.json that is not a plain file', () => {
     expect(fs.readFileSync(path.join(dir, '.env'), 'utf-8')).toBe('SECRET=from-env-123\n');
   });
 
+  it.skipIf(process.platform === 'win32')('reads and writes nothing through a hard link', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const dir = makeTmpDir();
+    writeFiles(outside, { 'victim.json': '{"limits": {"maxFilesWarn": 3}}' });
+    fs.linkSync(path.join(outside, 'victim.json'), path.join(dir, CONFIG_FILENAME));
+
+    const manager = new GuardConfigManager(dir);
+    expect(manager.getConfig().limits.maxFilesWarn).toBe(DEFAULT_GUARD_CONFIG.limits.maxFilesWarn);
+    expect(manager.getWarnings().join(' ')).toContain('not a plain file');
+    expect(() => writeConfigValue(dir, 'limits.maxFilesWarn', 9)).toThrow(/not a plain file/);
+    expect(fs.readFileSync(path.join(outside, 'victim.json'), 'utf-8')).toBe('{"limits": {"maxFilesWarn": 3}}');
+  });
+
   it('says where the JSON is broken without quoting the file', () => {
     // JSON.parse puts the start of the text into its error message
     const dir = makeTmpDir();

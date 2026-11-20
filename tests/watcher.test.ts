@@ -182,6 +182,25 @@ describe('GuardConfigManager & RepoWatcher', () => {
     expect(html).toContain('name="color-scheme" content="light dark"');
   });
 
+  it.skipIf(process.platform === 'win32')('raises the alarm when a .env that links to a shared one changes', async () => {
+    const shared = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-leash-shared-'));
+    fs.writeFileSync(path.join(shared, '.env'), 'SECRET=1\n');
+    fs.symlinkSync(path.join(shared, '.env'), path.join(tmpDir, '.env'));
+    const watcher = new RepoWatcher({ rootDir: tmpDir, keepDiscarded: false });
+    await watcher.start();
+    try {
+      const alarm = new Promise<string>((resolve) => {
+        watcher.on('protected-file', (ev) => resolve(ev.filePath));
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      fs.writeFileSync(path.join(tmpDir, '.env'), 'SECRET=2\n');
+      expect(await alarm).toBe('.env');
+    } finally {
+      await watcher.stop();
+      fs.rmSync(shared, { recursive: true, force: true });
+    }
+  });
+
   it('creates a git checkpoint in a real git repository and watches live chokidar file events', async () => {
     const { execFileSync } = await import('node:child_process');
     execFileSync('git', ['init'], { cwd: tmpDir, stdio: 'ignore' });

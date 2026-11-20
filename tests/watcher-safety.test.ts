@@ -286,6 +286,42 @@ describe('RepoWatcher rollback: what it may touch', () => {
     expect(read(repo, 'src/notes.txt')).not.toContain('SECRET');
   });
 
+  it.skipIf(!isPosix)('restores exactly the named file from git, even when its name looks like a pattern', () => {
+    const repo = makeTmpDir();
+    initGitRepo(repo);
+    const big = (fill: number) => Buffer.alloc(5 * 1024 * 1024 + 10, fill);
+    writeFiles(repo, { 'big*.bin': big(1), 'bigX.bin': big(2) });
+    commitAll(repo);
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+
+    writeFiles(repo, { 'big*.bin': 'changed 1', 'bigX.bin': 'changed 2' });
+    watcher.handleFileSystemEvent('change', 'big*.bin');
+    watcher.handleFileSystemEvent('change', 'bigX.bin');
+
+    expect(watcher.rollbackFile('big*.bin')).toBe(true);
+    expect(fs.readFileSync(path.join(repo, 'big*.bin')).equals(big(1))).toBe(true);
+    // without literal pathspecs, git took "big*.bin" as a pattern and restored this one too
+    expect(read(repo, 'bigX.bin')).toBe('changed 2');
+  });
+
+  it.skipIf(!isPosix)('never reads a file reached through a directory link that leads outside', () => {
+    const outside = makeTmpDir('agent-leash-outside-');
+    const repo = makeTmpDir();
+    writeFiles(outside, { 'x.txt': 'outside-secret\n' });
+    writeFiles(repo, { 'src/a.ts': 'a\n' });
+    fs.symlinkSync(outside, path.join(repo, 'shared'));
+    const watcher = watcherFor(repo, { keepDiscarded: false });
+    const t0 = Date.now();
+
+    watcher.handleFileSystemEvent('add', 'shared/x.txt', t0);
+    // a minute later the link is a real directory: the version seen through the link is the target
+    fs.rmSync(path.join(repo, 'shared'));
+    writeFiles(repo, { 'shared/x.txt': 'plain\n' });
+    watcher.handleFileSystemEvent('change', 'shared/x.txt', t0 + 61_000);
+    watcher.rollbackFile('shared/x.txt');
+    expect(read(repo, 'shared/x.txt')).not.toContain('outside-secret');
+  });
+
   it('does not let another spelling of a name reach .env or an unchanged file', () => {
     // macOS file systems ignore case: ".ENV" opens .env, "readme.md" opens README.md
     const repo = makeTmpDir();

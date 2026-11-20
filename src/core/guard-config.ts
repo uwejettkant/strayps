@@ -279,7 +279,7 @@ function writeConfigText(filePath: string, text: string): void {
     }
     const content = Buffer.from(text, 'utf-8');
     fs.ftruncateSync(fd, 0);
-    fs.writeSync(fd, content, 0, content.length, 0);
+    fs.writeFileSync(fd, content);
   } finally {
     fs.closeSync(fd);
   }

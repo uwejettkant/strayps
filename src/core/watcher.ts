@@ -173,8 +173,14 @@ function hashFile(file: string): string {
   }
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.size > 1024 * 1024) return `not-a-plain-file:${stat.mode}:${stat.size}`;
-    return createHash('sha256').update(fs.readFileSync(fd)).digest('hex');
+    if (!stat.isFile()) return `not-a-plain-file:${stat.mode}`;
+    // In chunks, whatever the size: a same-size edit of a large rule file must change the hash too
+    const hash = createHash('sha256');
+    const chunk = Buffer.alloc(1024 * 1024);
+    for (let read = fs.readSync(fd, chunk); read > 0; read = fs.readSync(fd, chunk)) {
+      hash.update(chunk.subarray(0, read));
+    }
+    return hash.digest('hex');
   } catch {
     return 'unreadable';
   } finally {
@@ -273,7 +279,8 @@ function writePlainFile(absPath: string, content: Buffer): void {
       throw new Error('it is not a plain file of its own (a hard link or a special file), left untouched');
     }
     fs.ftruncateSync(fd, 0);
-    fs.writeSync(fd, content, 0, content.length, 0);
+    // writeFileSync loops until everything is written; a single writeSync may write less
+    fs.writeFileSync(fd, content);
   } finally {
     fs.closeSync(fd);
   }
@@ -371,9 +378,6 @@ export class RepoWatcher extends EventEmitter {
       ignoreInitial: true,
       persistent: true,
       ignored: (targetPath: string) => this.shouldIgnorePath(targetPath),
-      // A link to a directory outside the repository would make its files look like repository
-      // files, to be read into memory on every change; the snapshot walk does not follow links either
-      followSymlinks: false,
       awaitWriteFinish: false,
     });
 
@@ -791,7 +795,10 @@ export class RepoWatcher extends EventEmitter {
    */
   private trackChange(relPath: string, now: number): void {
     // .env* contents are never read, and the demo reads nothing at all
-    const readable = !this.isEnvFile(relPath) && !this.dryRun;
+    // Links are followed for alarms (a .env that links to a shared one still raises one), but a
+    // file reached through a directory that leads outside the repository is never read into memory
+    const readable =
+      !this.isEnvFile(relPath) && !this.dryRun && this.parentInsideRoot(path.join(this.rootDir, relPath));
     const start = readable ? this.initialVersion(relPath) : undefined;
     const history = this.histories.get(relPath) ?? {
       current: start,
@@ -1076,6 +1083,10 @@ export class RepoWatcher extends EventEmitter {
         }
         const backupPath = this.keepDiscardedCopy(relPath, absPath);
         this.ownWrites.set(relPath, { expectedHash: sha256(target), until: Date.now() + OWN_WRITE_WINDOW_MS });
+        if (!this.parentInsideRoot(absPath)) {
+          this.ownWrites.delete(relPath);
+          return { ok: false, reason: 'a directory on its path now leads outside the repository, left untouched' };
+        }
         fs.mkdirSync(path.dirname(absPath), { recursive: true });
         if (!this.parentInsideRoot(absPath)) {
           this.ownWrites.delete(relPath);
