@@ -122,6 +122,27 @@ describe('WatchdogSession', () => {
     expect(h.session.getKillPlan(800)!.alsoEnds.map((p) => p.pid)).toEqual([801]);
   });
 
+  it('ends what an agent started with its session, and names it in the plan, but not the wrappers in between', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' },
+        { pid: 401, ppid: 400, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-server-git', etime: '03-00:00:00' },
+        { pid: 402, ppid: 400, name: 'zsh', cmd: '/bin/zsh -c npm run dev', cwd: OTHER, etime: '02-00:00:00' },
+        { pid: 403, ppid: 402, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: OTHER, rssKb: 80_000, etime: '02-00:00:00' },
+        // the user's own dev server in the same repository is not part of the session
+        { pid: 500, name: 'zsh', cmd: '-zsh', cwd: OTHER, etime: '03-00:00:00' },
+        { pid: 501, ppid: 500, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: OTHER, etime: '02-00:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+    const plan = h.session.getKillPlan(400)!;
+    expect(plan.alsoEnds.map((p) => [p.pid, p.category]).sort()).toEqual([[401, 'mcp'], [403, 'child']]);
+
+    const shown = plan.alsoEnds.map((p) => ({ pid: p.pid, firstSeenAt: p.firstSeenAt }));
+    expect(h.session.killProcess(400, { also: shown })).toMatchObject({ ok: true, notFound: [], leftRunning: [] });
+    expect(h.kills.map((k) => k.pid).sort()).toEqual([400, 401, 403]);
+  });
+
   it('ends nothing of a session whose agent is gone or whose PIDs were reused since the question', async () => {
     const h = createHarness({
       procs: [

@@ -8,7 +8,11 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 export type ProcessHealthStatus = 'ACTIVE' | 'IDLE' | 'STANDBY' | 'STALE' | 'FROZEN';
-export type ProcessCategory = 'agent' | 'mcp' | 'playwright' | 'chromium' | 'node';
+/**
+ * A coding agent, an MCP server, or a process an agent started and is still running (a dev
+ * server, a test watcher, a browser): `child` is decided by the process tree, never by name.
+ */
+export type ProcessCategory = 'agent' | 'mcp' | 'child';
 /**
  * How a process was recognized as a coding agent: by a built-in program name, by a name from the
  * `agents` setting, or because it started an MCP server (whatever the agent is called).
@@ -174,15 +178,13 @@ export function programNames(raw: Pick<RawProcessInfo, 'name' | 'cmd'>): string[
   return Array.from(names);
 }
 
-const TARGET_KEYWORDS = [
-  'mcp',
-  'modelcontextprotocol',
-  'playwright',
-  'chromium',
-  'chrome-devtools',
-  'puppeteer',
-  'node',
-];
+const MCP_KEYWORDS = ['mcp', 'modelcontextprotocol'];
+
+/**
+ * How old a process an agent started must be before it is listed. The shells, git and rg calls of
+ * a tool call end within a second or two; listed, they would flicker through the table.
+ */
+const CHILD_MIN_AGE_SEC = 5;
 
 const IGNORED_SYSTEM_PATTERNS = [
   '/applications/claude.app/contents/macos/claude',
@@ -751,6 +753,37 @@ export class ProcessMonitor extends EventEmitter {
       candidateByPid.set(clientPid, client);
     }
 
+    // What an agent started and is still running: a dev server, a test watcher, a browser its MCP
+    // server opened. Decided by the process tree alone: "node", "chromium" or "playwright" in a
+    // command line listed the user's own servers and apps as well (cut on 20.11.2026).
+    const agentAbove = (pid: number): boolean => {
+      let cur = parentByPid.get(pid);
+      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
+        // agent-leash's own subtree: what it runs is no work of the agent that started it
+        if (cur === this.selfPid) return false;
+        if (candidateByPid.get(cur)?.category === 'agent') return true;
+        cur = parentByPid.get(cur);
+      }
+      return false;
+    };
+    for (const raw of rawList) {
+      if (candidateByPid.has(raw.pid) || raw.pid === this.selfPid || this.terminating.has(raw.pid)) continue;
+      // The wrappers that started agent-leash: ending the agent's session must not end agent-leash
+      if (selfAncestors.has(raw.pid)) continue;
+      if (!agentAbove(raw.pid)) continue;
+      // Without a known age a tool call cannot be told from a server
+      if (raw.etime === undefined || parseElapsedTime(raw.etime).elapsedSec < CHILD_MIN_AGE_SEC) continue;
+      const text = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
+      if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.includes(pattern))) continue;
+      // A shell or npm with a process under it only wraps that process
+      if (parentPidsWithChildren.has(raw.pid) && programNames(raw).some((name) => LAUNCHER_NAMES.has(name))) {
+        continue;
+      }
+      const child: Candidate = { raw, category: 'child' };
+      candidates.push(child);
+      candidateByPid.set(raw.pid, child);
+    }
+
     // Descendants of every candidate, for "did it start a process?". agent-leash's own subtree is
     // left out: its ps calls would make the agent that started it look busy forever.
     const descendantsOf = new Map<number, number[]>();
@@ -1229,33 +1262,10 @@ export class ProcessMonitor extends EventEmitter {
       return { category: 'agent', detectedBy };
     }
 
-    if (!TARGET_KEYWORDS.some((kw) => haystack.includes(kw))) {
-      return null;
-    }
-
-    if (haystack.includes('mcp') || haystack.includes('modelcontextprotocol')) {
+    if (MCP_KEYWORDS.some((kw) => haystack.includes(kw))) {
       return { category: 'mcp' };
     }
-
-    if (haystack.includes('playwright')) {
-      return { category: 'playwright' };
-    }
-    if (haystack.includes('chromium') || haystack.includes('headless_shell')) {
-      return { category: 'chromium' };
-    }
-
-    const normalizedRoot = this.rootDir.toLowerCase();
-    if (
-      haystack.includes('node') &&
-      (haystack.includes(normalizedRoot) ||
-        haystack.includes('tsx') ||
-        haystack.includes('vitest') ||
-        !raw.cmd ||
-        raw.cmd === raw.name)
-    ) {
-      return { category: 'node' };
-    }
-
+    // Everything else is listed only when an agent started it (the process tree, in performScan)
     return null;
   }
 

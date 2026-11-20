@@ -21,6 +21,16 @@ agent-leash keeps no list of AI products. A process is a coding agent when one o
 - Rule 3 never applies to an editor, a desktop app or a terminal (`HOST_PATTERNS`): VS Code, Cursor, the Antigravity app or Claude Desktop start MCP servers too, and they must never be stopped as an agent.
 - Do not add a product name to the code because a new agent appeared. Rule 3 finds every agent that uses MCP; users name the rest with `agents`. A built-in name needs a real case that both miss.
 
+### What else is listed
+
+Besides agents, a process is listed when its command line names MCP (`mcp`, `modelcontextprotocol`: category `mcp`), or when an agent started it (category `child`): a dev server, a test watcher, a browser its MCP server opened. `child` is decided by the process tree alone, never by name:
+
+- an agent is among its ancestors, and agent-leash itself is not (its `ps` and `lsof` calls, and the wrappers that started it, are never listed);
+- it is at least `CHILD_MIN_AGE_SEC` (5 s) old by `ps etime`, so the shells, `git` and `rg` calls of a tool call do not flicker through the list; without a known age it is not listed;
+- a launcher (`LAUNCHER_NAMES`: shell, npm, npx, uvx …) with a process under it is only that process's wrapper and is not listed.
+
+A child has an `agentPid`, so it ends with its agent's session and is held by `pause` when its agent belongs to the watched repository. Once its agent is gone the tree no longer says whose it was, and it is not listed any more (no memory of origin). What the user started in a terminal, an editor or the Dock is never listed unless it is an agent or names MCP.
+
 ## 2. Classification
 
 `ProcessMonitor.performScan` decides in this order; the first match wins:
@@ -57,14 +67,16 @@ Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `l
 - **Busy, but stale by age.** A session in another repository counted as stale after 6 hours whatever it was doing, even at an open VS Code window. Measured on 19.11.2026 over 2 minutes: idle agent and MCP processes used 0.00 to 0.2 s of CPU time, working sessions 2 to 17 s. Fix: rule 2 and 3 need measured inactivity below a budget over a 10-minute window.
 - **Every resting agent looked busy.** Measured on 20.11.2026 over 25 minutes, sessions opened, asked one question and left alone: idle `agy` used 0.8 to 1.0 s of CPU time per 10 minutes, idle `claude` in a terminal 1.4 to 5.5 s, idle `claude` in Claude Desktop 4.6 to 6.5 s, so with a budget of 0.5 s no forgotten agent was ever called stale. In 2 minutes the idle sessions started no process, a working one 124. Fix: the new-child-process rule, budget 8 s.
 - **Idle under an open app.** On 20.11.2026, an MCP server of the open Antigravity app had no working directory, was 10 h old, and used 0.00 s CPU time in 10 min. It became `STALE` by rule 3, which runs before `STANDBY`. It was waiting for tool calls. Fix: rule 3 skips MCP servers whose parent chain is alive under an app `host`. Only a terminal-held or detached one can still be called stale.
+- **Substrings listed the user's own processes.** Until 20.11.2026, `node`, `chromium` and `playwright` in a command line were categories of their own: a `tsx watch` server started from the user's terminal, a browser app from the Dock and an old test run appeared next to the agents, and a dev server the agent had started through `npm run dev` did not. Fix: those categories are gone; `child` follows the process tree (section 1, "What else is listed").
 - **An agent nobody listed.** On 17.11.2026 the Antigravity CLI (`agy`) worked in the watched repository and did not appear at all; only its MCP server did. The emergency brake would have stopped the Claude session next to it, but not `agy`. Fix: rule 3 of section 1, without adding `agy` to any list.
 
 ## 4. Known weak spots (not decided yet)
 
 - Rule 2 cannot tell a session nobody will come back to from one at an open editor window that is merely idle for 10 minutes: both start nothing and tick alike. It only rules out sessions that are working. An agent that thinks or streams for 10 minutes without a tool call and stays under 8 s is called stale (an observation, nothing is ended).
 - A process that detached itself (its own process group, e.g. a daemonized server) and then lost its parent is not recognized as orphaned. On Linux an orphan may be adopted by a subreaper instead of PID 1 (unverified).
-- MCP servers, browsers and node processes are still matched by substring (`mcp`, `chromium`, `node` …) and catch unrelated programs; an agent without MCP and without a known name stays invisible until it is named in `agents`.
-- An app that is not in `HOST_PATTERNS` and starts MCP servers (Docker Desktop, a launcher utility) is taken for an agent by rule 3 of section 1.
+- MCP servers are still matched by substring (`mcp`) and catch unrelated programs; an agent without MCP and without a known name stays invisible until it is named in `agents`.
+- An app that is not in `HOST_PATTERNS` and starts MCP servers (Docker Desktop, a launcher utility) is taken for an agent by rule 3 of section 1. Then every process it started is listed as its `child`, ends with it and is held by `pause` when it runs in the watched repository; the confirmation lists each one, but the cause is the misrecognition.
+- A process an agent started and that outlived it (a dev server left running, an orphaned browser) is not listed at all unless it names MCP.
 
 Do not settle these by yourself. Propose, with evidence.
 

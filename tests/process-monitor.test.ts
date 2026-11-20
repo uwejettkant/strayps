@@ -5,8 +5,8 @@ import {
   type RawProcessInfo,
 } from '../src/core/process-monitor.js';
 
-describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => {
-  it('classifies MCP, Playwright, and Chromium processes and tracks CPU activity', async () => {
+describe('ProcessMonitor', () => {
+  it('lists MCP servers and tracks their CPU activity, but no browser or app that no agent started', async () => {
     let mockProcesses: RawProcessInfo[] = [
       {
         pid: 4101,
@@ -41,14 +41,9 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
 
     const list = await monitor.scan(t0);
 
-    expect(list).toHaveLength(2);
-    const mcpProc = list.find((p) => p.pid === 4101);
-    const chromiumProc = list.find((p) => p.pid === 4102);
-
-    expect(mcpProc?.category).toBe('mcp');
-    expect(mcpProc?.status).toBe('ACTIVE');
-    expect(chromiumProc?.category).toBe('chromium');
-    expect(chromiumProc?.status).toBe('IDLE');
+    expect(list.map((p) => p.pid)).toEqual([4101]);
+    expect(list[0].category).toBe('mcp');
+    expect(list[0].status).toBe('ACTIVE');
   });
 
   it('marks an orphaned MCP process as FROZEN after mcpSilenceTimeoutSec and can terminate it', async () => {
@@ -116,8 +111,8 @@ describe('ProcessMonitor (MCP & Playwright Heartbeat / Zombie Detector)', () => 
         pid: 6001,
         ppid: 1,
         pgid: 6000,
-        name: 'playwright',
-        cmd: 'playwright test --headed',
+        name: 'node',
+        cmd: 'node /x/node_modules/.bin/mcp-server-fetch',
         cpu: 0,
         memory: 2.0,
       },

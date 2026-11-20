@@ -241,10 +241,11 @@ describe('ProcessMonitor classification (production rules)', () => {
     // were "frozen" after 45 quiet seconds. Quiet is not frozen.
     const { monitor } = setup([
       { pid: 50, name: 'zsh', cmd: '-zsh', cwd: REPO, cpu: 0, etime: '02:00:00' },
-      { pid: 51, ppid: 50, name: 'node', cmd: 'node node_modules/.bin/tsx watch src/server.ts', cwd: REPO, cpu: 0, etime: '30:00' },
+      agent(52, REPO, { ppid: 50, etime: '40:00' }),
+      { pid: 51, ppid: 52, name: 'node', cmd: 'node node_modules/.bin/tsx watch src/server.ts', cwd: REPO, cpu: 0, etime: '30:00' },
       { pid: 60, name: 'zsh', cmd: '-zsh', cwd: OTHER, cpu: 0, etime: '02:00:00' },
-      { pid: 61, ppid: 60, name: 'Chromium', cmd: 'Chromium --headless --remote-debugging-port=9222', cpu: 0, etime: '20:00' },
       agent(62, OTHER, { ppid: 60, etime: '15:00' }),
+      { pid: 61, ppid: 62, name: 'Chromium', cmd: 'Chromium --headless --remote-debugging-port=9222', cpu: 0, etime: '14:00' },
     ]);
     const t0 = Date.now();
     for (const t of [t0, t0 + 46_000, t0 + 3_600_000]) {
@@ -273,7 +274,7 @@ describe('ProcessMonitor classification (production rules)', () => {
     // leader of its own process group. A process whose parent died keeps its old group.
     const t0 = Date.now();
     const { monitor } = setup([
-      { pid: 80, ppid: 1, pgid: 80, name: 'Chromium', cmd: '/Applications/Chromium.app/Contents/MacOS/Chromium', cpu: 0, etime: '05:00:00' },
+      { pid: 80, ppid: 1, pgid: 80, name: 'mcp-inspector', cmd: '/Applications/MCP Inspector.app/Contents/MacOS/mcp-inspector', cpu: 0, etime: '05:00:00' },
       // without a process group (fallback lister) there is no evidence that the parent is gone
       mcp(81, 1, { etime: '05:00:00' }),
     ]);
@@ -344,15 +345,16 @@ describe('ProcessMonitor classification (production rules)', () => {
     const { monitor } = setup(
       [
         { pid: 10, ppid: 1, name: 'zsh', cmd: '-zsh' },
-        { pid: 20, ppid: 10, name: 'node', cmd: `node ${REPO}/node_modules/.bin/tsx src/cli.ts watch` },
-        { pid: 30, ppid: 20, name: 'node', cmd: 'node src/cli.ts watch' },
-        { pid: 40, ppid: 1, name: 'node', cmd: 'node ./node_modules/.bin/tsx watch server.ts', cwd: REPO },
+        agent(15, REPO, { ppid: 10, cpu: 1 }),
+        { pid: 20, ppid: 15, name: 'node', cmd: `node ${REPO}/node_modules/.bin/tsx src/cli.ts watch`, etime: '05:00' },
+        { pid: 30, ppid: 20, name: 'node', cmd: 'node src/cli.ts watch', etime: '05:00' },
+        { pid: 40, ppid: 15, name: 'node', cmd: 'node ./node_modules/.bin/tsx watch server.ts', cwd: REPO, etime: '05:00' },
       ],
       { selfPid: 30 },
     );
 
     const list = await monitor.scan(1_000);
-    expect(list.map((p) => p.pid)).toEqual([40]);
+    expect(list.map((p) => [p.pid, p.category])).toEqual([[15, 'agent'], [40, 'child']]);
   });
 
   it('keeps the previous list and reports when the process scan itself fails', async () => {
@@ -459,8 +461,8 @@ describe('ProcessMonitor agent detection (no list of products to keep up to date
     const agents = list.filter((p) => p.category === 'agent');
     expect(agents.map((p) => p.pid).sort((a, b) => a - b)).toEqual([90, 91]);
     expect(agents.every((p) => p.detectedBy === 'setting')).toBe(true);
-    // vibe-check.js only contains the name
-    expect(list.find((p) => p.pid === 92)?.category).toBe('node');
+    // vibe-check.js only contains the name: no agent, and nothing an agent started
+    expect(list.some((p) => p.pid === 92)).toBe(false);
   });
 
   it('does not take a program for an agent because its name merely contains one', async () => {
@@ -472,7 +474,8 @@ describe('ProcessMonitor agent detection (no list of products to keep up to date
 
     const list = await monitor.scan(1_000);
     expect(list.find((p) => p.pid === 101)?.category).toBe('mcp');
-    expect(list.find((p) => p.pid === 102)?.category).toBe('node');
+    // not an agent, so not listed at all: nothing an agent started either
+    expect(list.some((p) => p.pid === 102)).toBe(false);
   });
 
   it('still recognizes Claude Code, Codex and Aider by name, however they are started', async () => {
@@ -490,6 +493,86 @@ describe('ProcessMonitor agent detection (no list of products to keep up to date
     const agents = list.filter((p) => p.category === 'agent');
     expect(agents.map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 110, 111, 112, 113, 114]);
     expect(agents.every((p) => p.detectedBy === 'name')).toBe(true);
+  });
+});
+
+describe('ProcessMonitor: what an agent started', () => {
+  // A "node", "chromium" or "playwright" anywhere in a command line was enough to be listed: the
+  // user's own dev servers, test runners and browser apps showed up next to the agents (cut on
+  // 20.11.2026). What is not an agent or an MCP server is listed only because an agent started it.
+  const tree = (): RawProcessInfo[] => [
+    agent(100, REPO, { cpu: 3 }),
+    mcp(101, 100),
+    // a dev server the agent started through a shell and npm
+    { pid: 105, ppid: 100, name: 'zsh', cmd: '/bin/zsh -c npm run dev', cwd: REPO, etime: '08:00' },
+    { pid: 106, ppid: 105, name: 'npm', cmd: 'npm run dev', cwd: REPO, etime: '08:00' },
+    { pid: 110, ppid: 106, name: 'node', cmd: 'node node_modules/.bin/next dev', cwd: REPO, cpu: 2, rssKb: 90_000, etime: '07:59' },
+    // a browser its MCP server opened
+    { pid: 121, ppid: 101, name: 'Chromium', cmd: 'Chromium --headless --remote-debugging-port=9222', rssKb: 120_000, etime: '05:00' },
+    // a tool call that just started
+    { pid: 130, ppid: 100, name: 'git', cmd: 'git status', cwd: REPO, etime: '00:01' },
+    // what the user started: a terminal with a watch server, a browser app, an orphaned test run
+    { pid: 200, name: 'zsh', cmd: '-zsh', cwd: REPO, etime: '02:00:00' },
+    { pid: 201, ppid: 200, name: 'node', cmd: 'node node_modules/.bin/tsx watch src/server.ts', cwd: REPO, etime: '30:00' },
+    { pid: 300, ppid: 1, pgid: 300, name: 'Chromium', cmd: '/Applications/Chromium.app/Contents/MacOS/Chromium', etime: '03:00:00' },
+    { pid: 301, ppid: 1, pgid: 299, name: 'node', cmd: 'node node_modules/.bin/playwright test', cwd: REPO, etime: '01:00:00' },
+    { pid: 302, name: 'node', cmd: 'node node_modules/.bin/vitest', cwd: REPO, etime: '10:00' },
+  ];
+
+  it('lists what an agent started and is still running, and nothing that only looks like a tool', async () => {
+    const { monitor } = setup(tree());
+    const t0 = Date.now();
+    for (const t of [t0, t0 + 46_000, t0 + 3_600_000]) {
+      const byPid = new Map((await monitor.scan(t)).map((p) => [p.pid, p]));
+      expect([...byPid.keys()].sort((a, b) => a - b), `+${(t - t0) / 1000}s`).toEqual([100, 101, 110, 121]);
+      for (const pid of [110, 121]) {
+        expect(byPid.get(pid)).toMatchObject({ category: 'child', agentPid: 100, pauseTarget: true });
+        expect(byPid.get(pid)?.status).not.toBe('FROZEN');
+      }
+    }
+  });
+
+  it('lists a process an agent started once it is a few seconds old, so tool calls do not flicker by', async () => {
+    const { monitor, procs } = setup(tree());
+    const t0 = Date.now();
+    expect((await monitor.scan(t0)).some((p) => p.pid === 130)).toBe(false);
+    procs.find((p) => p.pid === 130)!.etime = '00:05';
+    expect((await monitor.scan(t0 + 4_000)).find((p) => p.pid === 130)?.category).toBe('child');
+  });
+
+  it('lists nothing an agent started when its age is unknown', async () => {
+    const procs = tree().map((p) => (p.pid === 110 ? { ...p, etime: undefined } : p));
+    const { monitor } = setup(procs);
+    expect((await monitor.scan(Date.now())).some((p) => p.pid === 110)).toBe(false);
+  });
+
+  it('no longer knows whose a process was once its agent is gone', async () => {
+    // A known limit (README, "What agent-leash cannot see"): no memory of where a process came from
+    const { monitor, procs, alive } = setup(tree());
+    const t0 = Date.now();
+    await monitor.scan(t0);
+    alive.delete(100);
+    alive.delete(105);
+    alive.delete(106);
+    procs.find((p) => p.pid === 110)!.ppid = 1;
+    procs.find((p) => p.pid === 110)!.pgid = 105;
+    const list = await monitor.scan(t0 + 2_000);
+    expect(list.some((p) => p.pid === 110)).toBe(false);
+  });
+
+  it('never lists agent-leash itself, the wrappers that started it or what it runs', async () => {
+    // started from an agent's shell: ending that agent's session must not end agent-leash
+    const { monitor } = setup(
+      [
+        agent(100, REPO, { cpu: 1 }),
+        { pid: 140, ppid: 100, name: 'node', cmd: `node ${REPO}/node_modules/.bin/tsx src/cli.ts watch`, etime: '20:00' },
+        { pid: 141, ppid: 140, name: 'node', cmd: 'node src/cli.ts watch', etime: '20:00' },
+        { pid: 142, ppid: 141, name: 'lsof', cmd: 'lsof -a -d cwd -p 100', etime: '00:30' },
+      ],
+      { selfPid: 141 },
+    );
+    const list = await monitor.scan(Date.now());
+    expect(list.map((p) => p.pid)).toEqual([100]);
   });
 });
 
@@ -579,6 +662,8 @@ describe('ProcessMonitor termination', () => {
     const { monitor, kills } = setup([
       agent(100, REPO, { cpu: 1 }),
       mcp(101, 100, { cwd: '/' }),
+      // a test watcher the agent started
+      { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vitest', cwd: REPO, cpu: 1, etime: '02:00' },
       agent(200, OTHER, { cpu: 1 }),
       mcp(201, 200, { cwd: OTHER }),
       // the developer's own dev server, started from a terminal in the same repository
@@ -590,17 +675,18 @@ describe('ProcessMonitor termination', () => {
     ]);
     await monitor.scan(1_000);
 
-    expect(monitor.getPauseTargets().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101]);
-    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101]);
+    expect(monitor.getPauseTargets().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101, 102]);
+    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101, 102]);
     // held, not terminated: nothing leaves the list, nothing is killed
-    expect(kills.map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGSTOP', '101:SIGSTOP']);
-    expect(monitor.getProcesses()).toHaveLength(6);
-    expect(monitor.getPausedPids().sort((a, b) => a - b)).toEqual([100, 101]);
+    expect(kills.map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGSTOP', '101:SIGSTOP', '102:SIGSTOP']);
+    // the developer's dev server is not even listed: no agent started it
+    expect(monitor.getProcesses().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101, 102, 200, 201, 501]);
+    expect(monitor.getPausedPids().sort((a, b) => a - b)).toEqual([100, 101, 102]);
     // pausing again holds nothing twice
     expect(monitor.pauseTargets()).toEqual([]);
 
-    expect(monitor.resumePaused().sort((a, b) => a - b)).toEqual([100, 101]);
-    expect(kills.slice(2).map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGCONT', '101:SIGCONT']);
+    expect(monitor.resumePaused().sort((a, b) => a - b)).toEqual([100, 101, 102]);
+    expect(kills.slice(3).map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGCONT', '101:SIGCONT', '102:SIGCONT']);
     expect(monitor.getPausedPids()).toEqual([]);
   });
 

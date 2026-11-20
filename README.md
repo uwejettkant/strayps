@@ -69,11 +69,13 @@ agent-leash keeps no list of AI products, and it does not care which model an ag
 2. **By name**, for the agents that come built in: `claude`, `codex` and `aider`, matched by their exact program name, never as part of another name.
 3. **By your list**, for any other agent: `npx agent-leash config set agents vibe,opencode`.
 
+Besides agents and MCP servers, the list shows what an agent started and is still running: a dev server, a test watcher, a browser its MCP server opened. These rows are marked `child`, and they are found through the process tree, not by name: a dev server or a browser you started yourself is not listed. Short tool calls (a shell, `git`, `rg`) appear only once they run for more than a few seconds.
+
 ### What agent-leash cannot see
 
 - **Containers.** Agents and MCP servers inside Docker or another container runtime are not monitored. On macOS they run inside a virtual machine and do not appear in the list at all.
 - **Agents inside apps.** An agent built into an editor (Cursor's agent, Copilot in VS Code) is part of the editor's own processes. The MCP servers such an app starts are listed, attached to the app; the agent itself is not a process of its own, and the app is never taken for one.
-- **Processes that left the tree.** A process that detached itself from the agent that started it (`nohup`, `setsid`, a daemon) no longer shows which session it belongs to. Ending the session does not end it; if it is an MCP server or an agent, it still appears in the list, as a process of its own.
+- **Processes that left the tree.** A process that outlived the agent that started it, or detached itself (`nohup`, `setsid`, a daemon), no longer shows which session it belongs to, and ending the session does not end it. If it is an MCP server or an agent, it still appears in the list, as a process of its own; anything else, such as a dev server left running, is not listed any more.
 - **Agents it does not recognize.** An agent with a name agent-leash does not know that starts no MCP server is not listed until you add its name to `agents`.
 - **Other systems.** Verified on macOS. Linux is implemented but not yet verified, and its classification is less reliable. Windows is not supported.
 
@@ -236,7 +238,7 @@ git clone https://github.com/uwejettkant/agent-leash.git
 cd agent-leash
 npm install
 
-npm run check     # Typecheck, 157 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 163 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real
