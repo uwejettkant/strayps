@@ -7,7 +7,6 @@ export type LeashCommand =
   | { kind: 'help' }
   | { kind: 'exit' }
   | { kind: 'status' }
-  | { kind: 'revert'; target: string }
   | { kind: 'kill'; pid: number }
   | { kind: 'pause' }
   | { kind: 'resume' }
@@ -29,11 +28,10 @@ export interface CommandResult {
   confirm?: { prompt: string; details?: string[]; run: () => CommandResult };
 }
 
-export const COMMAND_NAMES = ['help', 'status', 'revert', 'kill', 'pause', 'resume', 'exit'];
+export const COMMAND_NAMES = ['help', 'status', 'kill', 'pause', 'resume', 'exit'];
 
 export const HELP_LINES: Array<[string, string]> = [
-  ['exit, quit, q', 'stop the watchdog (Ctrl+C works too)'],
-  ['revert <file>', 'roll one file back to the version before its latest changes'],
+  ['exit, quit, q', 'stop the monitor (Ctrl+C works too)'],
   ['kill <pid>', 'terminate one process; for an agent, its session (asks first)'],
   ['pause', "hold this repo's agents (nothing is lost)"],
   ['resume', 'continue what pause held'],
@@ -101,12 +99,12 @@ export function parseCommand(line: string): LeashCommand {
     };
   }
 
-  if (word === 'revert' || word === 'rollback' || word === 'undo' || word === 'r') {
-    const target = rest.replace(/^(['"])(.*)\1$/, '$2');
-    if (!target) {
-      return { kind: 'invalid', message: 'Usage: revert <file> (Tab completes modified files)' };
-    }
-    return { kind: 'revert', target };
+  if (word === 'revert' || word === 'rollback' || word === 'undo') {
+    // The file guard was removed: git and the agents' own checkpoints know better what an agent changed
+    return {
+      kind: 'invalid',
+      message: 'Files are not watched any more: use git, or the checkpoints of your agent (Claude Code: /rewind).',
+    };
   }
 
   if (word === 'kill' || word === 'k') {
@@ -117,29 +115,6 @@ export function parseCommand(line: string): LeashCommand {
   }
 
   return { kind: 'invalid', message: `Unknown command "${sanitize(word)}". Type help for the list.` };
-}
-
-/**
- * Finds the modified file the user means: the exact path, or the only modified file
- * whose path ends with / contains what was typed.
- */
-export function resolveModifiedFile(
-  target: string,
-  modifiedFiles: string[],
-): { file: string } | { error: string } {
-  const wanted = target.replace(/\\/g, '/').replace(/^\.\//, '');
-  if (modifiedFiles.includes(wanted)) return { file: wanted };
-
-  let matches = modifiedFiles.filter((f) => f.endsWith(`/${wanted}`));
-  if (matches.length === 0) {
-    matches = modifiedFiles.filter((f) => f.includes(wanted));
-  }
-  if (matches.length === 1) return { file: matches[0] };
-  if (matches.length > 1) {
-    const shown = matches.slice(0, 4).map(sanitize).join(', ');
-    return { error: `"${sanitize(target)}" matches ${matches.length} modified files: ${shown}${matches.length > 4 ? ', …' : ''}` };
-  }
-  return { error: `"${sanitize(target)}" is not a file modified in this session` };
 }
 
 /**
@@ -162,25 +137,6 @@ export function runCommand(session: WatchdogSession, command: LeashCommand): Com
 
     case 'exit':
       return { message: 'Shutting down…', level: 'info', exit: true };
-
-    case 'revert': {
-      const resolved = resolveModifiedFile(command.target, session.getSnapshot().modifiedFiles);
-      if ('error' in resolved) {
-        return { message: resolved.error, level: 'error' };
-      }
-      const file = resolved.file;
-      return {
-        message: '',
-        level: 'warn',
-        confirm: {
-          prompt: `Roll ${sanitize(file)} back to the version before its latest changes?`,
-          run: () =>
-            session.rollbackFile(file)
-              ? { message: `Rolled back ${sanitize(file)}`, level: 'info' }
-              : { message: `Could not roll back ${sanitize(file)} (see activity log)`, level: 'error' },
-        },
-      };
-    }
 
     case 'kill': {
       const plan = session.getKillPlan(command.pid);
@@ -297,7 +253,7 @@ function commonPrefix(values: string[]): string {
   return prefix;
 }
 
-/** Tab completion: command names, modified files and monitored PIDs. */
+/** Tab completion: command names and monitored PIDs. */
 export function completeInput(session: WatchdogSession, input: string): Completion {
   const spaceAt = input.search(/\s/);
   let head = '';
@@ -309,9 +265,7 @@ export function completeInput(session: WatchdogSession, input: string): Completi
     head = input.slice(0, spaceAt + 1);
     partial = input.slice(spaceAt + 1).replace(/^\s+/, '');
     const snapshot = session.getSnapshot();
-    if (word === 'revert' || word === 'rollback' || word === 'undo' || word === 'r') {
-      pool = snapshot.modifiedFiles;
-    } else if (word === 'kill' || word === 'k') {
+    if (word === 'kill' || word === 'k') {
       pool = snapshot.processes.map((p) => String(p.pid));
     } else {
       return { input, candidates: [] };

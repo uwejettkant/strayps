@@ -48,7 +48,6 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.8",
-    "chokidar": "^4.0.1",
     "commander": "^12.1.0",
     "hono": "^4.13.18",
     "ps-list": "^8.1.1"

@@ -1,6 +1,6 @@
 import readline from 'node:readline';
 import type { WatchdogSession } from '../core/session.js';
-import type { WatchActivityEvent } from '../core/watcher.js';
+import type { ActivityEvent } from '../core/events.js';
 import { type CommandResult, HELP_LINES, parseCommand, runCommand } from './commands.js';
 import { createPalette, formatEventLine, formatStatusReport, padEnd, type Palette } from './format.js';
 
@@ -32,7 +32,7 @@ export class PlainReporter {
   private pendingConfirm: { prompt: string; run: () => CommandResult } | null = null;
   private started = false;
 
-  private readonly onEvent = (event: WatchActivityEvent) => {
+  private readonly onEvent = (event: ActivityEvent) => {
     if (this.options.quiet && event.severity === 'info') return;
     this.options.write(formatEventLine(event, this.palette));
   };

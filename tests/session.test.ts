@@ -11,66 +11,24 @@ afterEach(() => {
 const OTHER = '/work/other-repo';
 
 describe('WatchdogSession', () => {
-  it('gives every front end one merged, newest-first view of file, process and session events', async () => {
+  it('gives every front end one newest-first view of processes and session events', async () => {
     const h = createHarness({
-      files: { 'a.ts': 'a\n' },
       procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00', rssKb: 100_000, cpuTimeSec: 1.5 }],
     });
-    h.watcher.createCheckpoint();
-
-    writeFiles(h.dir, { 'a.ts': 'changed\n' });
-    h.watcher.handleFileSystemEvent('change', 'a.ts');
     await h.monitor.scan();
-    h.session.addEvent({ type: 'watch-error', message: 'from the session', severity: 'warn' });
+    h.session.addEvent({ type: 'scan-error', message: 'from the session', severity: 'warn' });
 
     const snapshot = h.session.getSnapshot();
     expect(snapshot.rootDir).toBe(h.dir);
-    expect(snapshot.modifiedFiles).toEqual(['a.ts']);
-    expect(snapshot.limitState).toBe('ok');
     expect(snapshot.processes.map((p) => p.pid)).toEqual([300]);
 
     const types = snapshot.events.map((e) => e.type);
-    expect(types).toContain('checkpoint-created');
-    expect(types).toContain('file-edit');
     expect(types).toContain('process-alert');
-    expect(types).toContain('watch-error');
+    expect(types).toContain('scan-error');
     const stamps = snapshot.events.map((e) => e.timestamp);
     expect(stamps).toEqual([...stamps].sort((a, b) => b - a));
 
-    expect(h.session.getCounters()).toMatchObject({ 'file-edit': 1, 'process-alert': 1, 'watch-error': 1 });
-  });
-
-  it('reflects the hard-stop state as soon as edited limits make the current file count too many', () => {
-    const files: Record<string, string> = {};
-    for (let i = 0; i < 16; i++) files[`f${i}.ts`] = 'x\n';
-    const h = createHarness({ files });
-    h.watcher.createCheckpoint();
-    for (let i = 0; i < 16; i++) h.watcher.handleFileSystemEvent('change', `f${i}.ts`);
-
-    expect(h.session.getSnapshot().limitState).toBe('warn');
-    writeFiles(h.dir, { '.agentguard.json': JSON.stringify({ limits: { maxFilesWarn: 10, maxFilesHardStop: 12 } }) });
-    h.session.reloadConfig();
-    expect(h.session.getSnapshot().limitState).toBe('hard-stop');
-  });
-
-  it('counts the limits since the last commit and shows both lists to every front end', () => {
-    const h = createHarness({ files: { 'a.ts': 'a\n', 'b.ts': 'b\n', 'c.ts': 'c\n' }, config: { limits: { maxFilesWarn: 2, maxFilesHardStop: 3 } } });
-    initGitRepo(h.dir);
-    commitAll(h.dir);
-    h.watcher.createCheckpoint();
-    for (const name of ['a.ts', 'b.ts', 'c.ts']) {
-      writeFiles(h.dir, { [name]: 'changed\n' });
-      h.watcher.handleFileSystemEvent('change', name);
-    }
-    expect(h.session.getSnapshot()).toMatchObject({ limitState: 'hard-stop', countsSinceCommit: true });
-
-    commitAll(h.dir, 'work');
-    h.watcher.checkCommits();
-    const snapshot = h.session.getSnapshot();
-    expect(snapshot.uncommittedFiles).toEqual([]);
-    expect(snapshot.modifiedFiles.sort()).toEqual(['a.ts', 'b.ts', 'c.ts']);
-    expect(snapshot.limitState).toBe('ok');
-    expect(snapshot.events[0]).toMatchObject({ type: 'commit-detected', severity: 'info' });
+    expect(h.session.getCounters()).toMatchObject({ 'process-alert': 1, 'scan-error': 1 });
   });
 
   it('terminates only monitored processes and says why it refuses', async () => {
@@ -120,11 +78,6 @@ describe('WatchdogSession', () => {
     // a process that is not an agent ends alone
     expect(h.session.getKillPlan(401)!.alsoEnds).toEqual([]);
     expect(h.session.getKillPlan(4242)).toBeNull();
-    expect(h.session.getSnapshot().sessionMembers).toEqual({
-      400: plan.alsoEnds.map((p) => p.pid),
-      402: [403],
-      500: [501],
-    });
 
     const shown = (pid: number) => ({ pid, firstSeenAt: plan.alsoEnds.find((p) => p.pid === pid)?.firstSeenAt ?? 0 });
     // 501 and 601 are not part of this session; 404 was not confirmed; 999 is gone
@@ -256,9 +209,8 @@ describe('WatchdogSession', () => {
     expect(h.kills).toEqual([]);
   });
 
-  it('pause holds the agents of the watched repository, touches no file and logs it; resume continues them', async () => {
+  it('pause holds the agents of the current repository and logs it; resume continues them', async () => {
     const h = createHarness({
-      files: { 'a.ts': 'a\n' },
       procs: [
         { pid: 100, name: 'claude', cmd: 'claude', cpu: 5, etime: '10:00' },
         { pid: 101, ppid: 100, name: 'node', cmd: 'node some-mcp-server', cwd: '/', cpu: 0, etime: '10:00' },
@@ -266,16 +218,12 @@ describe('WatchdogSession', () => {
       ],
     });
     h.procs[0].cwd = h.dir;
-    h.watcher.createCheckpoint();
     await h.monitor.scan();
-    writeFiles(h.dir, { 'a.ts': 'agent work\n' });
-    h.watcher.handleFileSystemEvent('change', 'a.ts');
 
     expect(h.session.getPauseTargets().map((p) => p.pid).sort()).toEqual([100, 101]);
     expect(h.session.pause().pids.sort()).toEqual([100, 101]);
     expect(h.kills.map((k) => k.signal)).toEqual(['SIGSTOP', 'SIGSTOP']);
-    // nothing is rolled back, nothing leaves the list
-    expect(read(h.dir, 'a.ts')).toBe('agent work\n');
+    // nothing leaves the list
     expect(h.session.getSnapshot().processes.filter((p) => p.paused).map((p) => p.pid).sort()).toEqual([100, 101]);
     expect(h.session.getSnapshot().events[0]).toMatchObject({ type: 'process-paused', severity: 'warn' });
 
@@ -285,44 +233,20 @@ describe('WatchdogSession', () => {
     expect(h.session.resume().pids).toEqual([]);
   });
 
-  it('re-arms the circuit breaker for a file once it has been rolled back', () => {
-    const h = createHarness({
-      files: { 'a.ts': 'a\n' },
-      watcher: { keepDiscarded: false },
-      config: { limits: { maxFilesWarn: 15, maxFilesHardStop: 40, maxEditsPerFilePerMinute: 2, mcpSilenceTimeoutSec: 45 } },
-    });
-    h.watcher.createCheckpoint();
-    for (let i = 1; i <= 3; i++) {
-      writeFiles(h.dir, { 'a.ts': `edit ${i}\n` });
-      h.watcher.handleFileSystemEvent('change', 'a.ts');
-    }
-    expect(h.session.getSnapshot().trippedFiles).toEqual(['a.ts']);
-    expect(read(h.dir, 'a.ts')).toBe('edit 3\n');
-
-    expect(h.session.rollbackFile('a.ts')).toBe(true);
-    expect(h.session.getSnapshot().trippedFiles).toEqual([]);
-    expect(read(h.dir, 'a.ts')).toBe('a\n');
-    expect(h.session.rollbackFile('../outside.txt')).toBe(false);
-  });
-
   it('coalesces a burst of changes into a few updates', async () => {
     vi.useFakeTimers();
-    const files: Record<string, string> = {};
-    for (let i = 0; i < 300; i++) files[`src/f${i}.ts`] = 'x\n';
-    const h = createHarness({ files, config: { limits: { maxFilesWarn: 1000, maxFilesHardStop: 2000 } } });
-    h.watcher.createCheckpoint();
+    const h = createHarness();
     const updates: StatusSnapshot[] = [];
     const events: string[] = [];
     h.session.on('update', (snapshot: StatusSnapshot) => updates.push(snapshot));
     h.session.on('event', (event: { type: string }) => events.push(event.type));
 
-    for (let i = 0; i < 300; i++) h.watcher.handleFileSystemEvent('change', `src/f${i}.ts`);
-    expect(events.filter((t) => t === 'file-edit')).toHaveLength(300);
+    for (let i = 0; i < 300; i++) h.session.addEvent({ type: 'process-alert', message: `alert ${i}`, severity: 'warn' });
+    expect(events).toHaveLength(300);
     expect(updates).toHaveLength(0);
 
     await vi.advanceTimersByTimeAsync(100);
     expect(updates).toHaveLength(1);
-    expect(updates[0].modifiedFiles).toHaveLength(300);
 
     await vi.advanceTimersByTimeAsync(1000);
     expect(updates).toHaveLength(1);
@@ -343,14 +267,13 @@ describe('WatchdogSession', () => {
     const session = new WatchdogSession({
       rootDir: h.dir,
       configManager: h.configManager,
-      watcher: h.watcher,
       processMonitor: failing,
     });
 
     await failing.scan();
     await failing.scan();
     await failing.scan();
-    const errors = () => session.getSnapshot().events.filter((e) => e.type === 'watch-error');
+    const errors = () => session.getSnapshot().events.filter((e) => e.type === 'scan-error');
     expect(errors()).toHaveLength(1);
     expect(errors()[0].message).toContain('ps exploded');
 
@@ -362,15 +285,13 @@ describe('WatchdogSession', () => {
   });
 
   it('stops listening after dispose', () => {
-    const h = createHarness({ files: { 'a.ts': 'a\n' } });
-    h.watcher.createCheckpoint();
+    const h = createHarness();
     const onEvent = vi.fn();
     h.session.on('event', onEvent);
     h.session.dispose();
 
-    h.watcher.handleFileSystemEvent('change', 'a.ts');
+    h.monitor.emit('process-frozen', { pid: 1, status: 'FROZEN', cmd: 'x', memoryMb: 0, reason: 'r' });
     expect(onEvent).not.toHaveBeenCalled();
-    expect(h.watcher.listenerCount('activity')).toBe(0);
     expect(h.monitor.listenerCount('scan-complete')).toBe(0);
   });
 });

@@ -33,7 +33,7 @@ agent-leash keeps no list of AI products. A process is a coding agent when one o
 | 4 | orphaned: parent is PID 1 **and** not the leader of its own process group, not an agent, 0 % CPU, older than the silence timeout | `FROZEN` |
 | 5 | MCP process, 0 % CPU, parent alive | `STANDBY` |
 | 6 | agent that belongs to the watched repository | `ACTIVE` / `IDLE`, never stale or frozen |
-| 7 | no CPU and no file activity for the silence timeout (45 s) | `IDLE`, reason "Quiet …": quiet is not frozen |
+| 7 | no CPU activity for the silence timeout (45 s) | `IDLE`, reason "Quiet …": quiet is not frozen |
 
 `STALE` and `FROZEN` are observations shown to the user, with the reason. They never lead to a termination by themselves.
 

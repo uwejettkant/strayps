@@ -111,28 +111,26 @@ describe('agent-leash CLI', () => {
     expect(run.output()).toContain('Dashboard:   off');
     expect(run.output()).toContain('"exit" stops the watchdog');
 
-    await run.waitFor('file-edit');
+    await run.waitFor('process-alert');
     run.child.stdin.write('exit\n');
 
     expect(await run.exit).toEqual({ code: 0, signal: null });
     expect(run.output()).toContain('Shutting down agent-leash watchdog (command)');
     expect(run.output()).toMatch(/agent-leash stopped after \d+s/);
-    expect(run.output()).toMatch(/\d+ file edits · \d+ protected-file alerts/);
+    expect(run.output()).toMatch(/\d+ process alerts · \d+ processes terminated/);
+    expect(run.output()).not.toMatch(/file edits|protected-file|checkpoint/);
   });
 
-  it('shows file edits, alerts and command results as log lines', async () => {
+  it('shows alerts and command results as log lines', async () => {
     const dir = makeTmpDir();
     const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
     await run.waitFor(READY);
 
-    await run.waitFor(/WARN {2}protected-file {5}WARNING: Protected ENV file change \(\.env\.local\)/);
-    await run.waitFor(/CRIT {2}loop-detected {6}Circuit breaker: src\/auth\/session\.ts changed 6 times within 60 s/);
-    // an alarm only: nothing is rolled back without a confirmed revert
-    expect(run.output()).not.toMatch(/rollback simulated|rolled back/i);
+    await run.waitFor(/CRIT {2}process-alert {6}FROZEN: PID 31902/);
+    // files are not watched: the old command says where to go instead of asking
     run.child.stdin.write('revert session.ts\n');
-    await run.waitFor('Type "yes"');
-    run.child.stdin.write('yes\n');
-    await run.waitFor('Demo: would roll back src/auth/session.ts to the version before its latest changes');
+    await run.waitFor('Files are not watched any more: use git, or the checkpoints of your agent');
+    expect(run.output()).not.toContain('Type "yes"');
 
     run.child.stdin.write('status\n');
     // old and idle, but watched for less than ten minutes: not called stale yet
@@ -158,7 +156,7 @@ describe('agent-leash CLI', () => {
       const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
       await run.waitFor(READY);
       run.child.stdin.end();
-      await run.waitFor('file-edit');
+      await run.waitFor('process-alert');
       expect(run.child.exitCode, 'still running after stdin closed').toBeNull();
 
       run.child.kill(signal);
@@ -166,33 +164,6 @@ describe('agent-leash CLI', () => {
       expect(run.output()).toContain(`Shutting down agent-leash watchdog (${signal})`);
       expect(run.output()).toContain('agent-leash stopped after');
     }
-  });
-
-  it('really guards a real directory: a protected file raises an alarm, revert restores it', async () => {
-    const dir = makeTmpDir();
-    writeFiles(dir, { 'docker-compose.yml': 'version: "3.8"\n', 'src/a.ts': 'a\n' });
-    // --quiet: only alerts; the process list of this machine is read but never acted on
-    const run = runCli(['watch', dir, '--no-dashboard', '--quiet']);
-    await run.waitFor(READY);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
-    writeFiles(dir, { 'docker-compose.yml': 'version: "tampered"\n' });
-    await run.waitFor('Protected file changed: docker-compose.yml (revert restores the version before this change)');
-    // no automatic rollback: the file stays as written until a person confirms a revert
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(read(dir, 'docker-compose.yml')).toBe('version: "tampered"\n');
-
-    run.child.stdin.write('revert docker-compose.yml\n');
-    await run.waitFor('Type "yes"');
-    run.child.stdin.write('yes\n');
-    await run.waitFor('Rolled back docker-compose.yml');
-    expect(read(dir, 'docker-compose.yml')).toBe('version: "3.8"\n');
-
-    run.child.stdin.write('exit\n');
-    expect((await run.exit).code).toBe(0);
-    const kept = run.output().match(/kept in (\S+agent-leash-discarded-\S+)/)?.[1];
-    expect(kept).toBeTruthy();
-    fs.rmSync(kept!, { recursive: true, force: true });
   });
 
   it('refuses an explicitly chosen port that is taken, and moves on from the default one', async () => {
@@ -216,8 +187,9 @@ describe('agent-leash CLI', () => {
 
     const status = await fetch(`http://127.0.0.1:${port}/api/status`);
     expect(status.status).toBe(200);
+    // read-only: pausing and ending run in the terminal
     const pause = await fetch(`http://127.0.0.1:${port}/api/pause`, { method: 'POST' });
-    expect(pause.status).toBe(403);
+    expect(pause.status).toBe(405);
 
     run.child.kill('SIGINT');
     expect((await run.exit).code).toBe(0);
@@ -227,27 +199,29 @@ describe('agent-leash CLI', () => {
     const dir = makeTmpDir();
     const first = runCli(['init', dir]);
     expect((await first.exit).code).toBe(0);
-    expect(JSON.parse(read(dir, '.agentguard.json'))).not.toHaveProperty('mode');
+    const defaults = { agents: [], limits: { mcpSilenceTimeoutSec: 45, staleSessionHours: 6 } };
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual(defaults);
 
-    writeFiles(dir, { '.agentguard.json': '{"protectedFiles":["secrets/**"]}\n' });
+    writeFiles(dir, { '.agentguard.json': '{"agents":["vibe"]}\n' });
     const second = runCli(['init', dir]);
     expect((await second.exit).code).toBe(1);
     expect(second.output()).toContain('already exists');
-    expect(read(dir, '.agentguard.json')).toContain('secrets/**');
+    expect(read(dir, '.agentguard.json')).toContain('vibe');
 
     const forced = runCli(['init', dir, '--force']);
     expect((await forced.exit).code).toBe(0);
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toMatchObject({ protectedFiles: ['.env*', 'docker-compose*.yml'] });
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual(defaults);
   });
 
   it('tells the user about problems in the config file at startup', async () => {
     const dir = makeTmpDir();
-    writeFiles(dir, { '.agentguard.json': '{"mode":"turbo","limits":{"maxEditsPerFilePerMinute":-1}}' });
+    writeFiles(dir, { '.agentguard.json': '{"mode":"turbo","protectedFiles":[".env*"],"limits":{"staleSessionHours":-1}}' });
     const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
     await run.waitFor(READY);
     await run.waitFor('"mode" no longer exists and is ignored');
-    expect(run.output()).toContain('limits.maxEditsPerFilePerMinute must be a number >= 1 (got -1), using 5');
-    expect(run.output()).toContain('loop=5/min');
+    expect(run.output()).toContain('"protectedFiles" no longer exists and is ignored');
+    expect(run.output()).toContain('limits.staleSessionHours must be a number >= 1 (got -1), using 6');
+    expect(run.output()).toContain('stale after 6h');
     run.child.kill('SIGINT');
     await run.exit;
   });
@@ -261,18 +235,19 @@ describe('agent-leash config', () => {
     const bare = runCli(['config', dir]);
     expect(await bare.exit).toEqual({ code: 0, signal: null });
     expect(bare.output()).toContain('No .agentguard.json here; every value is a built-in default.');
-    expect(bare.output()).toMatch(/limits\.maxFilesWarn = 15 {2}\(default\)/);
+    expect(bare.output()).toMatch(/limits\.mcpSilenceTimeoutSec = 45 {2}\(default\)/);
     expect(bare.output()).toMatch(/limits\.staleSessionHours = 6 {2}\(default\)/);
+    expect(bare.output()).not.toMatch(/maxFiles|maxEdits|protectedFiles/);
     expect(fs.existsSync(configFile(dir)), 'showing never creates the file').toBe(false);
 
-    writeFiles(dir, { '.agentguard.json': '{"agents":["vibe"],"limits":{"maxFilesWarn":20,"maxFielsWarn":3}}' });
+    writeFiles(dir, { '.agentguard.json': '{"agents":["vibe"],"limits":{"staleSessionHours":20,"maxFilesWarn":3}}' });
     const withFile = runCli(['config', 'show', dir]);
     expect(await withFile.exit).toEqual({ code: 0, signal: null });
     expect(withFile.output()).toContain('.agentguard.json found');
     expect(withFile.output()).toMatch(/agents = vibe {2}\(file\)/);
-    expect(withFile.output()).toMatch(/limits\.maxFilesWarn = 20 {2}\(file\)/);
-    expect(withFile.output()).toMatch(/limits\.maxFilesHardStop = 40 {2}\(default\)/);
-    expect(withFile.output()).toContain('limits.maxFielsWarn is not a known setting and is ignored');
+    expect(withFile.output()).toMatch(/limits\.staleSessionHours = 20 {2}\(file\)/);
+    expect(withFile.output()).toMatch(/limits\.mcpSilenceTimeoutSec = 45 {2}\(default\)/);
+    expect(withFile.output()).toContain('limits.maxFilesWarn is not a known setting and is ignored');
   });
 
   it('sets and removes one value at a time and keeps the rest of the file', async () => {
@@ -283,26 +258,21 @@ describe('agent-leash config', () => {
       return cli.output();
     };
 
-    const created = await run('set', 'maxFilesWarn', '20');
+    const created = await run('set', 'staleSessionHours', '20');
     expect(created).toContain('Created');
-    expect(created).toContain('limits.maxFilesWarn = 20');
+    expect(created).toContain('limits.staleSessionHours = 20');
     expect(created).toContain('A running agent-leash picks this up within a second.');
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ limits: { maxFilesWarn: 20 } });
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ limits: { staleSessionHours: 20 } });
 
-    await run('set', 'AGENTS', 'vibe');
-    await run('set', 'protectedFiles', '.env*, secrets/**');
-    expect(await run('set', 'limits.maxFilesWarn', '25')).toContain('Updated');
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({
-      agents: ['vibe'],
-      protectedFiles: ['.env*', 'secrets/**'],
-      limits: { maxFilesWarn: 25 },
-    });
+    await run('set', 'AGENTS', 'vibe, opencode');
+    expect(await run('set', 'limits.staleSessionHours', '25')).toContain('Updated');
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ agents: ['vibe', 'opencode'], limits: { staleSessionHours: 25 } });
 
-    expect(await run('unset', 'maxFilesWarn')).toContain('Removed limits.maxFilesWarn');
+    expect(await run('unset', 'staleSessionHours')).toContain('Removed limits.staleSessionHours');
     // an empty "limits" object is removed with its last key
-    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ agents: ['vibe'], protectedFiles: ['.env*', 'secrets/**'] });
-    expect(await run('unset', 'maxFilesWarn')).toContain(
-      'limits.maxFilesWarn is not set in .agentguard.json; the default (15) already applies.',
+    expect(JSON.parse(read(dir, '.agentguard.json'))).toEqual({ agents: ['vibe', 'opencode'] });
+    expect(await run('unset', 'staleSessionHours')).toContain(
+      'limits.staleSessionHours is not set in .agentguard.json; the default (6) already applies.',
     );
   }, 30_000);
 
@@ -311,9 +281,11 @@ describe('agent-leash config', () => {
     const broken = path.join(dir, 'broken');
     writeFiles(dir, { 'broken/.agentguard.json': '{ "agents": ' });
     const cases: Array<[string[], string]> = [
-      [['config', 'set', 'maxFielsWarn', '3', '-C', dir], 'Unknown setting "maxFielsWarn". Known settings: limits.maxFilesWarn'],
-      [['config', 'set', 'maxFilesWarn', '0', '-C', dir], 'limits.maxFilesWarn must be a whole number >= 1 (got "0")'],
+      [['config', 'set', 'staleSesionHours', '3', '-C', dir], 'Unknown setting "staleSesionHours". Known settings: limits.mcpSilenceTimeoutSec'],
+      [['config', 'set', 'staleSessionHours', '0', '-C', dir], 'limits.staleSessionHours must be a whole number >= 1 (got "0")'],
       [['config', 'set', 'mode', 'strict', '-C', dir], 'Unknown setting "mode"'],
+      [['config', 'set', 'protectedFiles', '.env*', '-C', dir], 'Unknown setting "protectedFiles"'],
+      [['config', 'set', 'maxFilesWarn', '20', '-C', dir], 'Unknown setting "maxFilesWarn"'],
       [['config', 'set', 'agents', 'vibe', '-C', broken], 'is not valid JSON'],
       [['config', 'unset', 'agents', '-C', broken], 'Fix it first; nothing was changed.'],
       [['config', 'unset', 'nope', '-C', dir], 'Unknown setting "nope"'],
@@ -339,13 +311,13 @@ describe('agent-leash config', () => {
     const hostile = '\u001b]0;pwned\u0007\u001b[2J';
     const dir = makeTmpDir();
     writeFiles(dir, {
-      '.agentguard.json': JSON.stringify({ [`x${hostile}`]: 1, limits: { maxFilesWarn: `20${hostile}` } }),
+      '.agentguard.json': JSON.stringify({ [`x${hostile}`]: 1, limits: { staleSessionHours: `20${hostile}` } }),
     });
     const broken = makeTmpDir();
     // V8 quotes the start of the text in this parse error, control characters included
     writeFiles(broken, { '.agentguard.json': `{"agents": a${hostile}}` });
 
-    const set = runCli(['config', 'set', 'maxFilesWarn', '25', '-C', dir]);
+    const set = runCli(['config', 'set', 'staleSessionHours', '25', '-C', dir]);
     const refused = runCli(['config', 'set', 'agents', 'vibe', '-C', broken]);
     const watch = runCli(['watch', broken, '--demo', '--no-dashboard']);
     const watchUnknownKey = runCli(['watch', dir, '--demo', '--no-dashboard']);
@@ -364,26 +336,22 @@ describe('agent-leash config', () => {
 
   it('applies edits to .agentguard.json while watching', async () => {
     const dir = makeTmpDir();
-    writeFiles(dir, {
-      '.agentguard.json': '{"limits":{"maxFilesWarn":15}}\n',
-      'src/a.ts': 'a\n',
-    });
-    // a real directory: the process list of this machine is read but never acted on
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":6}}\n' });
+    // the process list of this machine is read but never acted on
     const run = runCli(['watch', dir, '--no-dashboard']);
     await run.waitFor(READY);
-    expect(run.output()).toContain('stale=6h');
-    // the file watcher takes its first look right after start
+    expect(run.output()).toContain('stale after 6h');
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    writeFiles(dir, { '.agentguard.json': '{"limits":{"maxFilesWarn":99}}\n' });
-    await run.waitFor(/WARN {2}config-reload +\.agentguard\.json reloaded: limits\.maxFilesWarn 15 → 99/);
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":9}}\n' });
+    await run.waitFor(/WARN {2}config-reload +\.agentguard\.json reloaded: limits\.staleSessionHours 6 → 9/);
 
     // a broken save is not applied and does not stop the watchdog
-    writeFiles(dir, { '.agentguard.json': '{"limits":{"maxFilesWarn":' });
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":' });
     await run.waitFor('.agentguard.json changed but was not applied, previous settings kept');
 
     // saving the same values again is no change worth reporting
-    writeFiles(dir, { '.agentguard.json': '{"limits":{"maxFilesWarn":99}}\n' });
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"staleSessionHours":9}}\n' });
     await new Promise((resolve) => setTimeout(resolve, 1200));
     expect(run.output().match(/reloaded:/g)).toHaveLength(1);
 
@@ -393,13 +361,13 @@ describe('agent-leash config', () => {
 
   it('never writes the config file in the demo', async () => {
     const dir = makeTmpDir();
-    const original = '{\n  "limits": { "maxFilesWarn": 15 }\n}\n';
+    const original = '{\n  "limits": { "staleSessionHours": 9 }\n}\n';
     writeFiles(dir, { '.agentguard.json': original });
     const withFile = runCli(['watch', dir, '--demo', '--no-dashboard']);
     await withFile.waitFor(READY);
-    await withFile.waitFor('loop-detected');
-    withFile.child.stdin.write('revert session.ts\nyes\n');
-    await withFile.waitFor('Demo: would roll back');
+    await withFile.waitFor('process-alert');
+    withFile.child.stdin.write('kill 31877\nyes\npause\nyes\nresume\n');
+    await withFile.waitFor('Resumed');
     withFile.child.stdin.write('exit\n');
     expect((await withFile.exit).code).toBe(0);
     expect(read(dir, '.agentguard.json')).toBe(original);
@@ -417,9 +385,7 @@ describe('agent-leash as a library', () => {
   it('can be imported without starting anything', () => {
     for (const name of [
       'GuardConfigManager',
-      'LoopDetector',
       'ProcessMonitor',
-      'RepoWatcher',
       'WatchdogSession',
       'createWatchdogApp',
       'startWatchdogServer',
@@ -433,6 +399,8 @@ describe('agent-leash as a library', () => {
     ]) {
       expect(library, name).toHaveProperty(name);
     }
+    expect(library).not.toHaveProperty('RepoWatcher');
+    expect(library).not.toHaveProperty('LoopDetector');
     expect(library.getVersion()).toBe(packageVersion);
     expect(library.createCliProgram().commands.map((c) => c.name()).sort()).toEqual(['config', 'init', 'status', 'watch']);
   });

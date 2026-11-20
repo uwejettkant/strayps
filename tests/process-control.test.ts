@@ -74,7 +74,6 @@ describe('ProcessMonitor classification (production rules)', () => {
     const { monitor } = setup([agent(100, REPO, { cpu: 3 }), mcp(101, 100, { etime: '09:12:00' })]);
 
     const t0 = 1_000_000;
-    monitor.recordFileActivity(t0);
     await monitor.scan(t0);
     const later = await monitor.scan(t0 + 10 * 60_000);
 
@@ -109,7 +108,6 @@ describe('ProcessMonitor classification (production rules)', () => {
     monitor.on('process-frozen', onFrozen);
 
     const t0 = 2_000_000;
-    monitor.recordFileActivity(t0);
     await monitor.scan(t0);
     await monitor.scan(t0 + 46_000);
     const list = await monitor.scan(t0 + 30 * 60_000);
@@ -270,34 +268,6 @@ describe('ProcessMonitor classification (production rules)', () => {
     expect(orphan.reason).toContain('its parent is gone');
   });
 
-  it('raises the frozen alarm once, however many files change in the watched repository', async () => {
-    // Every file edit set all tracked processes to ACTIVE, an orphan elsewhere too; the next scan
-    // found it frozen again and raised the alarm again, every 2 seconds while an agent worked
-    const { monitor } = setup([mcp(70, 1, { pgid: 69, etime: '01:00:00', cwd: OTHER })]);
-    const alerts = vi.fn();
-    monitor.on('process-frozen', alerts);
-    const t0 = Date.now();
-    await monitor.scan(t0);
-    await monitor.scan(t0 + 46_000);
-    for (let i = 1; i <= 5; i++) {
-      monitor.recordFileActivity(t0 + 46_000 + i * 2000);
-      const [orphan] = await monitor.scan(t0 + 46_000 + i * 2000);
-      expect(orphan.status).toBe('FROZEN');
-    }
-    expect(alerts).toHaveBeenCalledTimes(1);
-  });
-
-  it('lets file activity in the watched repository reset only its own processes', async () => {
-    const { monitor } = setup([agent(100, REPO, { cpuTimeSec: 1 }), agent(200, OTHER, { cpuTimeSec: 1 })]);
-    const t0 = Date.now();
-    await monitor.scan(t0);
-    await monitor.scan(t0 + 60_000);
-    monitor.recordFileActivity(t0 + 60_000);
-    const list = await monitor.scan(t0 + 62_000);
-    expect(list.find((p) => p.pid === 100)!.silenceSec).toBe(2);
-    expect(list.find((p) => p.pid === 200)!.silenceSec).toBeGreaterThanOrEqual(62);
-  });
-
   it('does not take an app started from the Dock or Finder for an orphan', async () => {
     // On macOS launchd (PID 1) is the parent of every app it starts, and makes each one the
     // leader of its own process group. A process whose parent died keeps its old group.
@@ -447,7 +417,6 @@ describe('ProcessMonitor agent detection (no list of products to keep up to date
     ]);
 
     const t0 = 3_000_000;
-    monitor.recordFileActivity(t0);
     await monitor.scan(t0);
     const list = await monitor.scan(t0 + 30 * 60_000);
     const agentProc = list.find((p) => p.pid === 80);

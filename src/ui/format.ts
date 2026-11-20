@@ -1,7 +1,7 @@
 import os from 'node:os';
 import type { MonitoredProcess } from '../core/process-monitor.js';
 import type { StatusSnapshot } from '../core/session.js';
-import type { WatchActivityEvent } from '../core/watcher.js';
+import type { ActivityEvent } from '../core/events.js';
 
 /**
  * File names, command lines and working directories come from the processes being watched.
@@ -111,7 +111,7 @@ export function supportsTruecolor(env: NodeJS.ProcessEnv = process.env): boolean
   return env.COLORTERM === 'truecolor' || env.COLORTERM === '24bit';
 }
 
-export function severityStyle(palette: Palette, severity: WatchActivityEvent['severity']): Style {
+export function severityStyle(palette: Palette, severity: ActivityEvent['severity']): Style {
   if (severity === 'critical') return palette.danger;
   if (severity === 'warn') return palette.warn;
   return palette.ok;
@@ -154,7 +154,7 @@ export function processTotals(processes: MonitoredProcess[]): ProcessTotals {
 }
 
 /** One log line for an activity event, used by the plain (non-interactive) output. */
-export function formatEventLine(event: WatchActivityEvent, palette: Palette): string {
+export function formatEventLine(event: ActivityEvent, palette: Palette): string {
   const level =
     event.severity === 'critical' ? 'CRIT' : event.severity === 'warn' ? 'WARN' : 'INFO';
   const style = severityStyle(palette, event.severity);
@@ -195,17 +195,9 @@ export function formatStatusReport(
   palette: Palette,
   width: number = 120,
 ): string[] {
-  const { config } = snapshot;
   const totals = processTotals(snapshot.processes);
-  const limits = `warn ${config.limits.maxFilesWarn} · stop ${config.limits.maxFilesHardStop}`;
-  const breaker =
-    snapshot.trippedFiles.length > 0
-      ? palette.danger(`TRIPPED: ${snapshot.trippedFiles.map(sanitize).join(', ')}`)
-      : palette.ok('armed');
   const lines = [
     `  Repo:        ${sanitize(tildify(snapshot.rootDir))}`,
-    `  Files:       ${snapshot.modifiedFiles.length} modified (${limits})${snapshot.limitState === 'hard-stop' ? palette.danger('  HARD STOP limit reached') : ''}`,
-    `  Breaker:     ${breaker} (max ${config.limits.maxEditsPerFilePerMinute} edits/file/min)`,
     `  Processes:   ${totals.count} monitored (${totals.totalMb.toFixed(1)} MB) · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(1)} MB)`,
     '',
     ...formatProcessTable(snapshot.processes, palette, width),

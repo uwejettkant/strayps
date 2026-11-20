@@ -29,7 +29,7 @@ npm install --silent --no-audit --no-fund "$TARBALL" typescript@5 @types/node@22
 [ "$(node -e 'process.stdout.write(require("agent-leash").getVersion())')" = "$EXPECTED_VERSION" ] \
   && pass "require('agent-leash') works and reports $EXPECTED_VERSION" || fail "CommonJS require"
 
-node --input-type=module -e 'import { RepoWatcher, ProcessMonitor, WatchdogSession, listenWatchdogServer } from "agent-leash"; if (![RepoWatcher, ProcessMonitor, WatchdogSession, listenWatchdogServer].every((x) => typeof x === "function")) process.exit(1)' \
+node --input-type=module -e 'import { ProcessMonitor, WatchdogSession, listenWatchdogServer } from "agent-leash"; if (![ProcessMonitor, WatchdogSession, listenWatchdogServer].every((x) => typeof x === "function")) process.exit(1)' \
   && pass "ESM named imports work" || fail "ESM import"
 
 printf 'require("agent-leash"); console.log("still mine");\n' > my-cli.js
@@ -37,14 +37,13 @@ printf 'require("agent-leash"); console.log("still mine");\n' > my-cli.js
   && pass "importing the library does not start the CLI" || fail "import started the CLI"
 
 cat > consumer.ts <<'TS'
-import { GuardConfigManager, ProcessMonitor, RepoWatcher, type StatusSnapshot, WatchdogSession, listenWatchdogServer } from 'agent-leash';
+import { GuardConfigManager, ProcessMonitor, type StatusSnapshot, WatchdogSession, listenWatchdogServer } from 'agent-leash';
 export async function embed(rootDir: string) {
   const configManager = new GuardConfigManager(rootDir);
-  const watcher = new RepoWatcher({ rootDir, configManager });
   const processMonitor = new ProcessMonitor({ rootDir });
-  const session = new WatchdogSession({ rootDir, configManager, watcher, processMonitor });
-  session.on('update', (snapshot: StatusSnapshot) => snapshot.modifiedFiles.length);
-  return listenWatchdogServer({ rootDir, configManager, watcher, processMonitor, session });
+  const session = new WatchdogSession({ rootDir, configManager, processMonitor });
+  session.on('update', (snapshot: StatusSnapshot) => snapshot.processes.length);
+  return listenWatchdogServer({ rootDir, configManager, processMonitor, session });
 }
 TS
 npx tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --skipLibCheck false consumer.ts \
@@ -60,7 +59,7 @@ mkdir "$WORK/elsewhere" && cd "$WORK/elsewhere"
 RUN=$!
 for _ in $(seq 1 40); do grep -q 'Dashboard:   http' run.log 2>/dev/null && break; sleep 0.1; done
 URL=$(sed -n 's/.*Dashboard:   \(http[^ ]*\).*/\1/p' run.log | sed 's/localhost/127.0.0.1/')
-curl -s "$URL/" | grep -q 'id="confirm-dialog"' \
+curl -s "$URL/" | grep -q 'id="process-list"' \
   && pass "dashboard page is served from the installed package" || fail "dashboard page"
 wait "$RUN" && grep -q 'agent-leash stopped after' run.log \
   && pass "installed binary stops cleanly on 'exit'" || fail "exit via stdin"

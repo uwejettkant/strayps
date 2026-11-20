@@ -2,24 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export interface GuardLimits {
-  /** Changed files not committed yet (outside git: changed since the start) before a warning. */
-  maxFilesWarn: number;
-  /** Changed files not committed yet (outside git: changed since the start) before the hard-stop alarm. */
-  maxFilesHardStop: number;
-  /** Edits to one file within 60 seconds before the circuit breaker raises an alarm. */
-  maxEditsPerFilePerMinute: number;
   /** Seconds without CPU activity before an orphaned process (parent gone) counts as frozen. */
   mcpSilenceTimeoutSec: number;
   /** Hours after which a session in another repository counts as stale. */
   staleSessionHours: number;
 }
 
-/**
- * What agent-leash watches for. There are no modes: it always watches exactly by these settings,
- * so no switch can quietly turn off a protection the user configured.
- */
+/** What the process monitor needs to know beyond its built-in rules. */
 export interface GuardConfig {
-  protectedFiles: string[];
   /** Program names to treat as coding agents, on top of the built-in names and MCP clients. */
   agents: string[];
   limits: GuardLimits;
@@ -27,7 +17,6 @@ export interface GuardConfig {
 
 /** Values that take precedence over `.agentguard.json`, e.g. from the programmatic API. */
 export interface GuardConfigOverrides {
-  protectedFiles?: string[];
   agents?: string[];
   limits?: Partial<GuardLimits>;
 }
@@ -40,33 +29,21 @@ export interface GuardConfigManagerOptions {
 export const CONFIG_FILENAME = '.agentguard.json';
 
 export const DEFAULT_GUARD_CONFIG: GuardConfig = {
-  // No .git/**: .git is never watched (git itself rewrites it constantly), so it never matched
-  protectedFiles: ['.env*', 'docker-compose*.yml'],
   agents: [],
   limits: {
-    maxFilesWarn: 15,
-    maxFilesHardStop: 40,
-    maxEditsPerFilePerMinute: 5,
     mcpSilenceTimeoutSec: 45,
     staleSessionHours: 6,
   },
 };
 
 const LIMIT_KEYS: ReadonlyArray<keyof GuardLimits> = [
-  'maxFilesWarn',
-  'maxFilesHardStop',
-  'maxEditsPerFilePerMinute',
   'mcpSilenceTimeoutSec',
   'staleSessionHours',
 ];
 
-export type ConfigKey = 'protectedFiles' | 'agents' | `limits.${keyof GuardLimits}`;
+export type ConfigKey = 'agents' | `limits.${keyof GuardLimits}`;
 
-export const CONFIG_KEYS: ConfigKey[] = [
-  ...LIMIT_KEYS.map((key) => `limits.${key}` as ConfigKey),
-  'protectedFiles',
-  'agents',
-];
+export const CONFIG_KEYS: ConfigKey[] = [...LIMIT_KEYS.map((key) => `limits.${key}` as ConfigKey), 'agents'];
 
 /** A program name as `ps` shows it: no path, no spaces. */
 function isProgramName(value: unknown): value is string {
@@ -75,12 +52,8 @@ function isProgramName(value: unknown): value is string {
 
 /** What each setting does. Shown by `agent-leash config`; the README table mirrors it. */
 export const CONFIG_KEY_INFO: Record<ConfigKey, string> = {
-  'limits.maxFilesWarn': 'changed files not committed yet before a warning (outside git: changed since agent-leash started)',
-  'limits.maxFilesHardStop': 'changed files not committed yet before the hard-stop alarm (outside git: changed since agent-leash started)',
-  'limits.maxEditsPerFilePerMinute': 'edits to one file within 60 s before the circuit breaker raises an alarm',
   'limits.mcpSilenceTimeoutSec': 'seconds without CPU activity before an orphaned process (its parent is gone) counts as frozen',
   'limits.staleSessionHours': 'hours after which a session in another repository counts as stale, if it is also idle for ten minutes (no new process, under 8 s CPU time)',
-  protectedFiles: 'globs; a change to a match raises an alarm (revert restores it); .env* contents are never read',
   agents:
     'more program names to treat as coding agents (exact name, e.g. vibe); agents that start MCP servers are found without this',
 };
@@ -95,116 +68,6 @@ export interface ConfigReloadResult {
   changes: string[];
   /** Problems in the file. When `applied` is false, they are the reason. */
   warnings: string[];
-}
-
-type GlobToken =
-  | { kind: 'char'; char: string }
-  | { kind: 'any-char' } // ?
-  | { kind: 'star' } // *: anything but a slash
-  | { kind: 'globstar' } // ** not followed by a slash: anything
-  | { kind: 'dirs' }; // **/: nothing, or anything that ends with a slash
-
-function tokenize(pattern: string): GlobToken[] {
-  const tokens: GlobToken[] = [];
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (ch === '*' && pattern[i + 1] === '*') {
-      if (pattern[i + 2] === '/') {
-        // "**/**/" means the same as "**/": collapsing them keeps the work linear
-        if (tokens.at(-1)?.kind !== 'dirs') tokens.push({ kind: 'dirs' });
-        i += 2;
-      } else {
-        tokens.push({ kind: 'globstar' });
-        i += 1;
-      }
-    } else if (ch === '*') {
-      tokens.push({ kind: 'star' });
-    } else if (ch === '?') {
-      tokens.push({ kind: 'any-char' });
-    } else {
-      tokens.push({ kind: 'char', char: ch });
-    }
-  }
-  return tokens;
-}
-
-/**
- * Glob matching by dynamic programming, in time proportional to pattern length times path length.
- * Patterns come from .agentguard.json, which the agent being watched can write: a regular
- * expression built from nested wildcards backtracked for minutes on every file event.
- */
-function globMatches(tokens: GlobToken[], text: string): boolean {
-  const n = text.length;
-  // next[j]: tokens after the current one match text[j..]
-  let next = new Uint8Array(n + 1);
-  next[n] = 1;
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    const token = tokens[i];
-    const cur = new Uint8Array(n + 1);
-    // For "dirs": some k >= j+2 with text[k-1] === '/' and next[k]
-    let slashEndFrom = 0;
-    for (let j = n; j >= 0; j--) {
-      if (token.kind === 'dirs' && j + 2 <= n && text[j + 1] === '/' && next[j + 2]) slashEndFrom = 1;
-      let ok = 0;
-      switch (token.kind) {
-        case 'char':
-          ok = j < n && text[j] === token.char && next[j + 1] ? 1 : 0;
-          break;
-        case 'any-char':
-          ok = j < n && text[j] !== '/' && next[j + 1] ? 1 : 0;
-          break;
-        case 'star':
-          ok = next[j] || (j < n && text[j] !== '/' && cur[j + 1]) ? 1 : 0;
-          break;
-        case 'globstar':
-          ok = next[j] || (j < n && cur[j + 1]) ? 1 : 0;
-          break;
-        case 'dirs':
-          ok = next[j] || slashEndFrom ? 1 : 0;
-          break;
-      }
-      cur[j] = ok;
-    }
-    next = cur;
-  }
-  return next[0] === 1;
-}
-
-/** Patterns are matched on every file event; tokenizing each once is enough. */
-const tokenCache = new Map<string, GlobToken[]>();
-
-/** Longest pattern accepted from .agentguard.json; each file event costs pattern length x path length. */
-export const MAX_GLOB_LENGTH = 512;
-/** Most patterns accepted from .agentguard.json. */
-export const MAX_PROTECTED_FILES = 256;
-
-/**
- * Checks whether a relative or absolute file path matches a glob pattern (`*`, `?`, `**`, and
- * `**` followed by a slash for any number of directories).
- * Patterns without slashes (like ".env*" or "docker-compose*.yml") are matched
- * against both the full relative path and the file basename.
- */
-export function matchesGlobPattern(filePath: string, pattern: string, rootDir?: string): boolean {
-  // A relative path is relative to the repository, not to the directory agent-leash was started in
-  const relPath = (
-    rootDir
-      ? path.relative(rootDir, path.isAbsolute(filePath) ? filePath : path.join(rootDir, filePath))
-      : filePath
-  )
-    .replace(/\\/g, '/')
-    .replace(/^\.\//, '');
-
-  const normalizedPattern = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
-  let tokens = tokenCache.get(normalizedPattern);
-  if (!tokens) {
-    tokens = tokenize(normalizedPattern);
-    if (tokenCache.size >= 1024) tokenCache.clear();
-    tokenCache.set(normalizedPattern, tokens);
-  }
-  if (globMatches(tokens, relPath)) return true;
-
-  // If the pattern does not specify a directory path, also test against the basename
-  return !normalizedPattern.includes('/') && globMatches(tokens, path.posix.basename(relPath));
 }
 
 /** Upper bound for .agentguard.json; a real one is a few hundred bytes. */
@@ -297,10 +160,9 @@ interface ValueError {
 interface FileRead {
   state: 'missing' | 'ok' | 'invalid';
   invalidReason?: string;
-  protectedFiles?: string[];
   agents?: string[];
   limits: Partial<GuardLimits>;
-  /** Invalid values; they are left out of `protectedFiles` / `agents` / `limits`. */
+  /** Invalid values; they are left out of `agents` / `limits`. */
   errors: ValueError[];
   /** Things that are valid but probably not what was meant (unknown keys). */
   notices: string[];
@@ -347,7 +209,12 @@ function readConfigFile(filePath: string): FileRead {
       result.notices.push('"mode" no longer exists and is ignored: agent-leash always watches by the settings in this file');
       continue;
     }
-    if (key !== 'protectedFiles' && key !== 'agents' && key !== 'limits') {
+    if (key === 'protectedFiles') {
+      // The file guard was removed: an old file still loads, the key just has no effect
+      result.notices.push('"protectedFiles" no longer exists and is ignored: only processes are monitored');
+      continue;
+    }
+    if (key !== 'agents' && key !== 'limits') {
       result.notices.push(`"${key}" is not a known setting and is ignored`);
     }
   }
@@ -366,32 +233,6 @@ function readConfigFile(filePath: string): FileRead {
       result.errors.push({
         message: 'agents must be an array of program names',
         startupSuffix: ', using none',
-      });
-    }
-  }
-
-  if (record.protectedFiles !== undefined) {
-    if (Array.isArray(record.protectedFiles)) {
-      const globs = record.protectedFiles.filter(
-        (p): p is string => typeof p === 'string' && p.trim().length > 0 && p.length <= MAX_GLOB_LENGTH,
-      );
-      if (globs.length !== record.protectedFiles.length) {
-        result.errors.push({
-          message: `protectedFiles contains entries that are not glob strings of at most ${MAX_GLOB_LENGTH} characters`,
-          startupSuffix: ', they were ignored',
-        });
-      }
-      if (globs.length > MAX_PROTECTED_FILES) {
-        result.errors.push({
-          message: `protectedFiles has more than ${MAX_PROTECTED_FILES} entries`,
-          startupSuffix: `, only the first ${MAX_PROTECTED_FILES} are used`,
-        });
-      }
-      result.protectedFiles = globs.slice(0, MAX_PROTECTED_FILES);
-    } else {
-      result.errors.push({
-        message: 'protectedFiles must be an array of glob strings',
-        startupSuffix: ', using the defaults',
       });
     }
   }
@@ -429,12 +270,6 @@ function describeChanges(before: GuardConfig, after: GuardConfig): string[] {
       changes.push(`limits.${key} ${before.limits[key]} → ${after.limits[key]}`);
     }
   }
-  // Named as a difference, losses first: a long list cut off by the terminal width would hide
-  // exactly the part someone has to notice, a file that is no longer protected
-  const removed = before.protectedFiles.filter((glob) => !after.protectedFiles.includes(glob));
-  const added = after.protectedFiles.filter((glob) => !before.protectedFiles.includes(glob));
-  if (removed.length > 0) changes.push(`no longer protected: ${removed.join(', ')}`);
-  if (added.length > 0) changes.push(`now protected: ${added.join(', ')}`);
   const agentsRemoved = before.agents.filter((name) => !after.agents.includes(name));
   const agentsAdded = after.agents.filter((name) => !before.agents.includes(name));
   if (agentsRemoved.length > 0) changes.push(`no longer treated as agents: ${agentsRemoved.join(', ')}`);
@@ -473,7 +308,6 @@ export class GuardConfigManager {
 
   public getConfig(): GuardConfig {
     return {
-      protectedFiles: [...this.config.protectedFiles],
       agents: [...this.config.agents],
       limits: { ...this.config.limits },
     };
@@ -546,7 +380,6 @@ export class GuardConfigManager {
     }
     if (customConfig) {
       this.config = {
-        protectedFiles: [...customConfig.protectedFiles],
         agents: [...(customConfig.agents ?? [])],
         limits: { ...customConfig.limits },
       };
@@ -554,22 +387,6 @@ export class GuardConfigManager {
     writeConfigText(this.configFilePath, JSON.stringify(this.config, null, 2) + '\n');
     for (const key of CONFIG_KEYS) this.sources[key] = 'file';
     return this.configFilePath;
-  }
-
-  public isProtectedFile(filePath: string): boolean {
-    return this.config.protectedFiles.some((pattern) => matchesGlobPattern(filePath, pattern, this.rootDir));
-  }
-
-  public evaluateFileLimit(modifiedFileCount: number): 'ok' | 'warn' | 'hard-stop' {
-    if (modifiedFileCount >= this.config.limits.maxFilesHardStop) {
-      return 'hard-stop';
-    }
-
-    if (modifiedFileCount >= this.config.limits.maxFilesWarn) {
-      return 'warn';
-    }
-
-    return 'ok';
   }
 
   private merge(file: FileRead): { config: GuardConfig; notices: string[] } {
@@ -593,23 +410,6 @@ export class GuardConfigManager {
         sources[`limits.${key}`] = 'default';
       }
     }
-    if (limits.maxFilesWarn > limits.maxFilesHardStop) {
-      notices.push(
-        `limits.maxFilesWarn (${limits.maxFilesWarn}) is above limits.maxFilesHardStop (${limits.maxFilesHardStop}), the warning will never show`,
-      );
-    }
-
-    let protectedFiles: string[];
-    if (this.overrides.protectedFiles) {
-      protectedFiles = [...this.overrides.protectedFiles];
-      sources.protectedFiles = 'override';
-    } else if (file.protectedFiles) {
-      protectedFiles = [...file.protectedFiles];
-      sources.protectedFiles = 'file';
-    } else {
-      protectedFiles = [...DEFAULT_GUARD_CONFIG.protectedFiles];
-      sources.protectedFiles = 'default';
-    }
 
     let agents: string[];
     if (this.overrides.agents) {
@@ -624,13 +424,13 @@ export class GuardConfigManager {
     }
 
     this.sources = sources;
-    return { config: { protectedFiles, agents, limits }, notices };
+    return { config: { agents, limits }, notices };
   }
 }
 
 // --- Changing single values (agent-leash config set / unset) ----------------------------------
 
-/** Accepts `limits.maxFilesWarn`, `maxFilesWarn` or any capitalization of either. */
+/** Accepts `limits.staleSessionHours`, `staleSessionHours` or any capitalization of either. */
 export function resolveConfigKey(input: string): ConfigKey | null {
   const wanted = input.trim().toLowerCase();
   for (const key of CONFIG_KEYS) {
@@ -647,15 +447,6 @@ export type ParsedConfigValue =
 /** Validates a value typed on the command line for one setting. */
 export function parseConfigValue(key: ConfigKey, raw: string): ParsedConfigValue {
   const text = raw.trim();
-  if (key === 'protectedFiles') {
-    const globs = text
-      .split(',')
-      .map((glob) => glob.trim())
-      .filter(Boolean);
-    return globs.length > 0
-      ? { ok: true, value: globs }
-      : { ok: false, error: 'expected one or more globs, separated by commas' };
-  }
   if (key === 'agents') {
     const names = text
       .split(',')

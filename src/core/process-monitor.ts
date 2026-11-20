@@ -567,7 +567,6 @@ export class ProcessMonitor extends EventEmitter {
   private readonly continueOnExit = (): void => {
     this.resumePaused();
   };
-  private lastFileActivityAt: number = Date.now();
   private scanInFlight: Promise<MonitoredProcess[]> | null = null;
   /** PIDs that received SIGTERM and are inside their grace period. */
   private terminating: Map<number, { timer: NodeJS.Timeout; process: MonitoredProcess; sentAt: number }> = new Map();
@@ -576,7 +575,7 @@ export class ProcessMonitor extends EventEmitter {
     super();
     const resolvedRoot = path.resolve(options.rootDir ?? process.cwd());
     try {
-      // Match the watcher, which also works on the real path (e.g. /tmp -> /private/tmp on macOS)
+      // The real path, as lsof reports working directories (e.g. /tmp -> /private/tmp on macOS)
       this.rootDir = fs.realpathSync(resolvedRoot);
     } catch {
       this.rootDir = resolvedRoot;
@@ -659,22 +658,6 @@ export class ProcessMonitor extends EventEmitter {
 
   public isAgentActive(): boolean {
     return this.agentActive;
-  }
-
-  /**
-   * Called by the file watcher whenever a file event occurs in the repo,
-   * refreshing the heartbeat for active processes.
-   */
-  public recordFileActivity(now: number = Date.now()): void {
-    this.lastFileActivityAt = now;
-    // A file change in the watched repository says something about its own processes only. It set
-    // every tracked process to ACTIVE, an orphan elsewhere too, which the next scan found frozen
-    // again: the same alarm every 2 seconds while an agent worked.
-    for (const proc of this.tracked.values()) {
-      if (!proc.inWatchedRepo) continue;
-      proc.lastActiveAt = now;
-      proc.silenceSec = 0;
-    }
   }
 
   /**
@@ -878,13 +861,7 @@ export class ProcessMonitor extends EventEmitter {
       const quietLongEnough =
         usedInWindowSec !== undefined && usedInWindowSec < STALE_CPU_BUDGET_SEC && !startedProcessRecently;
       const idleNote = `idle: no new process and ${formatCpu(usedInWindowSec ?? 0)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
-      // File activity in the watched repository counts for its own processes only
-      const fileActivityAt = belongsToRepo(raw.pid) ? this.lastFileActivityAt : 0;
-      const lastActiveAt = existing
-        ? hasCpuActivity
-          ? now
-          : Math.max(existing.lastActiveAt, fileActivityAt)
-        : Math.max(now, fileActivityAt);
+      const lastActiveAt = existing && !hasCpuActivity ? existing.lastActiveAt : now;
 
       const silenceSec = Math.max(0, Math.floor((now - lastActiveAt) / 1000));
       const { elapsedSec, formattedUptime } = raw.etime
@@ -995,7 +972,7 @@ export class ProcessMonitor extends EventEmitter {
         // Quiet is not frozen: a resting watch server, a browser or a session in another repo
         // waiting for its user were all called FROZEN after 45 s. Only a process
         // whose parent is gone (rule above) is called frozen.
-        reason = `Quiet: no CPU or file activity for ${silenceSec}s`;
+        reason = `Quiet: no CPU activity for ${silenceSec}s`;
       } else if (category === 'mcp' && !hasCpuActivity) {
         reason = 'Idle MCP process waiting for requests';
       }

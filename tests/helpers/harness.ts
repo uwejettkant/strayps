@@ -5,11 +5,10 @@ import path from 'node:path';
 import { GuardConfigManager, type GuardConfigOverrides } from '../../src/core/guard-config.js';
 import { ProcessMonitor, type RawProcessInfo } from '../../src/core/process-monitor.js';
 import { WatchdogSession } from '../../src/core/session.js';
-import { RepoWatcher, type RepoWatcherOptions } from '../../src/core/watcher.js';
 
 const created: string[] = [];
 
-/** A fresh temp directory (real path, so it compares equal to what the watcher resolves). */
+/** A fresh temp directory (real path, so it compares equal to what the monitor resolves). */
 export function makeTmpDir(prefix = 'agent-leash-test-'): string {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   created.push(dir);
@@ -57,7 +56,6 @@ export function commitAll(dir: string, message = 'init'): void {
 export interface Harness {
   dir: string;
   configManager: GuardConfigManager;
-  watcher: RepoWatcher;
   monitor: ProcessMonitor;
   session: WatchdogSession;
   /** Every signal the fake killer received, in order. */
@@ -73,20 +71,18 @@ export interface HarnessOptions {
   files?: Record<string, string | Buffer>;
   config?: GuardConfigOverrides;
   procs?: RawProcessInfo[];
-  watcher?: Partial<RepoWatcherOptions>;
   killGraceMs?: number;
 }
 
 /**
- * Watcher, monitor and session wired together like the CLI does it, but with a fake process
- * table and a fake killer. Nothing here can reach a real process.
+ * Monitor and session wired together like the CLI does it, but with a fake process table and a
+ * fake killer. Nothing here can reach a real process.
  */
 export function createHarness(options: HarnessOptions = {}): Harness {
   const dir = options.dir ?? makeTmpDir();
   if (options.files) writeFiles(dir, options.files);
 
   const configManager = new GuardConfigManager(dir, options.config);
-  const watcher = new RepoWatcher({ rootDir: dir, configManager, ...options.watcher });
   const kills: Harness['kills'] = [];
   const procs: RawProcessInfo[] = [...(options.procs ?? [])];
   const stubborn = new Set<number>();
@@ -112,8 +108,8 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     processAlive: (pid) => procs.some((p) => p.pid === pid),
   });
 
-  const session = new WatchdogSession({ rootDir: dir, configManager, watcher, processMonitor: monitor });
-  return { dir, configManager, watcher, monitor, session, kills, procs, stubborn };
+  const session = new WatchdogSession({ rootDir: dir, configManager, processMonitor: monitor });
+  return { dir, configManager, monitor, session, kills, procs, stubborn };
 }
 
 /** Removes ANSI escape sequences so assertions can look at what a user would read. */

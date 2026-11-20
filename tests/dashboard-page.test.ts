@@ -37,7 +37,7 @@ function loadDashboard() {
     className: '',
     open: false,
     returnValue: '',
-    content: id === 'meta-token' ? 'token-from-meta' : '',
+    content: '',
     listeners: {},
     attributes: {},
     addEventListener(name: string, fn: (event: unknown) => unknown) {
@@ -81,8 +81,7 @@ function loadDashboard() {
     },
     document: {
       getElementById,
-      querySelector: (selector: string) =>
-        selector === 'meta[name="leash-token"]' ? getElementById('meta-token') : null,
+      querySelector: () => null,
       querySelectorAll: () => [],
       addEventListener(name: string, fn: (event: unknown) => unknown) {
         (documentListeners[name] ??= []).push(fn);
@@ -94,42 +93,16 @@ function loadDashboard() {
   const api = context as unknown as {
     renderStatus: (state: unknown) => void;
     esc: (value: unknown) => string;
-    killProcess: (pid: number) => Promise<void>;
   };
   return { api, elements, getElementById, requests, documentListeners };
 }
 
 const HOSTILE = `<img src=x onerror="fetch('/api/panic',{method:'POST'})">`;
 
-/** The dashboard plus a click on a rendered button and an answer to the confirmation dialog. */
-function loadDashboardWithClicks() {
-  const loaded = loadDashboard();
-  const ElementClass = (loaded.api as unknown as { Element: new () => object }).Element;
-  const click = (attributes: Record<string, string>) => {
-    const button = { getAttribute: (name: string) => attributes[name] ?? null };
-    const target = Object.assign(new ElementClass(), { closest: () => button });
-    for (const listener of loaded.documentListeners.click ?? []) listener({ target });
-  };
-  const dialog = loaded.getElementById('confirm-dialog');
-  const answer = async (choice: string) => {
-    dialog.returnValue = choice;
-    dialog.open = false;
-    for (const listener of dialog.listeners.close ?? []) await listener({});
-  };
-  return { ...loaded, click, answer };
-}
-
 function stateWith(overrides: Record<string, unknown> = {}) {
   return {
     rootDir: '/work/repo',
-    config: {
-      protectedFiles: ['.env*'],
-      limits: { maxFilesWarn: 15, maxFilesHardStop: 40, maxEditsPerFilePerMinute: 5, mcpSilenceTimeoutSec: 45 },
-    },
-    checkpoint: { ref: 'abc1234', type: 'git-head', snapshottedFiles: 3, createdAt: 0 },
-    modifiedFiles: [],
-    trippedFiles: [],
-    limitState: 'ok',
+    config: { agents: [], limits: { mcpSilenceTimeoutSec: 45, staleSessionHours: 6 } },
     events: [],
     processes: [],
     timestamp: 0,
@@ -144,8 +117,27 @@ describe('dashboard page', () => {
     expect(scripts).toEqual(['<script nonce="__LEASH_NONCE__">']);
     expect(html.match(/<style\b[^>]*>/g)).toEqual(['<style nonce="__LEASH_NONCE__">']);
     expect(html).not.toMatch(/\sstyle\s*=/i);
-    expect(html).toContain('<meta name="leash-token" content="__LEASH_TOKEN__" />');
     expect(html).not.toContain('v0.1.0');
+  });
+
+  it('is a view only: no token, no buttons, no dialogs, and its script only reads', async () => {
+    // the page held the token for the kill route, and any local process could load the page
+    expect(html).not.toContain('leash-token');
+    expect(html).not.toContain('__LEASH_TOKEN__');
+    expect(html).not.toMatch(/<(button|dialog|form|input|textarea)\b/i);
+    expect(html).not.toContain('data-action');
+    expect(html).toContain('use the terminal');
+
+    const { api, requests, documentListeners } = loadDashboard();
+    api.renderStatus(
+      stateWith({
+        processes: [{ pid: 4711, status: 'FROZEN', category: 'agent', cmd: 'claude', memoryMb: 1, cpu: 0, inWatchedRepo: false }],
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(documentListeners.click ?? []).toEqual([]);
+    expect(requests.map((r) => r.url)).toEqual(['/api/status']);
+    expect(requests.every((r) => (r.init?.method ?? 'GET') === 'GET')).toBe(true);
   });
 
   it('escapes every character that could start markup', () => {
@@ -157,14 +149,12 @@ describe('dashboard page', () => {
     expect(api.esc(0)).toBe('0');
   });
 
-  it('renders hostile file names as text, in the event list and on the revert button', () => {
+  it('renders hostile event messages, types and severities as text', () => {
     const { api, getElementById } = loadDashboard();
-    const filePath = `src/${HOSTILE}.ts`;
     api.renderStatus(
       stateWith({
-        modifiedFiles: [filePath],
         events: [
-          { id: '1', type: 'file-edit', severity: 'info', timestamp: 0, filePath, message: `ADD: ${filePath} (1/5 edits/min)` },
+          { id: '1', type: 'process-alert', severity: 'warn', timestamp: 0, message: `PID 7 ${HOSTILE}` },
           { id: '2', type: `x"><script>alert(1)</script>`, severity: `"><b>`, timestamp: 0, message: `'"><svg onload=alert(1)>` },
         ],
       }),
@@ -176,8 +166,6 @@ describe('dashboard page', () => {
     expect(markup).not.toContain('<svg');
     expect(markup).not.toContain('<b>');
     expect(markup).toContain('&lt;img src=x onerror=&quot;fetch(&#39;/api/panic&#39;');
-    // the path travels in an attribute, intact after unescaping, never inside generated JavaScript
-    expect(markup).toContain(`data-action="revert" data-path="src/&lt;img src=x onerror=&quot;`);
     expect(markup).not.toContain('onclick');
     // every attribute value is still enclosed by its quotes
     for (const value of markup.match(/="[^"]*"/g) ?? []) {
@@ -212,10 +200,9 @@ describe('dashboard page', () => {
     for (const tag of ['<img', '<i>', '<u>', '<s>', '<script']) {
       expect(markup, tag).not.toContain(tag);
     }
-    expect(markup).toContain('data-action="kill"');
-    expect(markup).toContain('data-pid="4711"');
+    expect(markup).toContain('PID 4711');
     // a PID that is not a number can never become one in the markup
-    expect(markup).toContain('data-pid="0"');
+    expect(markup).toContain('PID 0');
     expect(markup).not.toContain('alert(1); (');
     for (const value of markup.match(/="[^"]*"/g) ?? []) {
       expect(value).not.toMatch(/[<>]/);
@@ -231,173 +218,44 @@ describe('dashboard page', () => {
           { ...proc, pid: 1, inWatchedRepo: true, pauseTarget: true },
           { ...proc, pid: 2, inWatchedRepo: false, status: 'STALE' },
           { ...proc, pid: 3, inWatchedRepo: false, host: 'detached', status: 'FROZEN', category: 'mcp' },
+          { ...proc, pid: 4, inWatchedRepo: true, pauseTarget: true, paused: true },
         ],
       }),
     );
     const markup = getElementById('process-list').innerHTML;
-    expect(markup.match(/THIS REPO/g)).toHaveLength(1);
+    expect(markup.match(/THIS REPO/g)).toHaveLength(2);
     expect(markup.match(/ELSEWHERE/g)).toHaveLength(1);
     expect(markup.match(/DETACHED/g)).toHaveLength(1);
     expect(markup.match(/AGENT TREE/g)).toHaveLength(1);
+    expect(markup.match(/PAUSED/g)).toHaveLength(1);
     expect(markup).not.toMatch(/safe to kill|kill stale/i);
     expect(getElementById('metric-silence-limit').textContent).not.toMatch(/safe to kill|reclaimable/i);
   });
 
-  it('asks before a revert and before a kill, whatever the file or process looks like', async () => {
-    const { api, getElementById, requests, documentListeners } = loadDashboard();
-    api.renderStatus(
-      stateWith({
-        modifiedFiles: ['src/a.ts'],
-        processes: [{ pid: 4711, status: 'FROZEN', category: 'agent', cmd: 'node x-agent', reason: 'No CPU or file activity for 50s', memoryMb: 1, cpu: 0, inWatchedRepo: false }],
-      }),
-    );
-    const ElementClass = (api as unknown as { Element: new () => object }).Element;
-    const click = (attributes: Record<string, string>) => {
-      const button = { getAttribute: (name: string) => attributes[name] ?? null };
-      const target = Object.assign(new ElementClass(), { closest: () => button });
-      for (const listener of documentListeners.click ?? []) listener({ target });
-    };
-    const dialog = getElementById('confirm-dialog');
-    const answer = async (choice: string) => {
-      dialog.returnValue = choice;
-      dialog.open = false;
-      for (const listener of dialog.listeners.close ?? []) await listener({});
-    };
-
-    click({ 'data-action': 'revert', 'data-path': 'src/a.ts' });
-    expect(dialog.open).toBe(true);
-    expect(getElementById('confirm-dialog-heading').textContent).toBe('Roll back src/a.ts?');
-    await answer('cancel');
-    click({ 'data-action': 'kill', 'data-pid': '4711' });
-    expect(dialog.open).toBe(true);
-    expect(getElementById('confirm-dialog-heading').textContent).toBe('Terminate PID 4711?');
-    // whole sentences: every part ends with its own period (found in the Antigravity test)
-    expect(getElementById('confirm-dialog-body').textContent).toBe(
-      'node x-agent. No CPU or file activity for 50s. Its agent session ends. It gets SIGTERM first and SIGKILL only if it does not exit.',
-    );
-    await answer('cancel');
-    expect(requests.filter((r) => r.init?.method === 'POST')).toEqual([]);
-
-    click({ 'data-action': 'revert', 'data-path': 'src/a.ts' });
-    await answer('confirm');
-    expect(requests.filter((r) => r.init?.method === 'POST').map((r) => r.url)).toEqual(['/api/rollback-file']);
-  });
-
-  it('names the processes pause holds before it is confirmed, and resumes without a dialog', async () => {
-    const { api, getElementById, requests } = loadDashboard();
-    const procs = [
-      { pid: 100, status: 'ACTIVE', category: 'agent', cmd: 'claude-code (opus)', memoryMb: 1, cpu: 1, inWatchedRepo: true, pauseTarget: true },
-      { pid: 300, status: 'ACTIVE', category: 'node', cmd: 'node tsx watch server.ts', memoryMb: 1, cpu: 1, inWatchedRepo: true, pauseTarget: false },
-    ];
-    api.renderStatus(stateWith({ processes: procs }));
-    const button = getElementById('pause-btn');
-    expect(button.textContent).toBe('Pause agents');
-    button.listeners.click?.[0]?.({});
-    expect(getElementById('confirm-dialog-heading').textContent).toBe('Pause 1 process?');
-    const body = getElementById('confirm-dialog-body').textContent;
-    expect(body).toContain('PID 100 (claude-code (opus))');
-    expect(body).not.toContain('PID 300');
-    expect(body).toContain('Nothing is terminated and no file is touched');
-    expect(requests.filter((r) => r.init?.method === 'POST')).toEqual([]);
-
-    // while something is held, the same button continues it, without asking
-    api.renderStatus(stateWith({ processes: [{ ...procs[0], paused: true }, procs[1]] }));
-    expect(button.textContent).toBe('Resume agents');
-    expect(getElementById('process-list').innerHTML).toContain('PAUSED');
-    await button.listeners.click?.[0]?.({});
-    expect(requests.filter((r) => r.init?.method === 'POST').map((r) => r.url)).toEqual(['/api/resume']);
-  });
-
-  it('offers revert on changes and alarms, not on a line that reports a rollback', () => {
+  it('counts agent sessions, MCP servers and what is left behind, with their memory', () => {
     const { api, getElementById } = loadDashboard();
     api.renderStatus(
       stateWith({
-        events: [
-          { id: '1', type: 'file-edit', severity: 'info', timestamp: 0, filePath: 'a.ts', message: 'CHANGE: a.ts' },
-          { id: '2', type: 'rollback', severity: 'warn', timestamp: 0, filePath: 'b.ts', message: 'Rolled back b.ts' },
-          { id: '3', type: 'protected-file', severity: 'warn', timestamp: 0, filePath: 'config/.ENV.local', message: 'Protected ENV file changed' },
-        ],
-      }),
-    );
-    const markup = getElementById('activity-list').innerHTML;
-    expect(markup).toContain('data-path="a.ts"');
-    expect(markup).not.toContain('data-path="b.ts"');
-    // a .env file can never be restored, so it gets no button that can only fail
-    expect(markup).not.toContain('data-path="config/.ENV.local"');
-  });
-
-  it('offers to end an agent session with the processes it started and names each one first', async () => {
-    const { api, getElementById, requests, click, answer } = loadDashboardWithClicks();
-    api.renderStatus(
-      stateWith({
+        config: { agents: ['vibe'], limits: { mcpSilenceTimeoutSec: 45, staleSessionHours: 9 } },
         processes: [
-          { pid: 4711, status: 'IDLE', category: 'agent', cmd: 'claude', cwd: '/work/other', memoryMb: 300, cpu: 0, firstSeenAt: 11 },
-          { pid: 4714, status: 'IDLE', category: 'agent', cmd: 'codex exec', cwd: '/work/other/api', memoryMb: 50, cpu: 0, firstSeenAt: 14, agentPid: 4711 },
-          { pid: 4712, status: 'STANDBY', category: 'mcp', cmd: 'node mcp-server-git', memoryMb: 40, cpu: 0, firstSeenAt: 12, agentPid: 4711 },
-          { pid: 4713, status: 'STANDBY', category: 'mcp', cmd: 'node <img src=x>', memoryMb: 10, cpu: 0, firstSeenAt: 13, agentPid: 4714 },
-          { pid: 4800, status: 'IDLE', category: 'agent', cmd: 'claude', memoryMb: 200, cpu: 0, firstSeenAt: 80 },
+          { pid: 1, status: 'ACTIVE', category: 'agent', cmd: 'claude', memoryMb: 300, cpu: 1, inWatchedRepo: true },
+          { pid: 2, status: 'STALE', category: 'agent', cmd: 'claude', memoryMb: 120, cpu: 0, inWatchedRepo: false },
+          { pid: 3, status: 'STANDBY', category: 'mcp', cmd: 'node mcp-server-git', memoryMb: 25, cpu: 0, inWatchedRepo: false },
+          { pid: 4, status: 'FROZEN', category: 'mcp', cmd: 'node mcp-server-fetch', memoryMb: 30, cpu: 0, inWatchedRepo: false },
         ],
-        // the server decides what belongs to a session; the page only shows it
-        sessionMembers: { 4711: [4714, 4712, 4713], 4714: [4713] },
       }),
     );
-    const list = getElementById('process-list').innerHTML;
-    expect(list.match(/End session/g)).toHaveLength(2);
-    expect(list).not.toContain('<img src=x>');
+    expect(getElementById('metric-agents').textContent).toBe('2');
+    expect(getElementById('metric-agents-mb').textContent).toBe('420 MB');
+    expect(getElementById('metric-mcp').textContent).toBe('2');
+    expect(getElementById('metric-mcp-mb').textContent).toBe('55 MB');
+    expect(getElementById('metric-procs').textContent).toBe('2');
+    expect(getElementById('metric-frozen').textContent).toBe('stale/frozen · 150 MB');
+    expect(getElementById('metric-silence-limit').textContent).toContain('older than 9h');
+    expect(getElementById('agent-names').textContent).toBe('vibe');
 
-    // an agent the server lists no session for ends alone
-    click({ 'data-action': 'kill', 'data-pid': '4800' });
-    expect(getElementById('confirm-dialog-heading').textContent).toBe('Terminate PID 4800?');
-
-    click({ 'data-action': 'kill', 'data-pid': '4711' });
-    expect(getElementById('confirm-dialog-heading').textContent).toBe('End the session of PID 4711?');
-    expect(getElementById('confirm-dialog-body').textContent).toBe(
-      'claude in /work/other. It started 3 processes that end with it: PID 4714 (codex exec in /work/other/api), PID 4712 (node mcp-server-git), PID 4713 (node <img src=x>). 400 MB together. Each gets SIGTERM first and SIGKILL only if it does not exit.',
-    );
-    expect(getElementById('confirm-dialog-confirm').textContent).toBe('End session');
-    await answer('confirm');
-    const posts = requests.filter((r) => r.init?.method === 'POST');
-    expect(posts.map((r) => [r.url, r.init?.body])).toEqual([
-      [
-        '/api/kill/4711',
-        JSON.stringify({
-          firstSeenAt: 11,
-          also: [
-            { pid: 4714, firstSeenAt: 14 },
-            { pid: 4712, firstSeenAt: 12 },
-            { pid: 4713, firstSeenAt: 13 },
-          ],
-        }),
-      ],
-    ]);
-
-  });
-
-  it('sends the token with every state-changing request', async () => {
-    const { api, requests } = loadDashboard();
-    await api.killProcess(4711);
-
-    const posts = requests.filter((r) => r.init?.method === 'POST');
-    expect(posts.map((r) => r.url)).toEqual(['/api/kill/4711']);
-    for (const post of posts) {
-      expect(post.init?.headers?.['X-Leash-Token']).toBe('token-from-meta');
-    }
-  });
-
-  it('shows the count the limits use: uncommitted files, in a git repository', () => {
-    const { api, getElementById } = loadDashboard();
-    api.renderStatus(stateWith({ modifiedFiles: ['a.ts', 'b.ts', 'c.ts'], uncommittedFiles: ['c.ts'], countsSinceCommit: true }));
-    expect(getElementById('metric-files').textContent).toBe('1');
-    expect(getElementById('metric-files-title').textContent).toBe('uncommitted files');
-    api.renderStatus(stateWith({ modifiedFiles: ['a.ts'], uncommittedFiles: ['a.ts'], countsSinceCommit: false }));
-    expect(getElementById('metric-files-title').textContent).toBe('modified files');
-  });
-
-  it('shows the hard stop instead of the usual limits', () => {
-    const { api, getElementById } = loadDashboard();
-    api.renderStatus(stateWith({ limitState: 'hard-stop', modifiedFiles: new Array(41).fill('f.ts') }));
-    expect(getElementById('metric-files').textContent).toBe('41');
-    expect(getElementById('metric-files').className).toContain('text-red-400');
-    expect(getElementById('metric-files-limit').textContent).toContain('HARD STOP');
+    api.renderStatus(stateWith());
+    expect(getElementById('metric-frozen').textContent).toBe('none seen · 0 MB monitored');
+    expect(getElementById('activity-list').innerHTML).toContain('No activity yet');
   });
 });

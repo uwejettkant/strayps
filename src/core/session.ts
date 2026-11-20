@@ -7,42 +7,26 @@ import {
   type GuardConfig,
   GuardConfigManager,
 } from './guard-config.js';
+import type { ActivityEvent, ActivityEventType } from './events.js';
 import {
   type MonitoredProcess,
   type ProcessKilledEvent,
   ProcessMonitor,
 } from './process-monitor.js';
-import {
-  type CheckpointInfo,
-  RepoWatcher,
-  type WatchActivityEvent,
-  type WatchEventType,
-} from './watcher.js';
 
 export interface WatchdogSessionDeps {
+  /** The current repository: its agents are the ones `pause` holds and the list marks as "this repo". */
   rootDir: string;
   configManager: GuardConfigManager;
-  watcher: RepoWatcher;
   processMonitor: ProcessMonitor;
 }
 
-/** One consistent view of the watchdog state. The dashboard and the terminal UI both render this. */
+/** One consistent view of the monitor state. The dashboard and the terminal UI both render this. */
 export interface StatusSnapshot {
   rootDir: string;
   config: GuardConfig;
-  checkpoint: CheckpointInfo | null;
-  /** Files changed in this session (revertable), committed or not. */
-  modifiedFiles: string[];
-  /** The changed files the limits count: since the last commit in a git repository, else all. */
-  uncommittedFiles: string[];
-  /** True when the count runs since the last commit, false when since agent-leash started. */
-  countsSinceCommit: boolean;
-  trippedFiles: string[];
-  limitState: 'ok' | 'warn' | 'hard-stop';
-  events: WatchActivityEvent[];
+  events: ActivityEvent[];
   processes: MonitoredProcess[];
-  /** For every agent that started monitored processes: the PIDs that end with it (`getKillPlan`). */
-  sessionMembers: Record<number, number[]>;
   timestamp: number;
 }
 
@@ -101,23 +85,22 @@ const UPDATE_COALESCE_MS = 80;
 const CONFIG_SETTLE_MS = 150;
 
 /**
- * The single place where watcher, process monitor and config meet.
+ * The single place where the process monitor and the config meet.
  *
  * Every front end (web dashboard, terminal UI, plain log output) reads state through
  * `getSnapshot()` and acts through the methods below, so all of them show and do the same thing.
  *
  * Events:
- * - `event`  (WatchActivityEvent): one entry was added to the activity log
+ * - `event`  (ActivityEvent): one entry was added to the activity log
  * - `update` (StatusSnapshot): state changed; coalesced to at most one per 80 ms
  */
 export class WatchdogSession extends EventEmitter {
   public readonly rootDir: string;
   public readonly configManager: GuardConfigManager;
-  public readonly watcher: RepoWatcher;
   public readonly processMonitor: ProcessMonitor;
 
-  private sessionEvents: WatchActivityEvent[] = [];
-  private counters: Partial<Record<WatchEventType, number>> = {};
+  private sessionEvents: ActivityEvent[] = [];
+  private counters: Partial<Record<ActivityEventType, number>> = {};
   private updateTimer: NodeJS.Timeout | null = null;
   private scanErrorReported = false;
   private eventSeq = 0;
@@ -131,18 +114,7 @@ export class WatchdogSession extends EventEmitter {
     super();
     this.rootDir = deps.rootDir;
     this.configManager = deps.configManager;
-    this.watcher = deps.watcher;
     this.processMonitor = deps.processMonitor;
-
-    this.listen(this.watcher, 'file-edit', () => {
-      this.processMonitor.recordFileActivity();
-    });
-
-    this.listen(this.watcher, 'activity', (event: WatchActivityEvent) => {
-      this.count(event);
-      this.emit('event', event);
-      this.scheduleUpdate();
-    });
 
     this.listen(this.processMonitor, 'process-frozen', (proc: MonitoredProcess) => {
       this.addEvent({
@@ -188,7 +160,7 @@ export class WatchdogSession extends EventEmitter {
       if (this.scanErrorReported) return;
       this.scanErrorReported = true;
       this.addEvent({
-        type: 'watch-error',
+        type: 'scan-error',
         message: `Process scan failed: ${err instanceof Error ? err.message : String(err)}`,
         severity: 'warn',
       });
@@ -198,30 +170,17 @@ export class WatchdogSession extends EventEmitter {
   public getSnapshot(): StatusSnapshot {
     const config = this.configManager.getConfig();
     const processes = this.processMonitor.getProcesses();
-    const modifiedFiles = this.watcher.getModifiedFiles();
-    const uncommittedFiles = this.watcher.getUncommittedFiles();
-    const events = [...this.sessionEvents, ...this.watcher.getRecentEvents(MAX_SNAPSHOT_EVENTS)]
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, MAX_SNAPSHOT_EVENTS);
-
     return {
       rootDir: this.rootDir,
       config,
-      checkpoint: this.watcher.getCheckpoint(),
-      modifiedFiles,
-      uncommittedFiles,
-      countsSinceCommit: this.watcher.countsSinceCommit(),
-      trippedFiles: this.watcher.loopDetector.getTrippedFiles(),
-      limitState: this.configManager.evaluateFileLimit(uncommittedFiles.length),
-      events,
+      events: this.sessionEvents.slice(0, MAX_SNAPSHOT_EVENTS),
       processes,
-      sessionMembers: this.sessionMembersOf(processes),
       timestamp: Date.now(),
     };
   }
 
   /** How many events of each type this session has seen (not capped like the event list). */
-  public getCounters(): Partial<Record<WatchEventType, number>> {
+  public getCounters(): Partial<Record<ActivityEventType, number>> {
     return { ...this.counters };
   }
 
@@ -296,16 +255,6 @@ export class WatchdogSession extends EventEmitter {
     }
     this.configWatchPath = null;
     this.configListener = null;
-  }
-
-  /** Rolls one file back to the session checkpoint and re-arms the circuit breaker for it. */
-  public rollbackFile(filePath: string): boolean {
-    const restored = this.watcher.rollbackFile(filePath);
-    if (restored) {
-      this.watcher.loopDetector.resetFile(filePath);
-    }
-    this.scheduleUpdate();
-    return restored;
   }
 
   /**
@@ -416,9 +365,9 @@ export class WatchdogSession extends EventEmitter {
   }
 
   /**
-   * Emergency brake: holds the coding agents of the watched repository and the processes they
-   * started (SIGSTOP). Nothing is terminated, no file is touched; `resume` continues them where
-   * they stopped. Dev servers, editors and sessions in other repositories are not touched.
+   * Holds the coding agents of the current repository and the processes they started (SIGSTOP).
+   * Nothing is terminated; `resume` continues them where they stopped. Dev servers, editors and
+   * sessions in other repositories are not touched.
    */
   public pause(): PauseResult {
     const pids = this.processMonitor.pauseTargets();
@@ -433,10 +382,10 @@ export class WatchdogSession extends EventEmitter {
     return { pids };
   }
 
-  /** Adds an entry to the activity log that does not come from the file watcher. */
-  public addEvent(partial: Pick<WatchActivityEvent, 'type' | 'message' | 'severity'>): WatchActivityEvent {
+  /** Adds an entry to the activity log. */
+  public addEvent(partial: Pick<ActivityEvent, 'type' | 'message' | 'severity'>): ActivityEvent {
     this.eventSeq += 1;
-    const event: WatchActivityEvent = {
+    const event: ActivityEvent = {
       id: `ses-${Date.now()}-${this.eventSeq}`,
       timestamp: Date.now(),
       ...partial,
@@ -451,18 +400,7 @@ export class WatchdogSession extends EventEmitter {
     return event;
   }
 
-  /** The kill plan of every agent that has one, so the dashboard shows what the session would end. */
-  private sessionMembersOf(processes: MonitoredProcess[]): Record<number, number[]> {
-    const members: Record<number, number[]> = {};
-    for (const proc of processes) {
-      if (proc.category !== 'agent') continue;
-      const plan = this.killPlanFrom(processes, proc.pid);
-      if (plan && plan.alsoEnds.length > 0) members[proc.pid] = plan.alsoEnds.map((p) => p.pid);
-    }
-    return members;
-  }
-
-  /** Detaches from watcher, monitor and config file. The session must not be used afterwards. */
+  /** Detaches from the monitor and the config file. The session must not be used afterwards. */
   public dispose(): void {
     this.unwatchConfigFile();
     if (this.updateTimer) {
@@ -479,10 +417,9 @@ export class WatchdogSession extends EventEmitter {
     this.processMonitor.setSilenceTimeoutSec(config.limits.mcpSilenceTimeoutSec);
     this.processMonitor.setStaleSessionHours(config.limits.staleSessionHours);
     this.processMonitor.setAgentNames(config.agents);
-    this.watcher.loopDetector.setMaxEditsPerFilePerMinute(config.limits.maxEditsPerFilePerMinute);
   }
 
-  private count(event: WatchActivityEvent): void {
+  private count(event: ActivityEvent): void {
     this.counters[event.type] = (this.counters[event.type] ?? 0) + 1;
   }
 

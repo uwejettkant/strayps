@@ -1,12 +1,10 @@
 // Guard for coding agents working ON agent-leash (AGENTS.md, section 2).
 //
 // agent-leash terminates processes for a living. One command is easy to type while developing it
-// and expensive to get wrong: calling a kill or pause endpoint of a running instance. Against an
-// instance that was started without --demo it terminates or holds real agent sessions, including
-// the one running the command. The user is asked first.
-//
-// Starting the watchdog on this repository needs no guard any more: it never rolls a file back
-// on its own, only after a person confirmed a revert.
+// and expensive to get wrong: calling a kill or pause endpoint of a running instance. The current
+// dashboard is read-only and has no such endpoint, but an instance from an older build (up to the
+// tag v0.1-full-guard) still answers them; started without --demo, it terminates or holds real
+// agent sessions, including the one running the command. The user is asked first.
 //
 // Everything else is left to the normal permission flow: this script prints a decision only when
 // it has an objection.
@@ -16,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// panic and kill-frozen no longer exist, but an instance from an older build may still answer them
+// none of these exist any more, but an instance from an older build may still answer them
 const KILL_ENDPOINT = /\/api\/(pause|panic|kill-frozen|kill\/[^\s'"]*)/;
 
 /**

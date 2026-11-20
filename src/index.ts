@@ -1,8 +1,7 @@
 /**
  * Programmatic API of agent-leash. Importing this module never starts the CLI.
  *
- *   import { GuardConfigManager, RepoWatcher, ProcessMonitor, WatchdogSession,
- *            listenWatchdogServer } from 'agent-leash';
+ *   import { GuardConfigManager, ProcessMonitor, WatchdogSession, listenWatchdogServer } from 'agent-leash';
  */
 export {
   CONFIG_FILENAME,
@@ -17,19 +16,13 @@ export {
   type GuardConfigManagerOptions,
   type GuardConfigOverrides,
   type GuardLimits,
-  matchesGlobPattern,
   type ParsedConfigValue,
   parseConfigValue,
   resolveConfigKey,
   type WriteConfigValueResult,
   writeConfigValue,
 } from './core/guard-config.js';
-export {
-  type LoopAlert,
-  type LoopCheckResult,
-  LoopDetector,
-  type LoopDetectorOptions,
-} from './core/loop-detector.js';
+export type { ActivityEvent, ActivityEventType } from './core/events.js';
 export {
   type AgentDetection,
   BUILT_IN_AGENT_NAMES,
@@ -58,13 +51,6 @@ export {
   WatchdogSession,
   type WatchdogSessionDeps,
 } from './core/session.js';
-export {
-  type CheckpointInfo,
-  RepoWatcher,
-  type RepoWatcherOptions,
-  type WatchActivityEvent,
-  type WatchEventType,
-} from './core/watcher.js';
 export { CliError, createCliProgram, runCli } from './program.js';
 export {
   createWatchdogApp,
@@ -76,7 +62,6 @@ export {
   type RunningWatchdogServer,
   type StartServerOptions,
   startWatchdogServer,
-  TOKEN_HEADER,
   type WatchdogServerDeps,
 } from './server.js';
 export { PlainReporter, type PlainReporterOptions } from './ui/plain.js';

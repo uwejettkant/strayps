@@ -93,71 +93,47 @@ export interface Frame {
 
 function metricCells(view: FrameView): Seg[][] {
   const { snapshot, palette: p } = view;
-  const { config } = snapshot;
   const totals = processTotals(snapshot.processes);
+  const agents = snapshot.processes.filter((proc) => proc.category === 'agent');
+  const mcp = snapshot.processes.filter((proc) => proc.category === 'mcp');
+  const paused = snapshot.processes.filter((proc) => proc.paused).length;
+  const mb = (list: typeof agents) => list.reduce((sum, proc) => sum + (proc.memoryMb || 0), 0).toFixed(0);
 
-  // What the limits count: since the last commit in a git repository
-  const fileCount = snapshot.uncommittedFiles.length;
-  const filesStyle =
-    snapshot.limitState === 'hard-stop' ? p.danger : snapshot.limitState === 'warn' ? p.warn : p.strong;
-  const files: Seg[] = [
-    seg(' FILES      ', p.dim),
-    seg(`${fileCount} ${snapshot.countsSinceCommit ? 'uncommitted' : 'modified'}`, filesStyle),
-    snapshot.limitState === 'hard-stop'
-      ? seg('  HARD STOP limit reached', p.danger)
-      : seg(`  warn ${config.limits.maxFilesWarn} · stop ${config.limits.maxFilesHardStop}`, p.dim),
+  const agentCell: Seg[] = [
+    seg(' AGENTS     ', p.dim),
+    seg(`${agents.length} session${agents.length === 1 ? '' : 's'}`, p.strong),
+    seg(`  ${mb(agents)} MB`, p.dim),
   ];
-
-  const tripped = snapshot.trippedFiles;
-  const breaker: Seg[] =
-    tripped.length > 0
-      ? [
-          seg(' BREAKER    ', p.dim),
-          seg(`TRIPPED (${tripped.length})`, p.danger),
-          seg(`  ${tripped.map(sanitize).join(', ')}`, p.warn),
-        ]
-      : [
-          seg(' BREAKER    ', p.dim),
-          seg('armed', p.ok),
-          seg(`  max ${config.limits.maxEditsPerFilePerMinute} edits/file/min`, p.dim),
-        ];
-
-  const procs: Seg[] = [
-    seg(' PROCESSES  ', p.dim),
-    seg(`${totals.count} monitored`, p.strong),
+  const mcpCell: Seg[] = [
+    seg(' MCP        ', p.dim),
+    seg(`${mcp.length} server${mcp.length === 1 ? '' : 's'}`, p.strong),
+    seg(`  ${mb(mcp)} MB`, p.dim),
+  ];
+  const leftCell: Seg[] = [
+    seg(' LEFT BEHIND', p.dim),
     totals.staleCount > 0
-      ? seg(`  ${totals.staleCount} stale/frozen · ${totals.staleMb.toFixed(0)} MB`, p.warn)
-      : seg(`  none stale · ${totals.totalMb.toFixed(0)} MB total`, p.dim),
+      ? seg(` ${totals.staleCount} stale/frozen · ${totals.staleMb.toFixed(0)} MB`, p.warn)
+      : seg(' none seen', p.ok),
   ];
-
-  const cp = snapshot.checkpoint;
-  const checkpoint: Seg[] = [
-    seg(' CHECKPOINT ', p.dim),
-    cp
-      ? seg(`${sanitize(cp.ref)}`, p.strong)
-      : seg('initializing…', p.dim),
-    cp ? seg(`  ${cp.type}, ${cp.snapshottedFiles} files`, p.dim) : seg(''),
+  const pausedCell: Seg[] = [
+    seg(' PAUSED     ', p.dim),
+    paused > 0 ? seg(`${paused} held — resume continues them`, p.warn) : seg('nothing held', p.dim),
   ];
-
-  return [files, breaker, procs, checkpoint];
+  return [agentCell, mcpCell, leftCell, pausedCell];
 }
 
 function compactMetrics(view: FrameView): Seg[] {
   const { snapshot, palette: p } = view;
   const totals = processTotals(snapshot.processes);
-  const fileStyle =
-    snapshot.limitState === 'hard-stop' ? p.danger : snapshot.limitState === 'warn' ? p.warn : p.plain;
+  const agents = snapshot.processes.filter((proc) => proc.category === 'agent').length;
+  const mcp = snapshot.processes.filter((proc) => proc.category === 'mcp').length;
+  const paused = snapshot.processes.filter((proc) => proc.paused).length;
   return [
-    seg(` ${snapshot.uncommittedFiles.length} files`, fileStyle),
-    snapshot.limitState === 'hard-stop' ? seg(' HARD STOP', p.danger) : seg(''),
-    seg(' · '),
-    snapshot.trippedFiles.length > 0
-      ? seg(`breaker TRIPPED (${snapshot.trippedFiles.length})`, p.danger)
-      : seg('breaker armed', p.ok),
-    seg(` · ${totals.count} procs`),
+    seg(` ${agents} agents · ${mcp} MCP`),
     totals.staleCount > 0
-      ? seg(` (${totals.staleCount} stale, ${totals.staleMb.toFixed(0)} MB)`, p.warn)
+      ? seg(` · ${totals.staleCount} stale/frozen (${totals.staleMb.toFixed(0)} MB)`, p.warn)
       : seg(''),
+    paused > 0 ? seg(` · ${paused} paused`, p.warn) : seg(''),
   ];
 }
 
@@ -165,7 +141,7 @@ function activityRows(view: FrameView, count: number): Seg[][] {
   const { snapshot, palette: p } = view;
   if (count <= 0) return [];
   if (snapshot.events.length === 0) {
-    return [[seg('   No activity yet — waiting for file changes…', p.dim)]];
+    return [[seg('   No activity yet — watching the agent and MCP processes…', p.dim)]];
   }
   // Snapshot events are newest first; a terminal log reads oldest to newest.
   const shown = snapshot.events.slice(0, count).reverse();
@@ -256,7 +232,7 @@ function helpRows(view: FrameView): Seg[][] {
   ]);
   rows.push([seg('')]);
   rows.push([
-    seg(' Commands that change something (revert, kill, pause) always ask before they act.', p.dim),
+    seg(' Commands that change something (kill, pause) always ask before they act.', p.dim),
   ]);
   rows.push([seg(' Press any key to return.', p.dim)]);
   return rows;

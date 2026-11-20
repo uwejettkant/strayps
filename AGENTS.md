@@ -9,7 +9,7 @@
 
 ## 1. What this is
 
-`agent-leash` is a TypeScript CLI that watches a repository while autonomous coding agents work in it. It raises alarms on edit loops and edits to protected files, restores files when a person asks for it, and it lists agent and MCP processes so that forgotten ones can be terminated. The same state is shown in a full-screen terminal view, in plain log output, and in a local web dashboard.
+`agent-leash` is a TypeScript CLI that lists the coding agents and MCP servers running on a machine, shows which ones look left behind, and ends one process or one agent session when a person confirms it. It can also pause the agents of the repository it was started in. The same state is shown in a full-screen terminal view, in plain log output, and in a read-only local web dashboard. It does not watch files: that was cut after the tag `v0.1-full-guard`.
 
 It is a safety tool. People install it so that less goes wrong. Every change is judged by one question first: **can this make the tool destroy something the user did not ask it to destroy?**
 
@@ -17,24 +17,22 @@ It is a safety tool. People install it so that less goes wrong. Every change is 
 
 1. **Never aim the real kill path at the real process table.** agent-leash terminates processes; while you develop it, the processes on this machine are the user's live agent sessions, including yours.
    - Tests and experiments use a fake process table: `createHarness()` in `tests/helpers/harness.ts`, or `--demo`.
-   - Never send `kill` or `pause` (terminal) or `POST /api/kill/*`, `/api/pause` to an instance that runs without `--demo`.
+   - Never send `kill` or `pause` to an instance that runs without `--demo`. Builds up to the tag `v0.1-full-guard` also answer `POST /api/kill/*` and `/api/pause`: never call those either.
    - `agent-leash status` is read-only and fine against the real machine.
-   - Safety nets, not excuses: `tests/setup.ts` blocks `process.kill` inside the test suite; `scripts/agents/leash-guard.mjs` (Claude Code hook) asks the user before a kill or pause endpoint is called.
-2. **Never confirm a `revert` on a repository someone is working in.** The watchdog itself never rewrites a file (there is no automatic rollback), so watching this repository is safe; a confirmed rollback is not. An instance built before that change (`--no-auto-rollback` still exists in it) does roll back on its own: do not leave one running on this repository. Scenario runs go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
+   - Safety nets, not excuses: `tests/setup.ts` blocks `process.kill` inside the test suite; `scripts/agents/leash-guard.mjs` (Claude Code hook) asks the user before a kill or pause endpoint of an older build is called.
+2. **Do not run an older build on a repository someone is working in.** Builds up to the tag `v0.1-full-guard` watch files and roll one back on a confirmed `revert`. The current build reads no file but `.agentguard.json`. Scenario runs that need a config file to edit go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
 3. **Product safety invariants.** Each one has tests. If a change breaks one of those tests, the change is wrong, not the test.
-   - *No automatic rollback*: protected files and thrashing raise an alarm. A file is rewritten only by a confirmed `revert`, one file at a time.
-   - *Rollback* goes back to the version before a file's latest series of changes, never further. It only touches files that changed in this session, never through a symbolic or hard link, only paths inside the watched repository, never ignored paths (`.git`, `node_modules`, …, and in a git repository what git ignores, unless it is a protected file), never `.env*`. It deletes a file only if it did not exist before its latest changes, and it keeps the version it replaces.
-   - *`.env*` contents are never read* — not into the snapshot, not for comparison, not for backup, not through a symbolic or hard link, in any spelling (`.ENV`, `.envrc`).
+   - *Files*: the only file agent-leash reads in a repository is `.agentguard.json`, never through a symbolic or hard link, and its contents never appear in a message. It writes that file only on `init`, `config set` and `config unset`. No other file is read, written, restored or deleted.
    - *Kill* only reaches PIDs from the monitored list: one process, or one agent with the monitored processes it started (through `agentPid`, never by status; an agent it started counts only in the same directory, never in the home directory or `/`), and only those the confirmation listed, each matched by PID and `firstSeenAt`, the named process too. Nothing is ended in bulk across sessions. SIGTERM first, SIGKILL after the grace period.
    - *Pause, not stop*: the emergency brake holds (SIGSTOP) only the coding agents of the watched repository and the processes they started; never a dev server, an editor or another session. Nothing is terminated, no file is touched, and every held process is continued (SIGCONT) by `resume` and when agent-leash exits: normally, on SIGINT, SIGTERM, SIGHUP or SIGQUIT, or after an uncaught exception. SIGKILL and a fatal V8 error cannot be handled; the README says so.
    - *No verdicts on processes*: `STALE` and `FROZEN` are observations. Nothing is labeled safe to kill, and nothing is terminated in bulk because of its status, until the classification is proven on sessions still in use (it has been wrong twice).
    - *Agent recognition without a product list*: an agent is the client of an MCP server, a built-in name (`claude`, `codex`, `aider`, exact program name) or a name from the `agents` setting. Editors, desktop apps and terminals are never agents. Adding a product name to the code needs a real case that the other two ways miss.
-   - *Server*: binds to loopback; answers only when addressed as this machine (Host allowlist); every state-changing request needs the dashboard token and the same origin.
-   - *Untrusted text*: file names, command lines, working directories and reasons come from the processes being watched. In the dashboard they go through `esc()`, in the terminal through `sanitize()`. No inline event handlers, no generated JavaScript.
-   - *Asking first*: every action a person triggers that changes something (revert, kill, pause) asks for confirmation, in every front end, whatever the file or process looks like.
+   - *Server*: binds to loopback; answers only when addressed as this machine (Host allowlist); read-only: every request that is not GET or HEAD gets 405, no route changes anything, and the page holds no token. The event stream refuses other sites.
+   - *Untrusted text*: command lines, working directories, reasons and config values come from the processes being watched. In the dashboard they go through `esc()`, in the terminal through `sanitize()`. No inline event handlers, no generated JavaScript.
+   - *Asking first*: every action a person triggers that changes something (kill, pause) asks for confirmation, in both terminal front ends, whatever the process looks like. The dashboard triggers nothing.
    - *Demo mode* changes nothing: it writes no file (not even `.agentguard.json`) and reaches no real process. The only file it reads is `.agentguard.json`.
-   - *Config reloads*: an `.agentguard.json` that is not valid changes nothing in a running watchdog. Every applied reload is logged as a warning, because the agent being watched can write the file too. Edits to the file are never treated as agent edits and never reverted.
-4. **One path for state and actions.** Front ends read `WatchdogSession.getSnapshot()` and act through session methods. A new action goes into the session first, then into the API route, the terminal command and the dashboard, with a test at session level and one per front end.
+   - *Config reloads*: an `.agentguard.json` that is not valid changes nothing in a running watchdog. Every applied reload is logged as a warning, because the agent being watched can write the file too.
+4. **One path for state and actions.** Front ends read `WatchdogSession.getSnapshot()` and act through session methods. A new action goes into the session first, then into the terminal command (`src/ui/commands.ts`, shared by both terminal front ends), with a test at session level and one per front end. The dashboard shows state and gets no action.
 5. **One source per fact.** The version lives in `package.json` (`getVersion()`). Numbers in the README (tests, bundle size) are copied from command output, never estimated.
 6. **Git and publishing.** Work on `feature/<topic>` or `fix/<topic>`, Conventional Commits, one commit per finished block. No push, no tag, no `npm publish`, no GitHub release without the maintainer's explicit go-ahead.
 7. **Gate before every commit:** `npm run check`. Report failures as they are; do not explain them away, and do not skip a test to get green.
@@ -67,33 +65,32 @@ scripts/scenarios/package-check.sh     # build, pack, install the tarball, impor
 ## 4. Architecture
 
 ```text
-            GuardConfigManager          RepoWatcher                 ProcessMonitor
-            (.agentguard.json,          (chokidar, checkpoint,      (ps + cwd lookup every 2 s,
-             guardrails, globs)          rollback, kept copies)      classification, termination)
-                      \                       |                         /
-                       +--------------  WatchdogSession  --------------+
+            GuardConfigManager                          ProcessMonitor
+            (.agentguard.json, limits,                  (ps + cwd lookup every 2 s,
+             extra agent names)                          classification, termination, pause)
+                      \                                         /
+                       +--------------  WatchdogSession  -------+
                           one snapshot · one set of actions · events:
                           'event' (each log entry), 'update' (coalesced)
                          /                    |                    \
               server.ts (Hono)         ui/terminal.ts           ui/plain.ts
-              REST + SSE + page        full-screen view         one line per event,
+              GET + SSE, read-only     full-screen view         one line per event,
               ui/public/index.html     + command line           commands from stdin
 ```
 
 | Module | Responsibility |
 | :--- | :--- |
-| `src/core/guard-config.ts` | `.agentguard.json`, defaults, validation with warnings, glob matching. There are no modes: the guardrails always apply exactly as configured, and an old `"mode"` key is ignored with a notice. `reload` applies a changed file only when all of it is valid; `writeConfigValue` changes one key for `agent-leash config`; `getSources` says where each value comes from. |
-| `src/core/loop-detector.ts` | Sliding 60-second window per file; trips once per series when `maxEditsPerFilePerMinute` is exceeded, re-arms after a quiet window. |
-| `src/core/watcher.ts` | File events and alarms, what is ignored (the fixed list, plus what git ignores; protected files stay watched), session checkpoint (memory snapshot plus a git ref for large tracked files), the file count for the limits (since the last commit, `checkCommits`; revertable files stay in `modifiedFiles`), per-file versions (`STABLE_AFTER_MS`: the version before the latest series is the rollback target), revert of one file, kept copies of replaced versions, recognition of its own writes by content, `dryRun` for the demo. |
+| `src/core/guard-config.ts` | `.agentguard.json`: the limits (`mcpSilenceTimeoutSec`, `staleSessionHours`) and extra agent names, defaults, validation with warnings. Keys of older versions (`mode`, `protectedFiles`, file limits) are ignored with a notice. `reload` applies a changed file only when all of it is valid; `writeConfigValue` changes one key for `agent-leash config`; `getSources` says where each value comes from. |
+| `src/core/events.ts` | `ActivityEventType` and `ActivityEvent`: what can appear in the activity log. |
 | `src/core/process-monitor.ts` | Process list, working directories (`/proc` on Linux, `lsof` elsewhere), agent recognition (`programNames` for exact names, `findMcpClient` for agents of any name), classification (`ACTIVE`, `IDLE`, `STANDBY`, `STALE`, `FROZEN`), `inWatchedRepo` and `agentPid` via the process tree, `pauseTarget`, `host` (what a session is attached to), graceful termination. |
-| `src/core/session.ts` | The only place where the three meet. Snapshot, actions (`rollbackFile`, `getKillPlan`, `killProcess`, `getPauseTargets`, `pause`, `resume`), event log, coalesced updates, live config (`watchConfigFile` polls `.agentguard.json`, `reloadConfig` applies it to monitor and circuit breaker). |
-| `src/server.ts` | Hono app: request guards (Host, origin, token), routes, SSE, page delivery with nonce and CSP, `listenWatchdogServer` (loopback, port fallback). |
+| `src/core/session.ts` | The only place where config and monitor meet. Snapshot, actions (`getKillPlan`, `killProcess`, `getPauseTargets`, `pause`, `resume`), event log, coalesced updates, live config (`watchConfigFile` polls `.agentguard.json`, `reloadConfig` applies it to the monitor). |
+| `src/server.ts` | Read-only Hono app: request guards (Host; every method but GET and HEAD gets 405), `/api/status`, SSE, page delivery with nonce and CSP, `listenWatchdogServer` (loopback, port fallback). |
 | `src/ui/commands.ts` | Command language shared by both terminal front ends: parse, run (destructive commands return a confirmation step), tab completion. |
 | `src/ui/terminal.ts` | `renderFrame` (pure: state in, lines out) and `TerminalUI` (raw-mode input, alternate screen, restore on exit). |
 | `src/ui/plain.ts` | Line output for pipes, logs, background jobs and `--no-tui`. |
 | `src/ui/format.ts` | `sanitize`, truncation, colors (honors `NO_COLOR`), shared tables. |
-| `src/ui/public/index.html` | The dashboard page. Its styles are `dashboard.css` next to it, generated by `npm run build:css` (part of `npm run build`) from the Tailwind classes in the page and committed; the page loads nothing from another host. After changing classes, run the build and commit both files. Placeholders `__LEASH_TOKEN__`, `__LEASH_VERSION__`, `__LEASH_NONCE__` are filled by the server. |
-| `src/program.ts` | The CLI: commands (`watch`, `status`, `init`, `config show/set/unset`), argument validation, wiring, choice between full-screen and plain output, shutdown. |
+| `src/ui/public/index.html` | The dashboard page. Its styles are `dashboard.css` next to it, generated by `npm run build:css` (part of `npm run build`) from the Tailwind classes in the page and committed; the page loads nothing from another host. After changing classes, run the build and commit both files. A view only: no buttons, no dialogs, no requests but GET. Placeholders `__LEASH_VERSION__`, `__LEASH_NONCE__` are filled by the server. |
+| `src/program.ts` | The CLI: commands (`watch`, `status`, `init`, `config show/set/unset`), argument validation, wiring, choice between full-screen and plain output, shutdown (continues paused processes). |
 | `src/cli.ts` / `src/index.ts` | Binary entry / library entry. Importing the library never starts anything. |
 
 How the CLI picks its output: full-screen view when stdin and stdout are a terminal and the process is in the foreground; plain lines otherwise (pipe, file, background job, `--no-tui`). In plain mode commands are read from stdin; the end of stdin does not stop the watchdog.
@@ -103,19 +100,18 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 - TypeScript strict, ES module syntax, relative imports with the `.js` suffix, named exports only.
 - English for code, comments, commit messages and documentation in this repository.
 - Comments say why, not what. A safety rule in code names the failure it prevents.
-- A new event type is added to `WatchEventType`; front ends color by `severity`, so they need no change.
+- A new event type is added to `ActivityEventType` in `src/core/events.ts`; front ends color by `severity`, so they need no change.
 - A new setting goes into `GuardLimits` (or `GuardConfig`), `CONFIG_KEY_INFO` and the settings table in the README in the same change; `agent-leash config` lists it from there.
-- Paths inside the product are relative to the repository root with forward slashes. A backslash is a separator only on Windows (`toPosixPath`).
-- No new runtime dependency without a reason that fits in one sentence. Runtime dependencies today: `commander`, `chokidar`, `hono`, `@hono/node-server`, `ps-list`.
-- User-facing wording is plain and literal: say what will happen to which file or process.
+- No new runtime dependency without a reason that fits in one sentence. Runtime dependencies today: `commander`, `hono`, `@hono/node-server`, `ps-list`.
+- User-facing wording is plain and literal: say what will happen to which process.
 
 ## 6. Testing
 
-- Tests live in `tests/*.test.ts` (Vitest). `tests/helpers/harness.ts` builds watcher, monitor and session with a fake process table and a fake killer; `tests/helpers/kill-guard.ts` is the suite-wide block on real kills.
-- File tests use real temporary directories (`makeTmpDir`), git tests a real temporary repository. Time-dependent code uses fake timers or an injected `now`.
+- Tests live in `tests/*.test.ts` (Vitest). `tests/helpers/harness.ts` builds config, monitor and session with a fake process table and a fake killer; `tests/helpers/kill-guard.ts` is the suite-wide block on real kills.
+- Config tests use real temporary directories (`makeTmpDir`). Time-dependent code uses fake timers or an injected `now`.
 - `tests/cli.e2e.test.ts` starts the real CLI in a child process. Anything that could reach processes runs with `--demo`.
 - The full-screen view is tested twice: `renderFrame` and `TerminalUI` against a fake terminal in Vitest, and by hand in a real pseudo-terminal with `scripts/scenarios/pty-drive.py`.
-- The dashboard script is executed against a stand-in DOM (`tests/dashboard-page.test.ts`) to prove that hostile names stay text.
+- The dashboard script is executed against a stand-in DOM (`tests/dashboard-page.test.ts`) to prove that hostile command lines and messages stay text and that the page sends nothing but reads.
 - A test name states the behavior. `it.todo` marks behavior that is not decided yet; do not turn one into a passing test by choosing the behavior yourself.
 - For a safety fix, show once that the new test fails on the old code.
 - Platform truth: verified on macOS. Linux paths exist (`/proc` lookup) but are unverified; Windows is not supported. Do not claim more in user-facing text.
@@ -128,8 +124,8 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 | Skill `process-classification` | `.agents/skills/process-classification/` | You touch how agents are recognized, what counts as stale, frozen or standby, or what pause holds. |
 | Skill `release-check` | `.agents/skills/release-check/` | The maintainer asks for a release, or to judge release readiness. |
 | Subagent `scenario-tester` | `.claude/agents/scenario-tester.md` | The scenario pass should run in its own context and come back as a findings list. |
-| Subagent `safety-reviewer` | `.claude/agents/safety-reviewer.md` | A diff touches rollback, termination, the server or anything rendered from watched data. |
-| Hook `leash-guard` | `scripts/agents/leash-guard.mjs`, `.claude/settings.json` | Always on in Claude Code: asks before a kill/pause endpoint is called. |
+| Subagent `safety-reviewer` | `.claude/agents/safety-reviewer.md` | A diff touches termination, pause, the server, the config file or anything rendered from watched data. |
+| Hook `leash-guard` | `scripts/agents/leash-guard.mjs`, `.claude/settings.json` | Always on in Claude Code: asks before a kill/pause endpoint of an older build is called. |
 
 Skills are created and edited only in `.agents/skills/`, with `name` and `description` as their only frontmatter. `.claude/skills/` holds symlinks to them. `.agents/` contains no `AGENTS.md`.
 

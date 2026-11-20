@@ -14,10 +14,9 @@ import {
   resolveConfigKey,
   writeConfigValue,
 } from './core/guard-config.js';
-import { LoopDetector } from './core/loop-detector.js';
+import type { ActivityEventType } from './core/events.js';
 import { ProcessMonitor, type RawProcessInfo } from './core/process-monitor.js';
 import { WatchdogSession } from './core/session.js';
-import { RepoWatcher, type WatchEventType } from './core/watcher.js';
 import { DEFAULT_PORT, listenWatchdogServer, type RunningWatchdogServer } from './server.js';
 import {
   createPalette,
@@ -148,7 +147,7 @@ function summaryLines(
   palette: Palette,
 ): string[] {
   const counters = session.getCounters();
-  const n = (type: WatchEventType) => counters[type] ?? 0;
+  const n = (type: ActivityEventType) => counters[type] ?? 0;
   const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
   const duration =
     seconds >= 3600
@@ -159,11 +158,8 @@ function summaryLines(
   const snapshot = session.getSnapshot();
   const lines = [
     `${palette.accent('agent-leash')} stopped after ${duration} — ${sanitize(tildify(session.rootDir))}`,
-    `  ${n('file-edit')} file edits · ${n('protected-file')} protected-file alerts · ${n('loop-detected')} thrashing alerts · ${n('rollback')} rollbacks · ${n('process-killed')} processes terminated`,
+    `  ${n('process-alert')} process alerts · ${n('process-killed')} processes terminated`,
   ];
-  if (snapshot.modifiedFiles.length > 0) {
-    lines.push(`  ${snapshot.modifiedFiles.length} file(s) still differ from the session checkpoint`);
-  }
   const alerts = snapshot.events.filter((e) => e.severity !== 'info').slice(0, 5).reverse();
   if (alerts.length > 0) {
     lines.push('  Last alerts:');
@@ -171,10 +167,6 @@ function summaryLines(
       const style = event.severity === 'critical' ? palette.danger : palette.warn;
       lines.push(`    ${palette.dim(formatClock(event.timestamp))}  ${style(sanitize(event.message))}`);
     }
-  }
-  const discardDir = session.watcher.getDiscardDir();
-  if (discardDir) {
-    lines.push(`  File versions replaced by rollbacks are kept in ${discardDir}`);
   }
   return lines;
 }
@@ -189,19 +181,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   const configManager = new GuardConfigManager(rootDir, undefined, { readOnly: demo });
   const cfg = configManager.getConfig();
 
-  const loopDetector = new LoopDetector({
-    maxEditsPerFilePerMinute: cfg.limits.maxEditsPerFilePerMinute,
-  });
-
-  // No automatic rollback: protected files and thrashing raise an alarm, revert restores
-  const watcher = new RepoWatcher({
-    rootDir,
-    configManager,
-    loopDetector,
-    dryRun: demo,
-  });
-
-  let demoProcesses = demo ? createDemoProcesses(watcher.rootDir) : [];
+  let demoProcesses = demo ? createDemoProcesses(rootDir) : [];
   const processMonitor = new ProcessMonitor({
     rootDir,
     mcpSilenceTimeoutSec: cfg.limits.mcpSilenceTimeoutSec,
@@ -225,9 +205,8 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
       : {}),
   });
 
-  const session = new WatchdogSession({ rootDir, configManager, watcher, processMonitor });
-
-  const checkpoint = await watcher.start();
+  const session = new WatchdogSession({ rootDir, configManager, processMonitor });
+  session.addEvent({ type: 'monitor-started', message: `Watching the agent and MCP processes of this machine; current repository ${tildify(rootDir)}`, severity: 'info' });
   processMonitor.start();
   // Edits to .agentguard.json apply to the running watchdog
   session.watchConfigFile();
@@ -238,7 +217,6 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
       running = await listenWatchdogServer({
         rootDir,
         configManager,
-        watcher,
         processMonitor,
         session,
         port: requestedPort ?? DEFAULT_PORT,
@@ -247,23 +225,8 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
       });
     } catch (err) {
       processMonitor.stop();
-      await watcher.stop();
       throw new CliError(err instanceof Error ? err.message : String(err));
     }
-  }
-
-  if (demo) {
-    // A believable 8-second story: an edit, a secret touched, a thrashing loop
-    const simulate = (delayMs: number, action: 'add' | 'change' | 'unlink', file: string) => {
-      setTimeout(() => watcher.handleFileSystemEvent(action, file), delayMs).unref();
-    };
-    simulate(1200, 'change', 'src/api/client.ts');
-    simulate(2000, 'add', 'src/api/retry.ts');
-    simulate(2600, 'change', '.env.local');
-    for (let i = 1; i <= 6; i++) {
-      simulate(3500 + i * 450, 'change', 'src/auth/session.ts');
-    }
-    simulate(7200, 'change', 'docker-compose.yml');
   }
 
   const color = shouldUseColor(process.stdout);
@@ -295,7 +258,6 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     processMonitor.stop();
     const within = <T>(work: Promise<T>, ms: number) =>
       Promise.race([work, new Promise<void>((resolve) => setTimeout(resolve, ms).unref())]);
-    await within(watcher.stop().catch(() => undefined), 2000);
     if (running) {
       await within(running.close(), 1500);
     }
@@ -334,7 +296,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
       onExit: (reason) => void shutdown(reason),
     });
     for (const warning of configManager.getWarnings()) {
-      session.addEvent({ type: 'watch-error', message: `${CONFIG_FILENAME}: ${warning}`, severity: 'warn' });
+      session.addEvent({ type: 'config-reload', message: `${CONFIG_FILENAME}: ${warning}`, severity: 'warn' });
     }
     ui.start();
     return;
@@ -348,9 +310,8 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   out('');
   out(`${palette.accent(`agent-leash v${getVersion()}`)} — AI Agent & MCP Watchdog${demo ? palette.warn('  [DEMO: simulated, nothing is touched]') : ''}`);
   out(`  Repo:        ${sanitize(rootDir)}`);
-  out(`  Checkpoint:  ${checkpoint.ref} (${checkpoint.type}, ${checkpoint.snapshottedFiles} files)`);
   out(`  Dashboard:   ${running ? running.url : 'off (--no-dashboard)'}`);
-  out(`  Limits:      warn=${cfg.limits.maxFilesWarn}, stop=${cfg.limits.maxFilesHardStop}, loop=${cfg.limits.maxEditsPerFilePerMinute}/min, mcp=${cfg.limits.mcpSilenceTimeoutSec}s, stale=${cfg.limits.staleSessionHours}h`);
+  out(`  Limits:      stale after ${cfg.limits.staleSessionHours}h idle in another repository, frozen after ${cfg.limits.mcpSilenceTimeoutSec}s as an orphan`);
   if (requestedPort === undefined && running && running.port !== DEFAULT_PORT) {
     out(palette.warn(`  Note:        port ${DEFAULT_PORT} was taken, using ${running.port}`));
   }
@@ -380,7 +341,6 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
 async function runStatus(dir: string): Promise<void> {
   const rootDir = resolveTargetDir(dir);
   const configManager = new GuardConfigManager(rootDir, undefined, { readOnly: true });
-  const watcher = new RepoWatcher({ rootDir, configManager, dryRun: true });
   const { limits, agents } = configManager.getConfig();
   const processMonitor = new ProcessMonitor({
     rootDir,
@@ -388,15 +348,13 @@ async function runStatus(dir: string): Promise<void> {
     staleSessionHours: limits.staleSessionHours,
     agentNames: agents,
   });
-  const session = new WatchdogSession({ rootDir, configManager, watcher, processMonitor });
+  const session = new WatchdogSession({ rootDir, configManager, processMonitor });
   await processMonitor.scan();
 
   const palette = createPalette(shouldUseColor(process.stdout), supportsTruecolor());
   const snapshot = session.getSnapshot();
   const width = process.stdout.columns ?? 120;
-  const report = formatStatusReport(snapshot, palette, width)
-    // A one-shot status has no session: file and breaker lines would only show zeros
-    .filter((line) => !/^ {2}(Files|Breaker):/.test(line));
+  const report = formatStatusReport(snapshot, palette, width);
 
   process.stdout.write(`\n${palette.accent('agent-leash status')}\n${report.join('\n')}\n\n`);
   session.dispose();
@@ -410,7 +368,6 @@ function displayValue(value: unknown): string {
 function effectiveValue(manager: GuardConfigManager, key: ConfigKey): string {
   const config = manager.getConfig();
   const list = (values: string[]) => (values.length > 0 ? values.join(', ') : 'none');
-  if (key === 'protectedFiles') return list(config.protectedFiles);
   if (key === 'agents') return list(config.agents);
   return String(config.limits[key.slice('limits.'.length) as keyof GuardLimits]);
 }
@@ -441,8 +398,8 @@ function runConfigShow(dir: string): void {
   }
   lines.push(
     '',
-    `  Change a value:    agent-leash config set limits.maxFilesWarn 20`,
-    `  Back to default:   agent-leash config unset limits.maxFilesWarn`,
+    `  Change a value:    agent-leash config set staleSessionHours 12`,
+    `  Back to default:   agent-leash config unset staleSessionHours`,
     `  Edits to the file, by hand or with these commands, apply to a running agent-leash within a second.`,
     '',
   );
@@ -525,13 +482,13 @@ export function createCliProgram(): Command {
 
   program
     .command('watch', { isDefault: true })
-    .description('Watch a repository for agent thrashing, protected file edits, and frozen MCPs')
-    .argument('[dir]', 'Target repository directory', '.')
+    .description('Show the agent and MCP processes of this machine live, and end the ones left behind')
+    .argument('[dir]', 'Current repository (its agents are the ones pause holds)', '.')
     .option('-p, --port <port>', `Port for the local web dashboard (default: ${DEFAULT_PORT}, next free port if taken)`)
     .option('--no-tui', 'Plain log output instead of the full-screen terminal view')
     .option('--no-dashboard', 'Do not start the local web dashboard')
-    .option('-q, --quiet', 'Plain output only: print warnings and critical events, not every edit')
-    .option('--demo', 'Simulated rogue agent and stale processes; changes no files and no processes')
+    .option('-q, --quiet', 'Plain output only: print warnings and critical events only')
+    .option('--demo', 'Simulated agent sessions and stale processes; reaches no real process')
     .action((dir: string, options: WatchOptions) => runWatch(dir, options));
 
   program
@@ -560,15 +517,15 @@ export function createCliProgram(): Command {
   config
     .command('set')
     .description('Set one value in .agentguard.json (the file is created if missing)')
-    .argument('<key>', 'Setting, e.g. limits.maxFilesWarn, maxFilesWarn or agents')
-    .argument('<value>', 'New value; protectedFiles takes globs separated by commas')
+    .argument('<key>', 'Setting, e.g. limits.staleSessionHours, staleSessionHours or agents')
+    .argument('<value>', 'New value; agents takes program names separated by commas')
     .option('-C, --dir <dir>', 'Target repository directory', '.')
     .action((key: string, value: string, options: { dir: string }) => runConfigSet(key, value, options.dir));
 
   config
     .command('unset')
     .description('Remove one value from .agentguard.json, so the built-in default applies')
-    .argument('<key>', 'Setting, e.g. limits.maxFilesWarn')
+    .argument('<key>', 'Setting, e.g. limits.staleSessionHours')
     .option('-C, --dir <dir>', 'Target repository directory', '.')
     .action((key: string, options: { dir: string }) => runConfigUnset(key, options.dir));
 

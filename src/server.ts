@@ -1,34 +1,25 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
-import { type Context, Hono } from 'hono';
-import { bodyLimit } from 'hono/body-limit';
+import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { GuardConfigManager } from './core/guard-config.js';
 import { ProcessMonitor } from './core/process-monitor.js';
-import { type KillConfirmation, type StatusSnapshot, WatchdogSession } from './core/session.js';
-import { RepoWatcher } from './core/watcher.js';
+import { type StatusSnapshot, WatchdogSession } from './core/session.js';
 import { getVersion } from './version.js';
 
-/** Upper bound for a request body; the largest legitimate one is a list of confirmed processes. */
-const MAX_REQUEST_BODY_BYTES = 64 * 1024;
-/** More processes than any agent session starts; a longer list is not a confirmation from the page. */
-const MAX_CONFIRMED_PROCESSES = 512;
 /** Dashboard tabs that may stream at the same time. */
 const MAX_EVENT_STREAMS = 16;
 
 export interface WatchdogServerDeps {
   rootDir: string;
   configManager: GuardConfigManager;
-  watcher: RepoWatcher;
   processMonitor: ProcessMonitor;
   /** Shared session. Pass the one the terminal UI uses so both views stay in sync. */
   session?: WatchdogSession;
-  /** Token every state-changing request must carry. Random per server when omitted. */
-  token?: string;
   /** Additional host name accepted in the `Host` header besides the loopback names. */
   hostname?: string;
 }
@@ -36,7 +27,6 @@ export interface WatchdogServerDeps {
 /** @deprecated Use `StatusSnapshot` from the session module. Kept for existing imports. */
 export type DashboardStatusSnapshot = StatusSnapshot;
 
-export const TOKEN_HEADER = 'x-leash-token';
 export const DEFAULT_PORT = 4321;
 export const DEFAULT_HOSTNAME = '127.0.0.1';
 
@@ -90,17 +80,9 @@ function hostnameOf(hostHeader: string): string {
   return colon === -1 ? value : value.slice(0, colon);
 }
 
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
-}
-
 export function createWatchdogApp(deps: WatchdogServerDeps) {
-  const { rootDir, configManager, watcher, processMonitor } = deps;
-  const session =
-    deps.session ?? new WatchdogSession({ rootDir, configManager, watcher, processMonitor });
-  const token = deps.token ?? randomBytes(24).toString('base64url');
+  const { rootDir, configManager, processMonitor } = deps;
+  const session = deps.session ?? new WatchdogSession({ rootDir, configManager, processMonitor });
   const allowedHosts = new Set(LOOPBACK_HOSTS);
   if (deps.hostname) {
     allowedHosts.add(deps.hostname.toLowerCase());
@@ -121,50 +103,15 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     await next();
   });
 
-  // Every endpoint that changes something must come from the dashboard page itself:
-  // same origin, and carrying the token that only that page was given.
-  const requireDashboardOrigin = (c: Context): Response | null => {
-    const host = c.req.header('host');
-    const origin = c.req.header('origin');
-    if (origin) {
-      let originHost = '';
-      try {
-        originHost = new URL(origin).host.toLowerCase();
-      } catch {
-        originHost = '';
-      }
-      if (!host || originHost !== host.trim().toLowerCase()) {
-        return c.json({ error: 'Forbidden: cross-origin request' }, 403);
-      }
-    }
-    const fetchSite = c.req.header('sec-fetch-site');
-    if (fetchSite && fetchSite !== 'same-origin') {
-      return c.json({ error: 'Forbidden: cross-site request' }, 403);
-    }
-    const presented = c.req.header(TOKEN_HEADER);
-    if (!presented || !safeEqual(presented, token)) {
-      return c.json({ error: 'Forbidden: missing or invalid dashboard token' }, 403);
-    }
-    return null;
-  };
-
+  // A read-only server: no route changes anything. Ending processes and pausing run in the
+  // terminal, where they ask first; a page any local process can load once held the token for
+  // the kill route.
   app.use('/api/*', async (c, next) => {
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
-      const denied = requireDashboardOrigin(c);
-      if (denied) return denied;
+      return c.json({ error: 'This dashboard is read-only; use the terminal to end or pause processes' }, 405);
     }
     await next();
   });
-
-  // Request bodies are a file path or a short list of PIDs. Whoever holds the token could otherwise
-  // make the watchdog read an unbounded body into memory.
-  app.use(
-    '/api/*',
-    bodyLimit({
-      maxSize: MAX_REQUEST_BODY_BYTES,
-      onError: (c) => c.json({ error: 'Request body too large' }, 413),
-    }),
-  );
 
   // --- Routes ---------------------------------------------------------------------------------
 
@@ -172,7 +119,6 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
   app.get('/', (c) => {
     const nonce = randomBytes(16).toString('base64');
     const html = loadDashboardHtml()
-      .replaceAll('__LEASH_TOKEN__', token)
       .replaceAll('__LEASH_VERSION__', getVersion())
       .replaceAll('__LEASH_NONCE__', nonce);
     c.header(
@@ -212,83 +158,6 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     return c.json(getStatusSnapshot());
   });
 
-
-  // Terminate one monitored PID. For an agent, the body may list the processes of its session the
-  // person confirmed in the dialog ({ "also": [{ "pid": 1, "firstSeenAt": 0 }] }); the session ends
-  // only those that still belong to that agent and are still the same process, so a list naming
-  // other processes cannot reach them.
-  app.post('/api/kill/:pid', async (c) => {
-    const pid = Number(c.req.param('pid'));
-    if (!Number.isInteger(pid) || pid <= 0) {
-      return c.json({ error: 'Invalid PID' }, 400);
-    }
-    let also: KillConfirmation[] | undefined;
-    let firstSeenAt: number | undefined;
-    const raw = await c.req.text();
-    if (raw.trim().length > 0) {
-      let body: unknown;
-      try {
-        body = JSON.parse(raw);
-      } catch {
-        return c.json({ error: 'Body must be JSON' }, 400);
-      }
-      const record = body !== null && typeof body === 'object' ? (body as { also?: unknown; firstSeenAt?: unknown }) : {};
-      if (record.firstSeenAt !== undefined) {
-        if (!Number.isFinite(record.firstSeenAt)) {
-          return c.json({ error: 'firstSeenAt must be a number' }, 400);
-        }
-        firstSeenAt = record.firstSeenAt as number;
-      }
-      const list = record.also;
-      if (list !== undefined) {
-        const valid =
-          Array.isArray(list) &&
-          list.length <= MAX_CONFIRMED_PROCESSES &&
-          list.every(
-            (entry) =>
-              entry !== null &&
-              typeof entry === 'object' &&
-              Number.isInteger((entry as KillConfirmation).pid) &&
-              (entry as KillConfirmation).pid > 0 &&
-              Number.isFinite((entry as KillConfirmation).firstSeenAt),
-          );
-        if (!valid) {
-          return c.json({ error: 'also must be a list of { pid, firstSeenAt }' }, 400);
-        }
-        also = (list as KillConfirmation[]).map((entry) => ({ pid: entry.pid, firstSeenAt: entry.firstSeenAt }));
-      }
-    }
-    const result = session.killProcess(pid, { firstSeenAt, also });
-    if (!result.ok) {
-      return c.json({ ok: false, pid, error: result.error, status: getStatusSnapshot() }, 404);
-    }
-    return c.json({ ...result, status: getStatusSnapshot() });
-  });
-
-  // There is deliberately no bulk "kill everything stale" route: the stale/frozen verdict has been
-  // wrong about sessions that were still in use. Processes are terminated one PID, or one agent
-  // session the person chose, at a time.
-
-  // Rollback a single file
-  app.post('/api/rollback-file', async (c) => {
-    const body = await c.req.json<{ filePath?: unknown }>().catch(() => ({ filePath: undefined }));
-    if (typeof body.filePath !== 'string' || body.filePath.length === 0) {
-      return c.json({ error: 'Missing filePath' }, 400);
-    }
-    const restored = session.rollbackFile(body.filePath);
-    return c.json({ ok: restored, filePath: body.filePath, status: getStatusSnapshot() });
-  });
-
-  // Emergency brake: hold the agents of the watched repository (and what they started)
-  app.post('/api/pause', (c) => {
-    const result = session.pause();
-    return c.json({ ok: true, pausedPids: result.pids, status: getStatusSnapshot() });
-  });
-
-  app.post('/api/resume', (c) => {
-    const result = session.resume();
-    return c.json({ ok: true, resumedPids: result.pids, status: getStatusSnapshot() });
-  });
 
   // Live SSE Event Stream
   // The stream is read-only, but every open one holds a listener: a page in another tab could
@@ -347,7 +216,7 @@ export function createWatchdogApp(deps: WatchdogServerDeps) {
     });
   });
 
-  return { app, getStatusSnapshot, session, token };
+  return { app, getStatusSnapshot, session };
 }
 
 export interface StartServerOptions extends WatchdogServerDeps {
@@ -358,7 +227,6 @@ export interface RunningWatchdogServer {
   app: Hono;
   server: Server;
   session: WatchdogSession;
-  token: string;
   port: number;
   hostname: string;
   url: string;
@@ -386,7 +254,7 @@ function closeServer(server: Server): Promise<void> {
  * automatic fallback to the next free port.
  */
 export function startWatchdogServer(options: StartServerOptions) {
-  const { app, session, token } = createWatchdogApp(options);
+  const { app, session } = createWatchdogApp(options);
   const port = options.port ?? DEFAULT_PORT;
   const hostname = options.hostname ?? DEFAULT_HOSTNAME;
 
@@ -396,7 +264,6 @@ export function startWatchdogServer(options: StartServerOptions) {
     app,
     server,
     session,
-    token,
     port,
     hostname,
     url: `http://${displayHost(hostname)}:${port}`,
@@ -418,7 +285,7 @@ export interface ListenServerOptions extends StartServerOptions {
 export async function listenWatchdogServer(
   options: ListenServerOptions,
 ): Promise<RunningWatchdogServer> {
-  const { app, session, token } = createWatchdogApp(options);
+  const { app, session } = createWatchdogApp(options);
   const hostname = options.hostname ?? DEFAULT_HOSTNAME;
   const firstPort = options.port ?? DEFAULT_PORT;
   const attempts = options.strictPort || firstPort === 0 ? 1 : (options.maxPortAttempts ?? 20);
@@ -443,7 +310,6 @@ export async function listenWatchdogServer(
         app,
         server,
         session,
-        token,
         port: actualPort,
         hostname,
         url: `http://${displayHost(hostname)}:${actualPort}`,

@@ -1,12 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  completeInput,
-  parseCommand,
-  resolveModifiedFile,
-  runCommand,
-} from '../src/ui/commands.js';
+import { completeInput, parseCommand, runCommand } from '../src/ui/commands.js';
 import {
   createPalette,
   formatEventLine,
@@ -18,7 +13,7 @@ import {
 } from '../src/ui/format.js';
 import { PlainReporter } from '../src/ui/plain.js';
 import { type FrameView, renderFrame, TerminalUI } from '../src/ui/terminal.js';
-import { cleanupTmpDirs, createHarness, type Harness, read, stripAnsi, writeFiles } from './helpers/harness.js';
+import { cleanupTmpDirs, createHarness, type Harness, stripAnsi } from './helpers/harness.js';
 
 afterEach(() => {
   cleanupTmpDirs();
@@ -27,21 +22,15 @@ afterEach(() => {
 
 const OTHER = '/work/other-repo';
 
-/** A session with two modified files, one stale session elsewhere and one agent in the repo. */
+/** One agent in the repo and one stale session elsewhere. */
 async function busyHarness(): Promise<Harness> {
   const h = createHarness({
-    files: { 'src/app.ts': 'app\n', 'src/api/client.ts': 'client\n', 'README.md': 'readme\n' },
-    watcher: { keepDiscarded: false },
     procs: [
       { pid: 100, name: 'claude', cmd: 'claude --model claude-sonnet-5-5', cpu: 4, rssKb: 220_000, etime: '12:31' },
       { pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, rssKb: 128_000, etime: '11-19:42:10', cpuTimeSec: 1.5 },
     ],
   });
   h.procs[0].cwd = h.dir;
-  h.watcher.createCheckpoint();
-  writeFiles(h.dir, { 'src/app.ts': 'changed\n', 'src/api/client.ts': 'changed\n' });
-  h.watcher.handleFileSystemEvent('change', 'src/app.ts');
-  h.watcher.handleFileSystemEvent('change', 'src/api/client.ts');
   await h.monitor.scan();
   return h;
 }
@@ -59,9 +48,6 @@ describe('command parsing', () => {
     expect(parseCommand('help')).toEqual({ kind: 'help' });
     expect(parseCommand('?')).toEqual({ kind: 'help' });
     expect(parseCommand('status')).toEqual({ kind: 'status' });
-    expect(parseCommand('revert src/app.ts')).toEqual({ kind: 'revert', target: 'src/app.ts' });
-    expect(parseCommand('r "my file.ts"')).toEqual({ kind: 'revert', target: 'my file.ts' });
-    expect(parseCommand('rollback a b.ts')).toEqual({ kind: 'revert', target: 'a b.ts' });
     expect(parseCommand('kill 4711')).toEqual({ kind: 'kill', pid: 4711 });
     expect(parseCommand('k 12')).toEqual({ kind: 'kill', pid: 12 });
     expect(parseCommand('pause')).toEqual({ kind: 'pause' });
@@ -93,14 +79,13 @@ describe('command parsing', () => {
     expect(JSON.stringify(hostile)).not.toContain('\\u001b');
   });
 
-  it('finds the modified file the user means and refuses to guess between several', () => {
-    const files = ['src/app.ts', 'src/api/client.ts', 'tests/app.ts'];
-    expect(resolveModifiedFile('src/app.ts', files)).toEqual({ file: 'src/app.ts' });
-    expect(resolveModifiedFile('./src/app.ts', files)).toEqual({ file: 'src/app.ts' });
-    expect(resolveModifiedFile('client.ts', files)).toEqual({ file: 'src/api/client.ts' });
-    expect(resolveModifiedFile('api', files)).toEqual({ file: 'src/api/client.ts' });
-    expect(resolveModifiedFile('app.ts', files)).toMatchObject({ error: expect.stringContaining('matches 2') });
-    expect(resolveModifiedFile('package.json', files)).toMatchObject({ error: expect.stringContaining('not a file modified') });
+  it('says where a file rollback went instead of rolling anything back', () => {
+    for (const line of ['revert src/app.ts', 'rollback a b.ts', 'undo', 'revert']) {
+      expect(parseCommand(line), line).toEqual({
+        kind: 'invalid',
+        message: 'Files are not watched any more: use git, or the checkpoints of your agent (Claude Code: /rewind).',
+      });
+    }
   });
 });
 
@@ -108,8 +93,6 @@ describe('running commands against a session', () => {
   it('asks before every destructive command and does nothing until the answer is yes', async () => {
     const h = await busyHarness();
 
-    const revert = runCommand(h.session, parseCommand('revert app.ts'));
-    expect(revert.confirm?.prompt).toContain('src/app.ts');
     const kill = runCommand(h.session, parseCommand('kill 300'));
     expect(kill.confirm?.prompt).toContain('PID 300');
     expect(kill.confirm?.prompt).toContain('Its agent session ends.');
@@ -121,10 +104,6 @@ describe('running commands against a session', () => {
 
     // nothing happened yet
     expect(h.kills).toEqual([]);
-    expect(read(h.dir, 'src/app.ts')).toBe('changed\n');
-
-    expect(revert.confirm!.run()).toMatchObject({ level: 'info', message: 'Rolled back src/app.ts' });
-    expect(read(h.dir, 'src/app.ts')).toBe('app\n');
 
     expect(kill.confirm!.run().message).toBe('Sent SIGTERM to PID 300');
     expect(h.kills).toEqual([{ pid: 300, signal: 'SIGTERM' }]);
@@ -132,8 +111,6 @@ describe('running commands against a session', () => {
     expect(pause.confirm!.run().message).toBe('Paused 1 process; type resume to continue');
     expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGSTOP' });
     expect(formatProcessTable(h.session.getSnapshot().processes, createPalette(false, false)).join('\n')).toMatch(/100\s+PAUSED\s+THIS REPO/);
-    // pausing touches no file
-    expect(read(h.dir, 'src/api/client.ts')).toBe('changed\n');
     // continuing is not destructive: no confirmation
     const resumed = runCommand(h.session, parseCommand('resume'));
     expect(resumed.message).toBe('Resumed 1 process');
@@ -197,7 +174,7 @@ describe('running commands against a session', () => {
 
   it('refuses targets that are not on the lists', async () => {
     const h = await busyHarness();
-    for (const line of ['kill 4242', 'revert ../../etc/passwd', 'revert README.md']) {
+    for (const line of ['kill 4242', 'kill 1', 'revert ../../etc/passwd']) {
       const result = runCommand(h.session, parseCommand(line));
       expect(result.level, line).toBe('error');
       expect(result.confirm, line).toBeUndefined();
@@ -215,16 +192,13 @@ describe('running commands against a session', () => {
     expect(runCommand(h.session, parseCommand('help'))).toMatchObject({ showHelp: true });
   });
 
-  it('completes commands, modified files and PIDs', async () => {
+  it('completes commands and PIDs, and nothing for commands that are gone', async () => {
     const h = await busyHarness();
     expect(completeInput(h.session, 'pa').input).toBe('pause ');
-    expect(completeInput(h.session, 'revert src/app').input).toBe('revert src/app.ts');
-    expect(completeInput(h.session, 'revert client').input).toBe('revert src/api/client.ts');
     expect(completeInput(h.session, 'kill 30').input).toBe('kill 300');
-
-    const ambiguous = completeInput(h.session, 'revert src/');
-    expect(ambiguous.input).toBe('revert src/ap');
-    expect(ambiguous.candidates.sort()).toEqual(['src/api/client.ts', 'src/app.ts']);
+    expect(completeInput(h.session, 'kill ').candidates.sort()).toEqual(['100', '300']);
+    expect(completeInput(h.session, 'rev')).toEqual({ input: 'rev', candidates: [] });
+    expect(completeInput(h.session, 'revert src')).toEqual({ input: 'revert src', candidates: [] });
     expect(completeInput(h.session, 'zz')).toEqual({ input: 'zz', candidates: [] });
     expect(completeInput(h.session, 'help x')).toEqual({ input: 'help x', candidates: [] });
   });
@@ -261,10 +235,10 @@ describe('text that reaches the terminal', () => {
 
   it('formats a log line without letting the message break out of it', () => {
     const line = formatEventLine(
-      { id: '1', type: 'file-edit', severity: 'info', timestamp: new Date(2026, 10, 16, 9, 5, 7).getTime(), message: 'ADD: evil\nname\u001b[31m.ts' },
+      { id: '1', type: 'process-alert', severity: 'warn', timestamp: new Date(2026, 10, 16, 9, 5, 7).getTime(), message: 'PID 7 evil\nname\u001b[31m' },
       createPalette(false),
     );
-    expect(line).toBe('09:05:07  INFO  file-edit          ADD: evil?name?[31m.ts');
+    expect(line).toBe('09:05:07  WARN  process-alert      PID 7 evil?name?[31m');
   });
 });
 
@@ -287,36 +261,27 @@ describe('full-screen frame', () => {
     };
   }
 
-  it('shows how many files the limits count, since the last commit in a git repository', async () => {
+  it('shows what the dashboard shows: agents, MCP servers, what is left behind, events and processes', async () => {
     const h = await busyHarness();
-    const base = h.session.getSnapshot();
-    const frame = renderFrame(viewFor(h, { snapshot: { ...base, uncommittedFiles: ['src/app.ts'], countsSinceCommit: true } }));
-    expect(frame.lines.join('\n')).toContain('1 uncommitted');
-    const plain = renderFrame(viewFor(h, { snapshot: { ...base, countsSinceCommit: false } }));
-    expect(plain.lines.join('\n')).toContain(`${base.uncommittedFiles.length} modified`);
-  });
-
-  it('shows what the dashboard shows: files, breaker, events and processes', async () => {
-    const h = await busyHarness();
+    h.session.addEvent({ type: 'monitor-started', message: 'first entry', severity: 'info' });
+    h.session.addEvent({ type: 'process-alert', message: 'second entry', severity: 'warn' });
     const frame = renderFrame(viewFor(h));
     const screen = frame.lines.join('\n');
 
     expect(frame.lines).toHaveLength(34);
     expect(screen).toContain('agent-leash v9.9.9');
-    expect(screen).not.toMatch(/\bmode\b|balanced/i);
+    expect(screen).not.toMatch(/\bmode\b|balanced|modified|uncommitted|breaker|checkpoint/i);
     expect(screen).toContain('dashboard http://localhost:4321');
-    expect(screen).toContain('2 modified');
-    expect(screen).toContain('warn 15 · stop 40');
-    expect(screen).toContain('armed');
-    expect(screen).toContain('2 monitored');
-    expect(screen).toContain('1 stale/frozen');
-    expect(screen).toContain('CHANGE: src/app.ts (1/5 edits/min)');
+    expect(screen).toMatch(/AGENTS\s+2 sessions\s+340 MB/);
+    expect(screen).toMatch(/MCP\s+0 servers/);
+    expect(screen).toContain('LEFT BEHIND 1 stale/frozen · 125 MB');
+    expect(screen).toContain('nothing held');
     expect(screen).toMatch(/300\s+STALE\s+ELSEWHERE\s+125\.0 MB\s+11d 19h/);
     expect(screen).toMatch(/100\s+ACTIVE\s+THIS REPO/);
     expect(screen).not.toMatch(/safe to kill|reclaimable/i);
     expect(screen).toContain('10:31:02');
     // oldest event first, like a log
-    expect(screen.indexOf('checkpoint-created')).toBeLessThan(screen.indexOf('src/api/client.ts'));
+    expect(screen.indexOf('first entry')).toBeLessThan(screen.indexOf('second entry'));
   });
 
   it('never produces a line wider than the terminal, at any size', async () => {
@@ -332,34 +297,18 @@ describe('full-screen frame', () => {
     }
   });
 
-  it('cannot be hijacked by file names or command lines', async () => {
+  it('cannot be hijacked by command lines, directories or log messages', async () => {
     const h = createHarness({
-      files: { 'a.ts': 'a\n' },
       procs: [{ pid: 7, name: 'node', cmd: 'node mcp-server \u001b[2J\u001b[31mHACKED\u0007', cwd: '/tmp/\u001b]0;title\u0007', etime: '10:00' }],
     });
-    h.watcher.createCheckpoint();
-    h.watcher.handleFileSystemEvent('add', 'evil\u001b[2J\u001b[1;1H\rname.ts');
     await h.monitor.scan();
+    h.session.addEvent({ type: 'process-alert', message: 'evil\u001b[2J\u001b[1;1H\rname', severity: 'warn' });
 
     const frame = renderFrame(viewFor(h));
     for (const line of frame.lines) {
       expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
     }
-    expect(frame.lines.join('\n')).toContain('evil?[2J?[1;1H?name.ts');
-  });
-
-  it('makes alarms unmissable: tripped breaker and hard stop', () => {
-    const files: Record<string, string> = {};
-    for (let i = 0; i < 41; i++) files[`f${i}.ts`] = 'x\n';
-    const h = createHarness({ files });
-    h.watcher.createCheckpoint();
-    for (let i = 0; i < 41; i++) h.watcher.handleFileSystemEvent('change', `f${i}.ts`);
-    for (let i = 0; i < 6; i++) h.watcher.handleFileSystemEvent('change', 'f0.ts');
-
-    const screen = renderFrame(viewFor(h)).lines.join('\n');
-    expect(screen).toContain('HARD STOP limit reached');
-    expect(screen).toContain('TRIPPED (1)');
-    expect(screen).toContain('f0.ts');
+    expect(frame.lines.join('\n')).toContain('evil?[2J?[1;1H?name');
   });
 
   it('shows the confirmation prompt, notices, help and the full process list', async () => {
@@ -374,7 +323,8 @@ describe('full-screen frame', () => {
     expect(notice.cursor).toEqual({ row: 34, col: 11 });
 
     const help = renderFrame(viewFor(h, { overlay: 'help' })).lines.join('\n');
-    expect(help).toContain('revert <file>');
+    expect(help).toContain('kill <pid>');
+    expect(help).not.toContain('revert');
     expect(help).toContain('always ask before they act');
     expect(help).not.toContain('ACTIVITY');
 
@@ -541,22 +491,6 @@ describe('interactive terminal view', () => {
     ui.stop();
   });
 
-  it.skipIf(process.platform === 'win32')('never writes control sequences from a completed file name to the terminal', async () => {
-    const h = createHarness({ files: { 'a.ts': 'a\n' } });
-    h.watcher.createCheckpoint();
-    // a file name an agent chose: it would set the window title and clear the screen
-    const hostile = 'evil\u001b]0;pwned\u0007\u001b[2J.ts';
-    writeFiles(h.dir, { [hostile]: 'x\n' });
-    h.watcher.handleFileSystemEvent('add', hostile);
-    const { tty, ui, type } = await startUi(h);
-    type('revert ev\t');
-    const output = tty.written.join('');
-    expect(output).not.toContain('\u001b]0;pwned');
-    expect(output).not.toContain('\u0007');
-    expect(tty.screen).toContain('revert evil');
-    ui.stop();
-  });
-
   it('asks y/N before destructive commands and treats everything but y as no', async () => {
     const { tty, ui, type, h } = await startUi();
     type('kill 300\r');
@@ -578,10 +512,11 @@ describe('interactive terminal view', () => {
     expect(h.kills).toEqual([{ pid: 300, signal: 'SIGTERM' }]);
     expect(tty.screen).toContain('Sent SIGTERM to PID 300');
 
-    type('revert app\t\r');
-    expect(tty.screen).toContain('? Roll src/app.ts back to the version before its latest changes?');
+    type('pause\r');
     type('Y');
-    expect(read(h.dir, 'src/app.ts')).toBe('app\n');
+    expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGSTOP' });
+    type('resume\r');
+    expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGCONT' });
     ui.stop();
   });
 
@@ -604,11 +539,9 @@ describe('interactive terminal view', () => {
   it('redraws when the session changes and when the window is resized', async () => {
     vi.useFakeTimers();
     const { tty, ui, h } = await startUi();
-    writeFiles(h.dir, { 'README.md': 'changed\n' });
-    h.watcher.handleFileSystemEvent('change', 'README.md');
+    h.session.addEvent({ type: 'process-alert', message: 'PID 300 looks left behind', severity: 'warn' });
     await vi.advanceTimersByTimeAsync(60);
-    expect(tty.screen).toContain('CHANGE: README.md');
-    expect(tty.screen).toContain('3 modified');
+    expect(tty.screen).toContain('PID 300 looks left behind');
 
     tty.columns = 62;
     tty.rows = 14;
@@ -640,29 +573,28 @@ describe('plain output', () => {
     return { lines, input, onExit, reporter, send };
   }
 
-  it('prints one line per event, including ordinary file edits', () => {
-    const h = createHarness({ files: { 'a.ts': 'a\n', '.env': 'S=1\n' } });
+  it('prints one line per event', () => {
+    const h = createHarness();
     const { lines, reporter } = startPlain(h);
-    h.watcher.createCheckpoint();
-    h.watcher.handleFileSystemEvent('change', 'a.ts');
-    h.watcher.handleFileSystemEvent('change', '.env');
+    h.session.addEvent({ type: 'monitor-started', message: 'Watching', severity: 'info' });
+    h.session.addEvent({ type: 'process-alert', message: 'PID 7 is frozen', severity: 'warn' });
 
-    expect(lines).toHaveLength(3);
-    expect(lines[1]).toMatch(/^\d\d:\d\d:\d\d {2}INFO {2}file-edit {10}CHANGE: a\.ts \(1\/5 edits\/min\)$/);
-    expect(lines[2]).toMatch(/WARN {2}protected-file/);
+    expect(lines.slice(-2)[0]).toMatch(/^\d\d:\d\d:\d\d {2}INFO {2}monitor-started {4}Watching$/);
+    expect(lines.slice(-2)[1]).toMatch(/WARN {2}process-alert {6}PID 7 is frozen$/);
+    const count = lines.length;
     reporter.stop();
-    h.watcher.handleFileSystemEvent('change', 'a.ts');
-    expect(lines).toHaveLength(3);
+    h.session.addEvent({ type: 'process-alert', message: 'after stop', severity: 'warn' });
+    expect(lines).toHaveLength(count);
   });
 
-  it('keeps quiet about routine edits when asked to', () => {
-    const h = createHarness({ files: { 'a.ts': 'a\n', '.env': 'S=1\n' } });
+  it('prints only warnings and critical events when asked to keep quiet', () => {
+    const h = createHarness();
     const { lines } = startPlain(h, { quiet: true });
-    h.watcher.createCheckpoint();
-    h.watcher.handleFileSystemEvent('change', 'a.ts');
-    h.watcher.handleFileSystemEvent('change', '.env');
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('protected-file');
+    const before = lines.length;
+    h.session.addEvent({ type: 'monitor-started', message: 'Watching', severity: 'info' });
+    h.session.addEvent({ type: 'process-alert', message: 'PID 7 is frozen', severity: 'warn' });
+    expect(lines.slice(before)).toHaveLength(1);
+    expect(lines.at(-1)).toContain('process-alert');
   });
 
   it('names every process of an agent session before it asks', async () => {
@@ -687,7 +619,7 @@ describe('plain output', () => {
     await send('status\n');
     expect(lines.join('\n')).toMatch(/300\s+STALE\s+ELSEWHERE/);
     await send('help\n');
-    expect(lines.join('\n')).toContain('revert <file>');
+    expect(lines.join('\n')).toContain('kill <pid>');
     await send('nonsense\n');
     expect(lines.at(-1)).toContain('Unknown command');
 
@@ -715,14 +647,14 @@ describe('plain output', () => {
   });
 
   it('keeps running when its input ends', async () => {
-    const h = createHarness({ files: { 'a.ts': 'a\n' } });
+    const h = createHarness();
     const { lines, input, onExit } = startPlain(h);
     input.end();
     await new Promise((resolve) => setImmediate(resolve));
 
-    h.watcher.createCheckpoint();
-    h.watcher.handleFileSystemEvent('change', 'a.ts');
+    const before = lines.length;
+    h.session.addEvent({ type: 'process-alert', message: 'still here', severity: 'warn' });
     expect(onExit).not.toHaveBeenCalled();
-    expect(lines.length).toBe(2);
+    expect(lines.length).toBe(before + 1);
   });
 });
