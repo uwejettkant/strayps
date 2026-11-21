@@ -1,4 +1,4 @@
-import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
+import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -244,6 +244,43 @@ describe('strayps CLI', () => {
 
 describe('strayps config', () => {
   const configFile = (dir: string) => path.join(dir, '.strayps.json');
+
+  it('says that an .agentguard.json from agent-leash is ignored, without opening it', async () => {
+    const dir = makeTmpDir();
+    writeFiles(dir, { '.agentguard.json': '{"limits":{"mcpSilenceTimeoutSec":90},"note":"private-marker"}' });
+
+    const show = runCli(['config', dir]);
+    expect(await show.exit).toEqual({ code: 0, signal: null });
+    expect(show.output()).toContain('.agentguard.json is from agent-leash; strayps does not read it: rename it to .strayps.json to keep its values.');
+    expect(show.output()).toMatch(/limits\.mcpSilenceTimeoutSec = 45 {2}\(default\)/);
+    expect(show.output()).not.toContain('private-marker');
+
+    const init = runCli(['init', dir]);
+    expect(await init.exit).toEqual({ code: 0, signal: null });
+    expect(init.output()).toContain('carry over what you still need with "strayps config set"');
+
+    const clean = runCli(['config', makeTmpDir()]);
+    await clean.exit;
+    expect(clean.output()).not.toContain('agentguard');
+  });
+
+  it('never opens .agentguard.json: a FIFO there would make an open hang', async () => {
+    const dir = makeTmpDir();
+    execFileSync('mkfifo', [path.join(dir, '.agentguard.json')]);
+    const show = runCli(['config', dir]);
+    expect(await show.exit).toEqual({ code: 0, signal: null });
+    expect(show.output()).toContain('.agentguard.json is from agent-leash; strayps does not read it');
+  });
+
+  it('says nothing about .agentguard.json in the demo, which looks at no file but .strayps.json', async () => {
+    const dir = makeTmpDir();
+    writeFiles(dir, { '.agentguard.json': '{}' });
+    const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
+    await run.waitFor('Commands:');
+    expect(run.output()).not.toContain('agentguard');
+    run.child.kill('SIGINT');
+    await run.exit;
+  });
 
   it('shows every setting with its value and where it comes from, without creating a file', async () => {
     const dir = makeTmpDir();

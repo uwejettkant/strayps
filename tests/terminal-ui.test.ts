@@ -6,6 +6,7 @@ import {
   createPalette,
   formatEventLine,
   formatProcessTable,
+  outputWidth,
   sanitize,
   shouldUseColor,
   truncate,
@@ -313,6 +314,68 @@ describe('full-screen frame', () => {
     expect(screen).toMatch(/MCP\s+1 server\s+~16 MB/);
     expect(screen).toContain('2 monitored · ~116 MB');
     expect(renderFrame(viewFor(h, { overlay: 'help' })).lines.join('\n')).toContain('~ marks RSS');
+  });
+
+  async function hostedHarness(): Promise<Harness> {
+    const h = createHarness({
+      procs: [
+        // on macOS the name is the full path of the executable, spaces included
+        { pid: 10, ppid: 1, name: '/Applications/Visual Studio Code.app/Contents/MacOS/Code', cmd: '/Applications/Visual Studio Code.app/Contents/MacOS/Code' },
+        {
+          pid: 100, ppid: 10, name: 'claude', etime: '12:31', rssKb: 220_000,
+          cmd: `claude --model claude-sonnet-5-5 --append-system-prompt ${'x'.repeat(160)}`,
+        },
+        { pid: 105, ppid: 100, name: 'sleep', cmd: 'sleep 300', etime: '01:00', rssKb: 1_000 },
+      ],
+    });
+    h.procs[1].cwd = h.dir;
+    h.procs[2].cwd = h.dir;
+    await h.monitor.scan();
+    return h;
+  }
+
+  it('marks what an agent started, and keeps the app label when a long row is cut', async () => {
+    const h = await hostedHarness();
+    const rowOf = (lines: string[], pid: number) => lines.find((line) => line.trimStart().startsWith(`${pid} `)) ?? '';
+    for (const lines of [
+      renderFrame(viewFor(h, { cols: 100 })).lines,
+      renderFrame(viewFor(h, { cols: 70 })).lines,
+      formatProcessTable(h.session.getSnapshot().processes, createPalette(false), 100),
+    ]) {
+      expect(rowOf(lines, 100)).toMatch(/\bagent\s+claude --model/);
+      expect(rowOf(lines, 100)).toMatch(/… \[VS Code\]$/);
+      expect(rowOf(lines, 105)).toMatch(/\bchild\s+sleep 300/);
+    }
+    // too narrow for a readable command: the label gives way
+    const tight = renderFrame(viewFor(h, { cols: 40 })).lines;
+    expect(rowOf(tight, 100)).not.toContain('[VS Code]');
+  });
+
+  it('takes the width of piped output from COLUMNS', () => {
+    expect(outputWidth({ columns: 90 }, { COLUMNS: '250' })).toBe(90);
+    expect(outputWidth({}, { COLUMNS: '250' })).toBe(250);
+    expect(outputWidth({}, { COLUMNS: 'wide' })).toBe(120);
+    expect(outputWidth({}, {})).toBe(120);
+  });
+
+  it('shows processes in small terminals, and gives log rows it cannot fill to them', async () => {
+    const h = await busyHarness();
+    h.session.addEvent({ type: 'monitor-started', message: 'only entry', severity: 'info' });
+    // 58x12: the small layout once showed the log and no process at all
+    const small = renderFrame(viewFor(h, { cols: 58, rows: 12 })).lines.join('\n');
+    expect(small).toContain('only entry');
+    expect(small).toMatch(/100\s+ACTIVE/);
+    expect(small).toMatch(/300\s+STALE/);
+
+    // 90x20 with two events and five processes: the log once kept blank rows while the list said "… 3 more"
+    for (const pid of [301, 302, 303]) {
+      h.procs.push({ pid, name: 'claude', cmd: 'claude', cwd: OTHER, rssKb: 10_000, etime: '10:00' });
+    }
+    await h.monitor.scan();
+    const medium = renderFrame(viewFor(h, { cols: 90, rows: 20, snapshot: h.session.getSnapshot() })).lines.join('\n');
+    expect(medium).toContain('only entry');
+    for (const pid of [100, 300, 301, 302, 303]) expect(medium).toMatch(new RegExp(`\\b${pid}\\s+(ACTIVE|IDLE|STALE)`));
+    expect(medium).not.toContain('more — type status');
   });
 
   it('never produces a line wider than the terminal, at any size', async () => {

@@ -28,6 +28,30 @@ export interface ConfigManagerOptions {
 
 export const CONFIG_FILENAME = '.strayps.json';
 
+/** The file agent-leash read before the rename. strayps never opens it. */
+export const LEGACY_CONFIG_FILENAME = '.agentguard.json';
+
+/**
+ * A line for the user when a repository still has agent-leash's config file, which strayps
+ * ignores. Only `lstat`: the file is never opened, so nothing in it is read or quoted, and a link
+ * there is never followed (scenario pass, 20.11.2026: it was ignored without a word).
+ */
+export function legacyConfigNotice(rootDir: string): string | null {
+  const there = (name: string): boolean => {
+    try {
+      fs.lstatSync(path.join(path.resolve(rootDir), name));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!there(LEGACY_CONFIG_FILENAME)) return null;
+  const next = there(CONFIG_FILENAME)
+    ? `carry over what you still need with "strayps config set", then the old file can go.`
+    : `rename it to ${CONFIG_FILENAME} to keep its values.`;
+  return `${LEGACY_CONFIG_FILENAME} is from agent-leash; strayps does not read it: ${next}`;
+}
+
 export const DEFAULT_CONFIG: StraypsConfig = {
   agents: [],
   limits: {

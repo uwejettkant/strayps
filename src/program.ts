@@ -10,6 +10,7 @@ import {
   type ConfigKey,
   ConfigManager,
   type ConfigLimits,
+  legacyConfigNotice,
   parseConfigValue,
   resolveConfigKey,
   writeConfigValue,
@@ -22,6 +23,7 @@ import {
   createPalette,
   formatClock,
   formatStatusReport,
+  outputWidth,
   type Palette,
   sanitize,
   shouldUseColor,
@@ -189,6 +191,8 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   // The demo never writes, not even the config file
   const configManager = new ConfigManager(rootDir, undefined, { readOnly: demo });
   const cfg = configManager.getConfig();
+  // The demo looks at no file but .strayps.json, not even to see whether one is there
+  const legacyNotice = demo ? null : legacyConfigNotice(rootDir);
 
   let demoProcesses = demo ? createDemoProcesses(rootDir) : [];
   const processMonitor = new ProcessMonitor({
@@ -316,6 +320,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     for (const warning of configManager.getWarnings()) {
       session.addEvent({ type: 'config-reload', message: `${CONFIG_FILENAME}: ${warning}`, severity: 'warn' });
     }
+    if (legacyNotice) session.addEvent({ type: 'config-reload', message: legacyNotice, severity: 'info' });
     ui.start();
     return;
   }
@@ -337,6 +342,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     // Warnings quote keys and values from the file, which the watched agent can write
     out(palette.warn(`  Config:      ${CONFIG_FILENAME}: ${sanitize(warning)}`));
   }
+  if (legacyNotice) out(`  Config:      ${legacyNotice}`);
   if (wantsTui && !foreground) {
     out(palette.dim('  Running as a background job: live view and commands are off, stop with "kill -TERM".'));
   } else if (readsInput) {
@@ -350,7 +356,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     input: readsInput ? process.stdin : undefined,
     quiet: Boolean(options.quiet),
     color,
-    width: process.stdout.columns ?? 120,
+    width: outputWidth(process.stdout),
     onExit: (reason) => void shutdown(reason),
   });
   reporter.start();
@@ -371,7 +377,7 @@ async function runStatus(dir: string): Promise<void> {
 
   const palette = createPalette(shouldUseColor(process.stdout), supportsTruecolor());
   const snapshot = session.getSnapshot();
-  const width = process.stdout.columns ?? 120;
+  const width = outputWidth(process.stdout);
   const report = formatStatusReport(snapshot, palette, width);
 
   process.stdout.write(`\n${palette.accent('strayps status')}\n${report.join('\n')}\n\n`);
@@ -401,8 +407,10 @@ function runConfigShow(dir: string): void {
     manager.hasConfigFile()
       ? `  ${CONFIG_FILENAME} found; values marked (file) come from it, all others are built-in defaults.`
       : `  No ${CONFIG_FILENAME} here; every value is a built-in default.`,
-    '',
   ];
+  const legacy = legacyConfigNotice(rootDir);
+  if (legacy) lines.push(palette.warn(`  ${legacy}`));
+  lines.push('');
   for (const key of CONFIG_KEYS) {
     const source = sources[key];
     const sourceLabel = source === 'default' ? palette.dim('(default)') : palette.ok(`(${source})`);
@@ -488,6 +496,8 @@ function runInit(dir: string, options: { force?: boolean }): void {
   const manager = new ConfigManager(rootDir);
   const writtenPath = manager.saveConfig();
   process.stdout.write(`Created ${writtenPath} with the default settings.\n`);
+  const legacy = legacyConfigNotice(rootDir);
+  if (legacy) process.stdout.write(`${legacy}\n`);
 }
 
 export function createCliProgram(): Command {

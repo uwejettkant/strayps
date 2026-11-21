@@ -8,6 +8,7 @@ import {
   padStart,
   type Palette,
   processTotals,
+  rowText,
   sanitize,
   severityStyle,
   statusStyle,
@@ -160,25 +161,36 @@ function processRows(view: FrameView, count: number): Seg[][] {
     return [[seg('   No agent or MCP processes found.', p.dim)]];
   }
 
+  const cols = Math.max(20, view.cols);
+  const memory = (proc: (typeof procs)[number]) =>
+    formatMemory(proc.memoryMb, proc.memorySource !== 'footprint');
+  // Below this the wide layout leaves the command fewer than 16 characters: then the narrow one
+  // drops WHERE, AGE and CPU (scenario pass, 20.11.2026: at 58 columns no row said which program)
+  const narrow = cols < 79;
   const header: Seg[] = [
     seg(
-      ` ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('WHERE', 13)} ${padStart('RAM', 9)} ${padStart('AGE', 8)} ${padStart('CPU', 6)}  COMMAND · CWD`,
+      narrow
+        ? ` ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padStart('RAM', 9)}  ${padEnd('KIND', 5)}  COMMAND · CWD`
+        : ` ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('WHERE', 10)} ${padStart('RAM', 9)} ${padStart('AGE', 8)} ${padStart('CPU', 6)}  ${padEnd('KIND', 5)}  COMMAND · CWD`,
       p.dim,
     ),
   ];
   const row = (proc: (typeof procs)[number]): Seg[] => {
-    const where = proc.cwd ? ` · ${sanitize(proc.cwd)}` : '';
-    const host = proc.host && proc.host !== 'detached' ? ` [${sanitize(proc.host)}]` : '';
-    return [
+    const start: Seg[] = [
       seg(` ${padEnd(String(proc.pid), 7)} `, p.strong),
       seg(padEnd(proc.paused ? 'PAUSED' : proc.status, 8), proc.paused ? p.warn : statusStyle(p, proc)),
-      seg(` ${padEnd(whereLabel(proc), 13)}`, p.dim),
-      seg(
-        ` ${padStart(formatMemory(proc.memoryMb, proc.memorySource !== 'footprint'), 9)} ${padStart(sanitize(proc.uptime), 8)} ${padStart(`${proc.cpu.toFixed(1)}%`, 6)}  `,
-      ),
-      seg(sanitize(proc.cmd)),
-      seg(`${where}${host}`, p.dim),
+      ...(narrow
+        ? [seg(` ${padStart(memory(proc), 9)}  `)]
+        : [
+            seg(` ${padEnd(whereLabel(proc), 10)}`, p.dim),
+            seg(
+              ` ${padStart(memory(proc), 9)} ${padStart(sanitize(proc.uptime), 8)} ${padStart(`${proc.cpu.toFixed(1)}%`, 6)}  `,
+            ),
+          ]),
+      seg(`${padEnd(proc.category, 5)}  `, p.dim),
     ];
+    const { command, rest } = rowText(proc, Math.max(1, cols - segLength(start)));
+    return [...start, seg(command), seg(rest, p.dim)];
   };
   const more = (hidden: number): Seg[] => [
     seg(`   … ${hidden} more — type status to list all`, p.dim),
@@ -190,7 +202,7 @@ function processRows(view: FrameView, count: number): Seg[][] {
   }
   // Tight: real rows matter more than the column header
   if (count === 1) {
-    return [more(procs.length)];
+    return procs.length === 1 ? [row(procs[0])] : [more(procs.length)];
   }
   const withHeader = count >= 4;
   const rowCount = count - 1 - (withHeader ? 1 : 0);
@@ -199,6 +211,23 @@ function processRows(view: FrameView, count: number): Seg[][] {
     ...procs.slice(0, rowCount).map(row),
     more(procs.length - rowCount),
   ];
+}
+
+/**
+ * Splits `room` rows between the activity log and the process list. Neither keeps rows it cannot
+ * fill while the other needs them; when both need more, the processes get the larger half
+ * (scenario pass, 20.11.2026: blank log rows next to "… 3 more").
+ */
+function splitRows(view: FrameView, room: number): { activity: number; processes: number } {
+  // One or two rows: the newest events, as before. A process list that small says only "… N
+  // more", and the log can hold a warning that .strayps.json changed (safety review, 21.11.2026)
+  if (room < 3) return { activity: Math.max(0, room), processes: 0 };
+  const { processes, events } = view.snapshot;
+  const wantedProcesses = processes.length === 0 ? 1 : processes.length + 1;
+  const wantedActivity = Math.max(1, events.length);
+  const activity = Math.min(wantedActivity, Math.floor(room / 2));
+  const procRows = Math.min(wantedProcesses, room - activity);
+  return { activity: room - procRows, processes: procRows };
 }
 
 function processOverlayRows(view: FrameView, available: number): Seg[][] {
@@ -333,11 +362,13 @@ export function renderFrame(view: FrameView): Frame {
   } else if (view.overlay === 'processes') {
     body.push(...processOverlayRows(view, available));
   } else if (available < 8 || cols < 60) {
-    // Small terminal: one status line and the newest events
+    // Small terminal: one status line, the newest events and as many processes as fit
     if (available >= 1) {
       body.push(compactMetrics(view));
     }
-    body.push(...activityRows(view, available - 1));
+    const split = splitRows(view, available - 1);
+    body.push(...activityRows(view, split.activity));
+    body.push(...processRows(view, split.processes));
   } else {
     const cells = metricCells(view);
     let metrics: Seg[][] =
@@ -356,10 +387,9 @@ export function renderFrame(view: FrameView): Frame {
     // metrics + blank + two section titles + blank between sections
     const chrome = metrics.length + 1 + 1 + 1 + 1;
     const flexible = Math.max(2, available - chrome);
-    const wantedProcRows =
-      snapshot.processes.length === 0 ? 1 : snapshot.processes.length + 1;
-    const procRowCount = Math.min(wantedProcRows, Math.max(2, Math.floor(flexible / 2)));
-    const activityRowCount = Math.max(1, flexible - procRowCount);
+    const split = splitRows(view, flexible);
+    const procRowCount = Math.max(1, split.processes);
+    const activityRowCount = Math.max(1, split.activity);
 
     body.push(...metrics);
     body.push([seg('')]);

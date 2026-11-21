@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CONFIG_FILENAME, DEFAULT_CONFIG, ConfigManager, writeConfigValue } from '../src/core/config.js';
+import { CONFIG_FILENAME, DEFAULT_CONFIG, ConfigManager, legacyConfigNotice, writeConfigValue } from '../src/core/config.js';
 import { cleanupTmpDirs, makeTmpDir, writeFiles } from './helpers/harness.js';
 
 afterEach(cleanupTmpDirs);
@@ -13,6 +13,20 @@ function managerWith(config: unknown): ConfigManager {
 }
 
 describe('.strayps.json', () => {
+  it('notices an .agentguard.json of agent-leash by its name alone', () => {
+    const dir = makeTmpDir();
+    expect(legacyConfigNotice(dir)).toBeNull();
+
+    // a link to nowhere: only lstat can see it, so the notice proves the link was not followed
+    fs.symlinkSync(path.join(dir, 'missing-target.json'), path.join(dir, '.agentguard.json'));
+    expect(legacyConfigNotice(dir)).toBe(
+      '.agentguard.json is from agent-leash; strayps does not read it: rename it to .strayps.json to keep its values.',
+    );
+
+    writeFiles(dir, { [CONFIG_FILENAME]: '{}' });
+    expect(legacyConfigNotice(dir)).toContain('carry over what you still need with "strayps config set"');
+  });
+
   it('loads a valid file without warnings', () => {
     const manager = managerWith({ agents: ['vibe', 'opencode'], limits: { mcpSilenceTimeoutSec: 120, staleSessionHours: 24 } });
     expect(manager.getWarnings()).toEqual([]);

@@ -6,7 +6,7 @@
 
 **See every AI coding agent and MCP server running on your machine, find the ones left behind, and end them one session at a time. Local only: no account, no telemetry.**
 
-[![package size](https://img.shields.io/badge/package-61.2%20kB-5BE49B?style=flat-square&labelColor=0D120F)](#)
+[![package size](https://img.shields.io/badge/package-64.2%20kB-5BE49B?style=flat-square&labelColor=0D120F)](#)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-5BE49B?style=flat-square&logo=typescript&labelColor=0D120F)](./tsconfig.json)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20%20LTS-5BE49B?style=flat-square&logo=node.js&labelColor=0D120F)](./package.json)
 [![Local](https://img.shields.io/badge/privacy-local%20only%20%C2%B7%20no%20account%20%C2%B7%20no%20telemetry-5BE49B?style=flat-square&labelColor=0D120F)](#security-model)
@@ -54,7 +54,7 @@ Stop it by typing `exit` (or `q`, or Ctrl+C).
 
 ## Finding Processes Left Behind
 
-Each row shows the process, its working directory, the app or terminal it is attached to (VS Code, Claude Desktop, a terminal …), its age, its memory, and a status. Memory is the physical footprint, the value Activity Monitor shows; where it cannot be read (on Linux, or for another user's process) the resident size (RSS) stands in, marked with `~` because it can be far off in both directions:
+Each row shows the process, what kind it is (`agent`, `mcp` or `child`), its working directory, the app or terminal it is attached to (VS Code, Claude Desktop, a terminal …), its age, its memory, and a status. Where a row is too long, the command and the directory are cut before the app is. Piped into a file, `status` is 120 characters wide, or as wide as `COLUMNS` says. Memory is the physical footprint, the value Activity Monitor shows; where it cannot be read (on Linux, or for another user's process) the resident size (RSS) stands in, marked with `~` because it can be far off in both directions:
 
 | Status | What strayps observed |
 | :--- | :--- |
@@ -76,7 +76,7 @@ strayps keeps no list of AI products, and it does not care which model an agent 
 2. **By name**, for the agents that come built in: `claude`, `codex` and `aider`, matched by their exact program name, never as part of another name.
 3. **By your list**, for any other agent: `strayps config set agents vibe,opencode`.
 
-Besides agents and MCP servers, the list shows what an agent started and is still running: a dev server, a test watcher, a browser its MCP server opened. These rows are marked `child`, and they are found through the process tree, not by name: a dev server or a browser you started yourself is not listed. Short tool calls (a shell, `git`, `rg`) appear only once they run for more than a few seconds.
+Besides agents and MCP servers, the list shows what an agent started and is still running: a dev server, a test watcher, a browser its MCP server opened. These rows are of the kind `child`, and they are found through the process tree, not by name: a dev server or a browser you started yourself is not listed. Short tool calls (a shell, `git`, `rg`) appear only once they run for more than a few seconds.
 
 ### What strayps cannot see
 
@@ -152,7 +152,7 @@ strayps init                              # or write a file with every default, 
 | `limits.staleSessionHours` | `6` | Hours after which a session in another repository counts as stale, if in ten minutes of watching it also started no new process and used less than 8 s of CPU time |
 | `agents` | none | More program names to treat as coding agents, e.g. `vibe`. Not needed for agents that start MCP servers, nor for Claude Code, Codex and Aider ([how agents are recognized](#which-processes-count-as-agents)) |
 
-**Changes apply while strayps runs.** A saved change is picked up within about a second, whether it comes from `config set` or from your editor, and the activity log says what changed, for example `.strayps.json reloaded: limits.staleSessionHours 6 → 12`. Reloads are logged as warnings, so they also show with `--quiet`: an agent can write this file as easily as you can. An edit that is not valid (broken JSON, a limit below 1) is not applied at all; the previous settings stay and the log says why. At startup, an invalid value falls back to its default with a warning. strayps was called agent-leash before and read `.agentguard.json`; that file is not read any more. Rename it to `.strayps.json` to keep its values: keys that no longer exist (`protectedFiles`, the file limits) are ignored with a notice.
+**Changes apply while strayps runs.** A saved change is picked up within about a second, whether it comes from `config set` or from your editor, and the activity log says what changed, for example `.strayps.json reloaded: limits.staleSessionHours 6 → 12`. Reloads are logged as warnings, so they also show with `--quiet`: an agent can write this file as easily as you can. An edit that is not valid (broken JSON, a limit below 1) is not applied at all; the previous settings stay and the log says why. At startup, an invalid value falls back to its default with a warning. strayps was called agent-leash before and read `.agentguard.json`; that file is not read any more, and `watch` (except with `--demo`), `config show` and `init` say so when they find one (they only check that it is there, without opening it). Rename it to `.strayps.json` to keep its values: keys that no longer exist (`protectedFiles`, the file limits) are ignored with a notice.
 
 The process list is always machine-wide. The repository you start strayps in only decides which agents count as `THIS REPO` (what `pause` holds) and which sessions count as being in another repository.
 
@@ -200,7 +200,7 @@ console.log(dashboard.url);
 
 - The dashboard server binds to `127.0.0.1`, answers only when addressed as this machine, and changes nothing: every request that is not a read is refused. A web page on another site cannot open its live stream.
 - Only processes from the monitored list can be terminated, and only from the terminal: one process, or one agent with the processes it started, exactly as the confirmation listed them. `pause` holds only the agents of the repository strayps was started in and the processes they started, and strayps continues them when it exits: by `exit`, Ctrl+C, SIGTERM, SIGHUP, SIGQUIT, or a crash in its own code. Ended by a signal it does not handle (`kill -9`, or a rarely used one such as SIGUSR2 or SIGALRM), or by a fatal error of Node itself (out of memory), it cannot run anything, and the held processes stay stopped: `kill -CONT <pid>` continues them.
-- The only file strayps reads in a repository is `.strayps.json`, and only when it is a plain file (never through a symbolic or hard link). It writes that file only on `init`, `config set` and `config unset`. To read memory on macOS it runs `/usr/bin/footprint`, which writes its result into a private temporary directory that strayps removes right after; `ps`, `lsof` and `footprint` are run by their full paths there, so a program of the same name in a repository's `node_modules/.bin` is never run instead.
+- The only file strayps reads in a repository is `.strayps.json`, and only when it is a plain file (never through a symbolic or hard link). It writes that file only on `init`, `config set` and `config unset`. Of an old `.agentguard.json` it only checks whether it is there, without opening it. To read memory on macOS it runs `/usr/bin/footprint`, which writes its result into a private temporary directory that strayps removes right after; `ps`, `lsof` and `footprint` are run by their full paths there, so a program of the same name in a repository's `node_modules/.bin` is never run instead.
 - Command lines, directories and log messages are treated as untrusted text in the dashboard and in the terminal. Values that look like secrets in command lines (`--token`, `--api-key`, `--password`, `API_KEY=…`, credentials in URLs) are shown as `[redacted]`.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
 - Known limits: any local process, another user account included, can read the dashboard: it shows command lines (with secrets redacted) and directories. The agents you watch can edit `.strayps.json`; a running strayps applies the edit and logs it as a warning. The dashboard loads nothing from another host: its styles are generated when the package is built and served by strayps itself. It needs a current browser (Chrome 111, Safari 16.4, Firefox 128 or newer).
@@ -244,7 +244,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 176 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 183 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real

@@ -166,6 +166,37 @@ export function formatEventLine(event: ActivityEvent, palette: Palette): string 
   return `${palette.dim(formatClock(event.timestamp))}  ${style(padEnd(level, 4))}  ${padEnd(event.type, 18)} ${sanitize(event.message)}`;
 }
 
+/**
+ * How wide plain output may be: the terminal's width, else `COLUMNS` (a pipe or file has no width
+ * of its own), else 120.
+ */
+export function outputWidth(stream: { columns?: number }, env: NodeJS.ProcessEnv = process.env): number {
+  if (stream.columns) return stream.columns;
+  const fromEnv = Number.parseInt(env.COLUMNS ?? '', 10);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 120;
+}
+
+/** Below this many characters a command is unreadable: then the app label gives way too. */
+const MIN_COMMAND_ROOM = 12;
+
+/**
+ * Command, directory and attached app of a process row within `room` visible characters. The app
+ * label is short and tells which window a session belongs to, so the command and the directory give
+ * way first: appended after them, it was the first thing cut (scenario pass, 20.11.2026: piped
+ * `status` lost it on 4 of 6 rows).
+ */
+export function rowText(proc: MonitoredProcess, room: number): { command: string; rest: string } {
+  const command = sanitize(proc.cmd);
+  const where = proc.cwd ? ` · ${sanitize(proc.cwd)}` : '';
+  const host = proc.host && proc.host !== 'detached' ? ` [${sanitize(proc.host)}]` : '';
+  const hostLength = Array.from(host).length;
+  const kept = host && room - hostLength >= MIN_COMMAND_ROOM ? host : '';
+  const text = Array.from(truncate(`${command}${where}`, Math.max(1, room - (kept ? hostLength : 0))));
+  const commandLength = Array.from(command).length;
+  if (text.length <= commandLength) return { command: text.join(''), rest: kept };
+  return { command, rest: `${text.slice(commandLength).join('')}${kept}` };
+}
+
 /** The process table as plain lines, used by `strayps status` and the `status` command. */
 export function formatProcessTable(
   processes: MonitoredProcess[],
@@ -176,19 +207,18 @@ export function formatProcessTable(
     return ['  No agent or MCP processes found.'];
   }
   const lines: string[] = [];
-  const header = `  ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('WHERE', 13)} ${padStart('RAM', 9)} ${padStart('AGE', 8)}  COMMAND · CWD`;
+  const header = `  ${padEnd('PID', 7)} ${padEnd('STATUS', 8)} ${padEnd('WHERE', 10)} ${padStart('RAM', 9)} ${padStart('AGE', 8)}  ${padEnd('KIND', 5)}  COMMAND · CWD`;
   lines.push(palette.dim(header));
   lines.push(palette.dim(`  ${'─'.repeat(Math.max(20, Math.min(width, 120) - 2))}`));
   for (const proc of processes) {
     const style = statusStyle(palette, proc);
-    const where = proc.cwd ? ` · ${sanitize(proc.cwd)}` : '';
-    const host = proc.host && proc.host !== 'detached' ? ` [${sanitize(proc.host)}]` : '';
     const fixed = `  ${padEnd(String(proc.pid), 7)} `;
     const tail = `${padStart(formatMemory(proc.memoryMb, proc.memorySource !== 'footprint'), 9)} ${padStart(sanitize(proc.uptime), 8)}  `;
-    const used = fixed.length + 8 + 1 + 13 + 1 + tail.length;
-    const rest = truncate(`${sanitize(proc.cmd)}${where}${host}`, Math.max(10, width - used));
+    const kind = `${padEnd(proc.category, 5)}  `;
+    const used = fixed.length + 8 + 1 + 10 + 1 + tail.length + kind.length;
+    const { command, rest } = rowText(proc, Math.max(10, width - used));
     lines.push(
-      `${fixed}${(proc.paused ? palette.warn : style)(padEnd(proc.paused ? 'PAUSED' : proc.status, 8))} ${palette.dim(padEnd(whereLabel(proc), 13))} ${tail}${rest}`,
+      `${fixed}${(proc.paused ? palette.warn : style)(padEnd(proc.paused ? 'PAUSED' : proc.status, 8))} ${palette.dim(padEnd(whereLabel(proc), 10))} ${tail}${palette.dim(kind)}${command}${palette.dim(rest)}`,
     );
   }
   return lines;
