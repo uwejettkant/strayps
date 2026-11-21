@@ -6,3 +6,12 @@ coverage/
 .env
 .env.*
 .claude/settings.local.json
+__pycache__/
+*.pyc
+*.tgz
+.npmrc
+.vscode/
+.idea/
+# local strayps settings of whoever works on this repo, and the file of agent-leash
+.strayps.json
+.agentguard.json
