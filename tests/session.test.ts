@@ -139,6 +139,26 @@ describe('MonitorSession', () => {
     expect(h.session.getKillPlan(400)!.alsoEnds.map((p) => p.pid).sort()).toEqual([401, 404]);
   });
 
+  it('keeps what a session elsewhere runs through a shell out of the plan, wherever it works', async () => {
+    // The walk up the tree stopped at the first process not in the list (a shell, npx): a server
+    // that an unrecognized agent in another repository ran through zsh, in '/', ended with this
+    // session (external audit, 21.11.2026)
+    const h = createHarness({
+      procs: [
+        { pid: 400, name: 'claude', cmd: 'claude', cwd: OTHER, etime: '03-00:00:00' },
+        { pid: 402, ppid: 400, name: 'gemini', cmd: 'gemini', cwd: '/work/third-repo', etime: '02:00:00' },
+        { pid: 405, ppid: 402, name: 'zsh', cmd: '/bin/zsh -c node server.js', cwd: '/work/third-repo', etime: '02:00:00' },
+        { pid: 406, ppid: 405, name: 'node', cmd: 'node server.js', cwd: '/', etime: '02:00:00' },
+        { pid: 407, ppid: 405, name: 'node', cmd: 'node worker.js', etime: '02:00:00' },
+        // the same shape under the session's own directory still ends with it
+        { pid: 410, ppid: 400, name: 'zsh', cmd: '/bin/zsh -c node x.js', cwd: OTHER, etime: '02:00:00' },
+        { pid: 411, ppid: 410, name: 'node', cmd: 'node x.js', cwd: '/', etime: '02:00:00' },
+      ],
+    });
+    await h.monitor.scan();
+    expect(h.session.getKillPlan(400)!.alsoEnds.map((p) => p.pid).sort()).toEqual([411]);
+  });
+
   it('ends what an agent started with its session, and names it in the plan, but not the wrappers in between', async () => {
     const h = createHarness({
       procs: [
@@ -269,6 +289,80 @@ describe('MonitorSession', () => {
     expect(h.kills.slice(2).map((k) => k.signal)).toEqual(['SIGCONT', 'SIGCONT']);
     expect(h.session.getSnapshot().events[0].type).toBe('process-resumed');
     expect(h.session.resume().pids).toEqual([]);
+  });
+
+  it('pause holds only what the question showed: nothing started since, no PID that names another process now', async () => {
+    // pause asked about one list and, on yes, held whatever the list was by then (external audit, 21.11.2026)
+    const h = createHarness({
+      procs: [
+        { pid: 100, name: 'claude', cmd: 'claude', cpu: 5, etime: '10:00' },
+        { pid: 101, ppid: 100, name: 'node', cmd: 'node some-mcp-server', cwd: '/', etime: '10:00' },
+      ],
+    });
+    h.procs[0].cwd = h.dir;
+    await h.monitor.scan();
+    const asked = h.session.getPauseTargets();
+    expect(asked.map((p) => p.pid).sort()).toEqual([100, 101]);
+
+    // while the person reads the question: the agent starts a tool call, and the MCP server ends
+    // and its PID goes to an unrelated process
+    h.procs.push({ pid: 102, ppid: 100, name: 'bash', cmd: 'bash -c ./deploy.sh', cwd: h.dir, etime: '00:01' });
+    h.procs[1] = { pid: 101, ppid: 1, name: 'node', cmd: 'node other.js', etime: '00:01' };
+    await h.monitor.scan();
+
+    const result = h.session.pause(asked);
+    expect(result.pids).toEqual([100]);
+    expect(result.gone).toEqual([101]);
+    expect(result.notAsked).toEqual([102]);
+    expect(h.kills).toEqual([{ pid: 100, signal: 'SIGSTOP' }]);
+    h.session.resume();
+  });
+
+  it('pause does not hold a PID that names a newer process of the agent than the one shown', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 100, name: 'claude', cmd: 'claude', cpu: 5, etime: '10:00' },
+        { pid: 101, ppid: 100, name: 'node', cmd: 'node some-mcp-server', cwd: '/', etime: '10:00' },
+      ],
+    });
+    h.procs[0].cwd = h.dir;
+    const t0 = Date.now();
+    await h.monitor.scan(t0);
+    const asked = h.session.getPauseTargets();
+    // the MCP server ends, and its PID goes to a new MCP server of the same agent: still a target,
+    // but not the process the person was shown
+    h.procs[1] = { pid: 101, ppid: 100, name: 'node', cmd: 'node other-mcp-server', cwd: '/', etime: '00:06' };
+    await h.monitor.scan(t0 + 2_000);
+    expect(h.session.getPauseTargets().map((t) => t.pid).sort()).toEqual([100, 101]);
+
+    const result = h.session.pause(asked);
+    expect(result.pids).toEqual([100]);
+    expect(result.gone).toEqual([101]);
+    expect(h.kills).toEqual([{ pid: 100, signal: 'SIGSTOP' }]);
+    h.session.resume();
+  });
+
+  it('pause holds what was shown while a scan is running, and when the ages do not move', async () => {
+    // A scan in flight had moved the clock the start times were computed with, but not the list,
+    // and the demo's ages never move: the brake held nothing (safety review, 21.11.2026)
+    const h = createHarness({
+      procs: [
+        { pid: 100, name: 'claude', cmd: 'claude', cpu: 5, etime: '10:00' },
+        { pid: 101, ppid: 100, name: 'node', cmd: 'node some-mcp-server', cwd: '/', etime: '10:00' },
+      ],
+    });
+    h.procs[0].cwd = h.dir;
+    const t0 = Date.now();
+    await h.monitor.scan(t0);
+    const asked = h.session.getPauseTargets();
+    await h.monitor.scan(t0 + 4_000);
+    const inFlight = h.monitor.scan(t0 + 6_000);
+    const result = h.session.pause(asked);
+    await inFlight;
+    expect(result.pids.sort()).toEqual([100, 101]);
+    expect(result.gone).toEqual([]);
+    expect(result.notAsked).toEqual([]);
+    h.session.resume();
   });
 
   it('coalesces a burst of changes into a few updates', async () => {

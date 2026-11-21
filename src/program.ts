@@ -16,7 +16,7 @@ import {
   writeConfigValue,
 } from './core/config.js';
 import type { ActivityEventType } from './core/events.js';
-import { ProcessMonitor, type RawProcessInfo } from './core/process-monitor.js';
+import { ProcessMonitor, PS_BIN, type RawProcessInfo } from './core/process-monitor.js';
 import { MonitorSession } from './core/session.js';
 import { DEFAULT_PORT, listenDashboardServer, type RunningDashboardServer } from './server.js';
 import {
@@ -74,7 +74,9 @@ function parsePort(raw: string | undefined): number | undefined {
  */
 function isForegroundProcess(): boolean {
   try {
-    const stat = execFileSync('ps', ['-o', 'stat=', '-p', String(process.pid)], {
+    // By path, like every system program: through PATH, npx and npm scripts would run a `ps` from
+    // the watched repository's node_modules/.bin (external audit, 21.11.2026)
+    const stat = execFileSync(PS_BIN, ['-o', 'stat=', '-p', String(process.pid)], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 1500,
@@ -299,7 +301,8 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   process.on('exit', () => ui?.stop());
   const crash = (err: unknown) => {
     ui?.stop();
-    process.stderr.write(`strayps crashed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+    const text = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    process.stderr.write(`strayps crashed: ${text.split('\n').map(sanitize).join('\n')}\n`);
     process.exit(1);
   };
   process.on('uncaughtException', crash);
@@ -465,7 +468,7 @@ function runConfigSet(rawKey: string, rawValue: string, dir: string): void {
   const result = writeOrFail(rootDir, key, parsed.value);
   const was = result.previous !== undefined ? ` (was ${displayValue(result.previous)})` : '';
   process.stdout.write(
-    `${result.created ? 'Created' : 'Updated'} ${tildify(result.filePath)}: ${key} = ${displayValue(parsed.value)}${was}\n`,
+    `${result.created ? 'Created' : 'Updated'} ${sanitize(tildify(result.filePath))}: ${key} = ${displayValue(parsed.value)}${was}\n`,
   );
   reportConfigProblems(rootDir);
   process.stdout.write('A running strayps picks this up within a second.\n');
@@ -480,22 +483,33 @@ function runConfigUnset(rawKey: string, dir: string): void {
     process.stdout.write(`${key} is not set in ${CONFIG_FILENAME}; the default (${fallback}) already applies.\n`);
     return;
   }
-  process.stdout.write(`Removed ${key} from ${tildify(result.filePath)}; the default (${fallback}) applies now.\n`);
+  process.stdout.write(`Removed ${key} from ${sanitize(tildify(result.filePath))}; the default (${fallback}) applies now.\n`);
   reportConfigProblems(rootDir);
 }
 
 function runInit(dir: string, options: { force?: boolean }): void {
   const rootDir = resolveTargetDir(dir);
   const target = path.join(rootDir, CONFIG_FILENAME);
-  if (fs.existsSync(target) && !options.force) {
+  // lstat, not exists: a link to nowhere "did not exist", and --force left it in place for the
+  // write to refuse with a stack trace (external audit, 21.11.2026)
+  let present = true;
+  try {
+    fs.lstatSync(target);
+  } catch {
+    present = false;
+  }
+  if (present && !options.force) {
     throw new CliError(`${target} already exists. Edit it, or pass --force to replace it with the defaults.`);
   }
-  if (options.force && fs.existsSync(target)) {
-    fs.rmSync(target);
+  let writtenPath: string;
+  try {
+    // A link is removed, never what it points to; a directory is refused
+    if (present) fs.rmSync(target);
+    writtenPath = new ConfigManager(rootDir).saveConfig();
+  } catch (err) {
+    throw new CliError(`Could not write ${target}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const manager = new ConfigManager(rootDir);
-  const writtenPath = manager.saveConfig();
-  process.stdout.write(`Created ${writtenPath} with the default settings.\n`);
+  process.stdout.write(`Created ${sanitize(writtenPath)} with the default settings.\n`);
   const legacy = legacyConfigNotice(rootDir);
   if (legacy) process.stdout.write(`${legacy}\n`);
 }
@@ -569,9 +583,9 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
       // Messages can quote .strayps.json (V8 parse errors include its text): untrusted
       process.stderr.write(`strayps: ${sanitize(err.message)}\n`);
     } else {
-      process.stderr.write(
-        `strayps error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
-      );
+      // A path in the message can hold control characters: each line through sanitize()
+      const text = err instanceof Error ? (err.stack ?? err.message) : String(err);
+      process.stderr.write(`strayps error: ${text.split('\n').map(sanitize).join('\n')}\n`);
     }
     process.exit(1);
   }

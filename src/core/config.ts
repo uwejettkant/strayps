@@ -88,7 +88,7 @@ export type ConfigSource = 'default' | 'file' | 'override';
 export interface ConfigReloadResult {
   /** True if the file was valid and its values are now in effect. */
   applied: boolean;
-  /** Settings whose effective value changed, e.g. "limits.maxFilesWarn 15 → 20". */
+  /** Settings whose effective value changed, e.g. "limits.staleSessionHours 6 → 12". */
   changes: string[];
   /** Problems in the file. When `applied` is false, they are the reason. */
   warnings: string[];

@@ -1,6 +1,6 @@
 import { formatMemory, sumMemory } from '../core/process-monitor.js';
 import type { StatusSnapshot, MonitorSession } from '../core/session.js';
-import { completeInput, HELP_LINES, parseCommand, runCommand } from './commands.js';
+import { type CommandResult, completeInput, HELP_LINES, parseCommand, runCommand } from './commands.js';
 import {
   createPalette,
   formatClock,
@@ -78,6 +78,8 @@ export interface FrameView {
   confirmPrompt: string | null;
   /** Lines naming everything the open question affects, shown in full instead of the body. */
   confirmDetails?: string[] | null;
+  /** What yes does to the listed processes; the wording follows it. */
+  confirmEffect?: 'end' | 'hold';
   /** Full-height view replacing the normal body until the next key press. */
   overlay: 'help' | 'processes' | null;
   palette: Palette;
@@ -276,7 +278,8 @@ function helpRows(view: FrameView): Seg[][] {
  */
 function confirmRows(view: FrameView, details: string[], available: number): { rows: Seg[][]; hidden: number } {
   const p = view.palette;
-  const rows: Seg[][] = [[seg(' ENDS WHEN YOU ANSWER y', p.strong)]];
+  const hold = view.confirmEffect === 'hold';
+  const rows: Seg[][] = [[seg(hold ? ' HELD WHEN YOU ANSWER y' : ' ENDS WHEN YOU ANSWER y', p.strong)]];
   const room = Math.max(0, available - 3);
   const shown = details.length <= room ? details : details.slice(0, Math.max(0, room - 1));
   for (const line of shown) rows.push([seg(`   ${line}`, p.warn)]);
@@ -285,7 +288,7 @@ function confirmRows(view: FrameView, details: string[], available: number): { r
   rows.push(
     hidden > 0
       ? [seg(` ${hidden} more do not fit: make the terminal taller to see them, or press any key to cancel`, p.danger)]
-      : [seg(' y ends them · any other key cancels', p.dim)],
+      : [seg(hold ? ' y holds them · any other key cancels' : ' y ends them · any other key cancels', p.dim)],
   );
   return { rows: rows.slice(0, Math.max(0, available)), hidden };
 }
@@ -337,8 +340,8 @@ export function renderFrame(view: FrameView): Frame {
   const prompt = ' › ';
   const hint = 'help · exit · Ctrl+C ';
   const inputRoom = Math.max(4, cols - prompt.length - 1);
-  // The input can hold a file name completed with Tab, and file names come from the agent being
-  // watched: control sequences in them must not reach the terminal
+  // The input holds whatever was typed or pasted, and a paste can carry control sequences: they
+  // must not reach the terminal
   const safeInput = sanitize(view.input);
   const inputChars = Array.from(safeInput);
   const shownInput =
@@ -468,7 +471,7 @@ const RENDER_INTERVAL_MS = 40;
 
 /**
  * Full-screen live view of strayps with a command line at the bottom.
- * Shows what the web dashboard shows and offers the same actions, from the same session.
+ * Shows what the web dashboard shows, from the same session, and is where its actions are.
  */
 export class TerminalUI {
   private readonly session: MonitorSession;
@@ -481,7 +484,7 @@ export class TerminalUI {
   private exitRequested = false;
   private input = '';
   private notice: FrameNotice | null = null;
-  private confirm: { prompt: string; details?: string[]; run: () => ReturnType<typeof runCommand> } | null = null;
+  private confirm: NonNullable<CommandResult['confirm']> | null = null;
   private overlay: 'help' | 'processes' | null = null;
   private history: string[] = [];
   private historyIndex = -1;
@@ -571,6 +574,7 @@ export class TerminalUI {
       notice: this.notice,
       confirmPrompt: this.confirm?.prompt ?? null,
       confirmDetails: this.confirm?.details ?? null,
+      confirmEffect: this.confirm?.effect ?? 'end',
       overlay: this.overlay,
       palette: this.palette,
       now: Date.now(),
@@ -653,7 +657,7 @@ export class TerminalUI {
       this.confirm = null;
       if (hidden > 0) {
         this.notice = {
-          text: `Nothing was ended: ${hidden} of the processes did not fit on the screen. Make the terminal taller and ask again.`,
+          text: `Nothing was ${pending.effect === 'hold' ? 'paused' : 'ended'}: ${hidden} of the processes did not fit on the screen. Make the terminal taller and ask again.`,
           level: 'warn',
         };
       } else if (char === 'y' || char === 'Y') {

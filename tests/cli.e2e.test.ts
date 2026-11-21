@@ -228,6 +228,31 @@ describe('strayps CLI', () => {
     expect(JSON.parse(read(dir, '.strayps.json'))).toEqual(defaults);
   });
 
+  it('treats a link or a directory where the config file goes as present, and fails without a stack trace', async () => {
+    // A link to nowhere counted as absent; the write then refused with a raw stack trace, even
+    // with --force (external audit, 21.11.2026)
+    const dir = makeTmpDir();
+    const elsewhere = path.join(makeTmpDir(), 'target.json');
+    fs.symlinkSync(elsewhere, path.join(dir, '.strayps.json'));
+    const refused = runCli(['init', dir]);
+    expect((await refused.exit).code).toBe(1);
+    expect(refused.output()).toContain('already exists');
+    expect(refused.output()).not.toMatch(/\n\s+at /);
+
+    const forced = runCli(['init', dir, '--force']);
+    expect((await forced.exit).code).toBe(0);
+    expect(fs.lstatSync(path.join(dir, '.strayps.json')).isFile()).toBe(true);
+    expect(fs.existsSync(elsewhere), 'the link target is never written').toBe(false);
+
+    const withFolder = makeTmpDir();
+    fs.mkdirSync(path.join(withFolder, '.strayps.json'));
+    const folder = runCli(['init', withFolder, '--force']);
+    expect((await folder.exit).code).toBe(1);
+    expect(folder.output()).toContain('strayps: Could not write');
+    expect(folder.output()).not.toMatch(/\n\s+at /);
+    expect(fs.statSync(path.join(withFolder, '.strayps.json')).isDirectory()).toBe(true);
+  });
+
   it('tells the user about problems in the config file at startup', async () => {
     const dir = makeTmpDir();
     writeFiles(dir, { '.strayps.json': '{"mode":"turbo","protectedFiles":[".env*"],"limits":{"staleSessionHours":-1}}' });

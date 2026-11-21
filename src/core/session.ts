@@ -35,6 +35,10 @@ export interface StatusSnapshot {
 export interface PauseResult {
   /** PIDs that were held or continued. */
   pids: number[];
+  /** pause: confirmed, but gone or another process under the PID now; not held. */
+  gone?: number[];
+  /** pause: targets the confirmation did not show (started since); not held. */
+  notAsked?: number[];
 }
 
 /**
@@ -286,11 +290,14 @@ export class MonitorSession extends EventEmitter {
     // recognize, started by this one in another repository, ended with it (review, 20.11.2026)
     const elsewhere = (proc: MonitoredProcess): boolean =>
       proc.category === 'child' && !saysNothing(proc.cwd) && !saysNothing(target.cwd) && !inside(proc.cwd!, target.cwd!);
+    // Up the whole tree, not only the list: a walk over the list alone stopped at the first shell
+    // or npx, and what ran below it in '/' ended with the session (external audit, 21.11.2026)
     const underElsewhere = (proc: MonitoredProcess): boolean => {
-      let cur = proc.ppid !== undefined ? byPid.get(proc.ppid) : undefined;
-      for (let depth = 0; cur && cur.pid !== pid && depth < 32; depth++) {
-        if (elsewhere(cur)) return true;
-        cur = cur.ppid !== undefined ? byPid.get(cur.ppid) : undefined;
+      let cur = this.processMonitor.parentOf(proc.pid) ?? proc.ppid;
+      for (let depth = 0; cur !== undefined && cur > 1 && cur !== pid && depth < 64; depth++) {
+        const listed = byPid.get(cur);
+        if (listed && elsewhere(listed)) return true;
+        cur = this.processMonitor.parentOf(cur);
       }
       return false;
     };
@@ -387,12 +394,13 @@ export class MonitorSession extends EventEmitter {
   /**
    * Holds the coding agents of the current repository and the processes they started (SIGSTOP).
    * Nothing is terminated; `resume` continues them where they stopped. Dev servers, editors and
-   * sessions in other repositories are not touched.
+   * sessions in other repositories are not touched. With `confirmed` (what a person was shown),
+   * only those, each still the same process; without it, every current target.
    */
-  public pause(): PauseResult {
-    const pids = this.processMonitor.pauseTargets();
+  public pause(confirmed?: PauseTarget[]): PauseResult {
+    const outcome = this.processMonitor.pauseTargets(confirmed);
     this.scheduleUpdate();
-    return { pids };
+    return outcome;
   }
 
   /** Continues every process `pause` is holding. */

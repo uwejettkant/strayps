@@ -1,6 +1,6 @@
 # Security Policy
 
-strayps terminates processes and rewrites files on the machine it runs on. A flaw in it can cost someone their work, so reports about security problems are welcome.
+strayps terminates and pauses processes on the machine it runs on, and it shows their command lines in a terminal and in a local web dashboard. A flaw in it can cost someone their work or leak a secret from a command line, so reports about security problems are welcome.
 
 ## Reporting a vulnerability
 
@@ -18,9 +18,10 @@ Please give the maintainer the chance to publish a fix before you disclose the p
 
 In scope, for example:
 
-- the local dashboard server and its API: anything reachable from a web page or from another machine,
-- a rollback that writes, deletes or reads files outside the watched repository, or reads `.env*` files,
-- termination of processes that are not in the monitored list,
-- file names, command lines or paths that end up rendered as markup or as terminal control sequences.
+- the local dashboard server and its API: anything that changes state, or that is reachable from a web page or from another machine,
+- termination of a process that is not in the monitored list or was not in the confirmation, and pause holding a process outside the agents of the watched repository or leaving one stopped,
+- secrets in command lines that are shown instead of `[redacted]`,
+- strayps reading or writing a file other than `.strayps.json` in a repository, or following a link there,
+- command lines, paths or log messages that end up rendered as markup or as terminal control sequences.
 
 Known limit, documented in the README: another user account on the same machine, or the watched agent itself, can reach the local dashboard.

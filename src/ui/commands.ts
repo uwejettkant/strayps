@@ -25,7 +25,13 @@ export interface CommandResult {
    * The command changes or destroys something and only runs after an explicit yes. `details` are
    * lines a front end shows in full before the question, one per process that the answer affects.
    */
-  confirm?: { prompt: string; details?: string[]; run: () => CommandResult };
+  confirm?: {
+    prompt: string;
+    details?: string[];
+    /** What yes does to the listed processes: end them (default) or hold them. */
+    effect?: 'end' | 'hold';
+    run: () => CommandResult;
+  };
 }
 
 export const COMMAND_NAMES = ['help', 'status', 'kill', 'pause', 'resume', 'exit'];
@@ -47,7 +53,6 @@ function shortName(proc: Pick<MonitoredProcess, 'cmd'>): string {
   return first.split('/').pop() || 'process';
 }
 
-/** "claude-code 48110, mcp-server-git 48244, … (+2 more)" for a confirmation prompt. */
 /** One line per process pause would hold. */
 function describePauseTarget(target: PauseTarget): string {
   const where = target.cwd ? `  ${sanitize(target.cwd)}` : '';
@@ -216,12 +221,20 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
         confirm: {
           prompt: `Pause ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents? resume continues them.`,
           details: targets.map(describePauseTarget),
+          effect: 'hold',
           run: () => {
-            const { pids } = session.pause();
-            return {
-              message: `Paused ${pids.length} process${pids.length === 1 ? '' : 'es'}; type resume to continue`,
-              level: 'warn',
-            };
+            // Exactly what was shown: the list can change while the question is open
+            const { pids, gone = [], notAsked } = session.pause(targets);
+            // A reused PID is in both lists: it counts as gone, not as new
+            const fresh = (notAsked ?? []).filter((pid) => !gone.includes(pid));
+            const parts = [`Paused ${pids.length} process${pids.length === 1 ? '' : 'es'}; type resume to continue`];
+            if (gone.length > 0) {
+              parts.push(`PID ${gone.join(', ')} had exited or ${gone.length === 1 ? 'is another process' : 'are other processes'} now, not held`);
+            }
+            if (fresh.length > 0) {
+              parts.push(`PID ${fresh.join(', ')} started after the question and ${fresh.length === 1 ? 'keeps' : 'keep'} running: type pause again to hold ${fresh.length === 1 ? 'it' : 'them'}`);
+            }
+            return { message: parts.join('; '), level: 'warn' };
           },
         },
       };
@@ -276,7 +289,7 @@ export function completeInput(session: MonitorSession, input: string): Completio
 
   let matches = pool.filter((candidate) => candidate.startsWith(partial));
   if (matches.length === 0 && partial.length > 0 && head) {
-    // Paths are easier to hit by any fragment than by their prefix
+    // A PID is easier to hit by any part of it than by its start
     matches = pool.filter((candidate) => candidate.includes(partial));
     if (matches.length === 1) return { input: head + matches[0], candidates: [] };
     return { input, candidates: matches.slice(0, 8) };

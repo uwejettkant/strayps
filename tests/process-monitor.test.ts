@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   parseElapsedTime,
@@ -269,5 +271,18 @@ describe('ProcessMonitor', () => {
     expect(list).toHaveLength(1);
     expect(list[0].status).not.toBe('STALE');
     expect(list[0].pauseTarget).toBe(true);
+  });
+});
+
+describe('system programs', () => {
+  it('runs ps, lsof and footprint by their constant, never by a bare name through PATH', () => {
+    // Through PATH, npx and npm scripts run a program of that name from the watched repository's
+    // node_modules/.bin. isForegroundProcess still called a bare 'ps' (external audit, 21.11.2026)
+    const root = path.join(import.meta.dirname, '..', 'src');
+    const files = fs.readdirSync(root, { recursive: true, encoding: 'utf-8' }).filter((f) => f.endsWith('.ts'));
+    const bare = /\b(?:execFile|execFileSync|execFileAsync|spawn|spawnSync|exec|execSync)\(\s*['"`](?:ps|lsof|footprint)\b/;
+    const offenders = files.filter((f) => bare.test(fs.readFileSync(path.join(root, f), 'utf-8')));
+    expect(files.length).toBeGreaterThan(5);
+    expect(offenders).toEqual([]);
   });
 });

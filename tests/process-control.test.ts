@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  defaultProcessAges,
   MEMORY_READ_INTERVAL_MS,
   parseCpuTime,
   parseFootprintJson,
@@ -11,6 +12,7 @@ import {
   type RawProcessInfo,
   resolveProcessCwds,
 } from '../src/core/process-monitor.js';
+import { cleanupTmpDirs, createHarness } from './helpers/harness.js';
 import { takeBlockedKills } from './helpers/kill-guard.js';
 
 const REPO = '/work/current-repo';
@@ -25,7 +27,12 @@ interface Setup {
 
 function setup(
   procs: RawProcessInfo[],
-  options: { killGraceMs?: number; selfPid?: number; processAge?: (pid: number) => number | undefined } = {},
+  options: {
+    killGraceMs?: number;
+    selfPid?: number;
+    processAge?: (pid: number) => number | undefined;
+    processAges?: (pids: number[]) => Map<number, number>;
+  } = {},
 ): Setup {
   const kills: Setup['kills'] = [];
   const alive = new Set(procs.map((p) => p.pid));
@@ -41,6 +48,7 @@ function setup(
     },
     processAlive: (pid) => alive.has(pid),
     processAge: options.processAge,
+    processAges: options.processAges,
   });
   return { monitor, kills, procs: table, alive };
 }
@@ -768,14 +776,14 @@ describe('ProcessMonitor termination', () => {
     await monitor.scan(1_000);
 
     expect(monitor.getPauseTargets().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101, 102]);
-    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101, 102]);
+    expect(monitor.pauseTargets().pids.sort((a, b) => a - b)).toEqual([100, 101, 102]);
     // held, not terminated: nothing leaves the list, nothing is killed
     expect(kills.map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGSTOP', '101:SIGSTOP', '102:SIGSTOP']);
     // the developer's dev server is not even listed: no agent started it
     expect(monitor.getProcesses().map((p) => p.pid).sort((a, b) => a - b)).toEqual([100, 101, 102, 200, 201, 501]);
     expect(monitor.getPausedPids().sort((a, b) => a - b)).toEqual([100, 101, 102]);
     // pausing again holds nothing twice
-    expect(monitor.pauseTargets()).toEqual([]);
+    expect(monitor.pauseTargets().pids).toEqual([]);
 
     expect(monitor.resumePaused().sort((a, b) => a - b)).toEqual([100, 101, 102]);
     expect(kills.slice(3).map((k) => `${k.pid}:${k.signal}`).sort()).toEqual(['100:SIGCONT', '101:SIGCONT', '102:SIGCONT']);
@@ -827,7 +835,7 @@ describe('ProcessMonitor pause and exit', () => {
     const { monitor, kills } = setup([agent(100, REPO, { cpu: 1 }), mcp(101, 100, { cwd: '/' })]);
     await monitor.scan(1_000);
     const before = process.listeners('exit');
-    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101]);
+    expect(monitor.pauseTargets().pids.sort((a, b) => a - b)).toEqual([100, 101]);
     const added = process.listeners('exit').filter((listener) => !before.includes(listener));
     expect(added).toHaveLength(1);
 
@@ -836,6 +844,18 @@ describe('ProcessMonitor pause and exit', () => {
     expect(kills.filter((k) => k.signal === 'SIGCONT').map((k) => k.pid).sort((a, b) => a - b)).toEqual([100, 101]);
     expect(monitor.getPausedPids()).toEqual([]);
     expect(process.listeners('exit').filter((listener) => !before.includes(listener))).toEqual([]);
+  });
+
+  it('does not hold a PID that names a younger process by the time pause acts', async () => {
+    // The list is up to one scan old. A process held under a reused PID would be taken for a new one
+    // by the next scan, dropped from what strayps holds and never continued (external audit, 21.11.2026)
+    let ages = new Map<number, number>();
+    const { monitor, kills } = setup([agent(100, REPO), mcp(101, 100, { cwd: '/' })], { processAges: () => ages });
+    await monitor.scan(1_000);
+    ages = new Map([[100, 600], [101, 1]]);
+    monitor.pauseTargets();
+    expect(kills).toEqual([{ pid: 100, signal: 'SIGSTOP' }]);
+    monitor.resumePaused();
   });
 
   it('keeps listing and holding a paused process that loses its place in the tree, and continues it', async () => {
@@ -848,7 +868,7 @@ describe('ProcessMonitor pause and exit', () => {
     ]);
     const t0 = 1_000_000;
     await monitor.scan(t0);
-    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 101, 121]);
+    expect(monitor.pauseTargets().pids.sort((a, b) => a - b)).toEqual([100, 101, 121]);
 
     alive.delete(101);
     Object.assign(procs.find((p) => p.pid === 121)!, { ppid: 1, pgid: 101, etime: '05:02' });
@@ -877,7 +897,7 @@ describe('ProcessMonitor pause and exit', () => {
     const targets = monitor.getPauseTargets();
     expect(targets.map((t) => [t.pid, t.listed]).sort()).toEqual([[100, true], [105, false], [106, false]]);
     expect(targets.find((t) => t.pid === 105)?.cmd).toContain('bash -c while true');
-    expect(monitor.pauseTargets().sort((a, b) => a - b)).toEqual([100, 105, 106]);
+    expect(monitor.pauseTargets().pids.sort((a, b) => a - b)).toEqual([100, 105, 106]);
     expect(kills.map((k) => k.pid).sort((a, b) => a - b)).toEqual([100, 105, 106]);
 
     // what is held stays in view until it is continued
@@ -899,7 +919,7 @@ describe('ProcessMonitor pause and exit', () => {
     );
     await monitor.scan(1_000);
     expect(monitor.getPauseTargets().map((t) => t.pid)).toEqual([100]);
-    expect(monitor.pauseTargets()).toEqual([100]);
+    expect(monitor.pauseTargets().pids).toEqual([100]);
   });
 
   it('does not count a new process as held when the PID it held was handed on', async () => {
@@ -927,6 +947,27 @@ describe('ProcessMonitor pause and exit', () => {
   });
 });
 
+describe('ProcessMonitor bookkeeping', () => {
+  it('forgets the history of a process it ended, so a new process under its PID starts clean', async () => {
+    const h = createHarness({ procs: [{ pid: 300, name: 'claude', cmd: 'claude', cwd: OTHER, rssKb: 120_000, etime: '03-00:00:00', cpuTimeSec: 10 }], killGraceMs: 0 });
+    await h.monitor.scan();
+    // internal state, read through a cast
+    const state = h.monitor as unknown as { cpuSamples: Map<number, unknown>; children: Map<number, unknown>; footprints: Map<number, unknown> };
+    expect([state.cpuSamples.has(300), state.children.has(300), state.footprints.has(300)]).toEqual([true, true, true]);
+    expect(h.monitor.killProcess(300)).toBe(true);
+    await h.monitor.scan();
+    expect([state.cpuSamples.has(300), state.children.has(300), state.footprints.has(300)]).toEqual([false, false, false]);
+  });
+
+  it('reads the age of several processes with one ps call, and keeps those it found', () => {
+    // read-only: ps on this process and on a PID that is almost surely free
+    const ages = defaultProcessAges([process.pid, 99_998]);
+    expect(ages.get(process.pid)).toBeGreaterThanOrEqual(0);
+    expect([...ages.keys()].every((pid) => pid === process.pid || pid === 99_998)).toBe(true);
+    expect(defaultProcessAges([])).toEqual(new Map());
+  });
+});
+
 describe('secrets in command lines', () => {
   it('shows command lines with token, key and password values and URL credentials redacted', async () => {
     const { monitor } = setup([
@@ -946,6 +987,19 @@ describe('secrets in command lines', () => {
     expect(redactSecrets('curl -H x-api-key: v123 -H Authorization: token ghp_abcdefghijklmnop')).toBe(
       'curl -H x-api-key: [redacted] -H Authorization: token [redacted]',
     );
+  });
+
+  it('redacts before it shortens: a secret cut at the edge of the line stays hidden', async () => {
+    // Shortened first, a URL lost its "@" and a token its length, and neither was recognized any
+    // more: the visible part of the password or token was shown (external audit, 21.11.2026)
+    const { monitor } = setup([
+      mcp(70, 69, { cmd: `node mcp-proxy ${'a'.repeat(60)} https://u:hunter2hunter2hunter2@host.example/x` }),
+      agent(80, REPO, { cmd: `claude ${'x'.repeat(60)} ghp_abcdefghijklmnopqrstuvwxyz` }),
+    ]);
+    const list = await monitor.scan(Date.now());
+    const text = list.map((p) => p.cmd).join('\n');
+    expect(list).toHaveLength(2);
+    expect(text).not.toMatch(/hunter|ghp_a/);
   });
 });
 

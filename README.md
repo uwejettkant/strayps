@@ -6,7 +6,7 @@
 
 **See every AI coding agent and MCP server running on your machine, find the ones left behind, and end them one session at a time. Local only: no account, no telemetry.**
 
-[![package size](https://img.shields.io/badge/package-64.2%20kB-5BE49B?style=flat-square&labelColor=0D120F)](#)
+![package size](https://img.shields.io/badge/package-65.9%20kB-5BE49B?style=flat-square&labelColor=0D120F)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-5BE49B?style=flat-square&logo=typescript&labelColor=0D120F)](./tsconfig.json)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20%20LTS-5BE49B?style=flat-square&logo=node.js&labelColor=0D120F)](./package.json)
 [![Local](https://img.shields.io/badge/privacy-local%20only%20%C2%B7%20no%20account%20%C2%B7%20no%20telemetry-5BE49B?style=flat-square&labelColor=0D120F)](#security-model)
@@ -101,7 +101,7 @@ Started in a terminal, `strayps` shows a full-screen live view: agent sessions, 
 | `status` | List all monitored processes |
 | `help` | Show the commands |
 
-`kill` and `pause` ask `[y/N]` before they act and name the processes first. `resume` needs no confirmation. `pause` holds only the agents of the repository strayps was started in and everything they run right now, down to the shell around a tool call that just started: your dev server, your editor and the sessions in other repositories keep running. What it holds stays in the list, marked `PAUSED`, until `resume` continues it, even if the process it hangs under has ended.
+`kill` and `pause` ask `[y/N]` before they act and name the processes first. `resume` needs no confirmation. `pause` holds only the agents of the repository strayps was started in and everything they run right now, down to the shell around a tool call that just started: your dev server, your editor and the sessions in other repositories keep running. It holds what the question listed and nothing else: a tool call that starts while you read keeps running, and strayps says so, so you can type `pause` again. What it holds stays in the list, marked `PAUSED`, until `resume` continues it, even if the process it hangs under has ended.
 
 Without a terminal (a pipe, a log file, a background job, or `--no-tui`) the same information is printed as one line per event, and the same commands are read from stdin, one per line. The end of the input does not stop strayps; `kill -TERM` does.
 
@@ -199,7 +199,7 @@ console.log(dashboard.url);
 `strayps` can terminate processes, so its own surface is kept small:
 
 - The dashboard server binds to `127.0.0.1`, answers only when addressed as this machine, and changes nothing: every request that is not a read is refused. A web page on another site cannot open its live stream.
-- Only processes from the monitored list can be terminated, and only from the terminal: one process, or one agent with the processes it started, exactly as the confirmation listed them. `pause` holds only the agents of the repository strayps was started in and the processes they started, and strayps continues them when it exits: by `exit`, Ctrl+C, SIGTERM, SIGHUP, SIGQUIT, or a crash in its own code. Ended by a signal it does not handle (`kill -9`, or a rarely used one such as SIGUSR2 or SIGALRM), or by a fatal error of Node itself (out of memory), it cannot run anything, and the held processes stay stopped: `kill -CONT <pid>` continues them.
+- Only processes from the monitored list can be terminated, and only from the terminal: one process, or one agent with the processes it started, exactly as the confirmation listed them. `pause` holds only the agents of the repository strayps was started in and the processes they started, as the confirmation listed them, each checked to still be the same process (its start time, and its age read again right before it is held, where `ps` can read it), and strayps continues them when it exits: by `exit`, Ctrl+C, SIGTERM, SIGHUP, SIGQUIT, or a crash in its own code. Ended by a signal it does not handle (`kill -9`, or a rarely used one such as SIGUSR2 or SIGALRM), or by a fatal error of Node itself (out of memory), it cannot run anything, and the held processes stay stopped: `kill -CONT <pid>` continues them.
 - The only file strayps reads in a repository is `.strayps.json`, and only when it is a plain file (never through a symbolic or hard link). It writes that file only on `init`, `config set` and `config unset`. Of an old `.agentguard.json` it only checks whether it is there, without opening it. To read memory on macOS it runs `/usr/bin/footprint`, which writes its result into a private temporary directory that strayps removes right after; `ps`, `lsof` and `footprint` are run by their full paths there, so a program of the same name in a repository's `node_modules/.bin` is never run instead.
 - Command lines, directories and log messages are treated as untrusted text in the dashboard and in the terminal. Values that look like secrets in command lines (`--token`, `--api-key`, `--password`, `API_KEY=…`, credentials in URLs) are shown as `[redacted]`.
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
@@ -244,7 +244,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 183 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 194 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real

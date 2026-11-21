@@ -56,6 +56,8 @@ export interface MonitoredProcess {
   memorySource: MemorySource;
   uptime: string;
   elapsedSec: number;
+  /** When it started (ms, scan clock): its age at the scan that listed it, taken from that scan's time. */
+  startedAt: number;
   firstSeenAt: number;
   lastActiveAt: number;
   /** CPU time used since the process started, if the lister can read it. */
@@ -97,6 +99,25 @@ export interface PauseTarget {
   cwd?: string;
   /** False for a process the list does not show (yet). */
   listed: boolean;
+  /** For a listed process: when strayps first saw it; the same process keeps it from scan to scan. */
+  firstSeenAt?: number;
+  /**
+   * When it started (ms, scan clock), from its age and the time of the scan that saw it: tells
+   * the process a person confirmed from a newer one under the same PID. Undefined when unknown.
+   */
+  startedAt?: number;
+  /** Its age in seconds at that scan; a process under this PID now must not be younger. */
+  elapsedSec?: number;
+}
+
+/** What `pauseTargets` did with the confirmed list. */
+export interface PauseOutcome {
+  /** Held now (SIGSTOP). */
+  pids: number[];
+  /** Confirmed, but gone, or the PID names another process now: not held. */
+  gone: number[];
+  /** Pause targets now that the confirmation did not show (started since): not held. */
+  notAsked: number[];
 }
 
 export interface ProcessMonitorOptions {
@@ -126,6 +147,12 @@ export interface ProcessMonitorOptions {
    * the built-in killer, and to "unknown" when a custom `processKiller` is supplied.
    */
   processAge?: (pid: number) => number | undefined;
+  /**
+   * Seconds since each of these processes started, read right before pause holds them; a PID
+   * missing from the result is unknown. Defaults to one `ps` call with the built-in killer, and to
+   * "unknown" when a custom `processKiller` is supplied.
+   */
+  processAges?: (pids: number[]) => Map<number, number>;
   /** Time a process gets to exit after SIGTERM before SIGKILL is sent (default 3000 ms, 0 disables). */
   killGraceMs?: number;
   /** More program names to treat as coding agents (the `agents` setting); matched exactly. */
@@ -251,7 +278,7 @@ export const MEMORY_READ_INTERVAL_MS = 15_000;
  * would have run instead (review, 20.11.2026). Linux keeps the PATH lookup, its paths vary.
  */
 const IS_MAC = process.platform === 'darwin';
-const PS_BIN = IS_MAC ? '/bin/ps' : 'ps';
+export const PS_BIN = IS_MAC ? '/bin/ps' : 'ps';
 const LSOF_BIN = IS_MAC ? '/usr/sbin/lsof' : 'lsof';
 const FOOTPRINT_BIN = '/usr/bin/footprint';
 
@@ -535,8 +562,12 @@ export function redactSecrets(cmd: string): string {
   );
 }
 
+/**
+ * Redacted first, shortened after: cut first, a URL lost its "@" and a token its length, and the
+ * visible part of a secret was shown (external audit, 21.11.2026).
+ */
 function formatReadableCmd(rawName: string, rawCmd: string): string {
-  return redactSecrets(readableCmd(rawName, rawCmd));
+  return readableCmd(rawName, redactSecrets(rawCmd));
 }
 
 function readableCmd(rawName: string, rawCmd: string): string {
@@ -667,6 +698,31 @@ export function defaultProcessAge(pid: number): number | undefined {
   }
 }
 
+/** Seconds since each PID started, from one `ps -o pid=,etime=` call; unknown ones are left out. */
+export function defaultProcessAges(pids: number[]): Map<number, number> {
+  const ages = new Map<number, number>();
+  if (pids.length === 0) return ages;
+  let out: string;
+  try {
+    out = execFileSync(PS_BIN, ['-o', 'pid=,etime=', '-p', pids.join(',')], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1000,
+      env: { ...process.env, LC_NUMERIC: 'C' },
+    });
+  } catch (err) {
+    // ps exits 1 when one of the PIDs is gone, and still prints the others: dropping them switched
+    // the age check off for all (safety review, 21.11.2026)
+    const stdout = (err as { stdout?: unknown }).stdout;
+    out = typeof stdout === 'string' ? stdout : '';
+  }
+  for (const line of out.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\S+)$/);
+    if (match && pids.includes(Number(match[1]))) ages.set(Number(match[1]), parseElapsedTime(match[2]).elapsedSec);
+  }
+  return ages;
+}
+
 export function defaultProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -690,6 +746,7 @@ export class ProcessMonitor extends EventEmitter {
   private processKiller: (pid: number, signal?: NodeJS.Signals) => boolean;
   private processAlive: (pid: number) => boolean;
   private processAge: (pid: number) => number | undefined;
+  private processAges: (pids: number[]) => Map<number, number>;
   private cwdResolver: (pids: number[]) => Promise<Map<number, string>>;
   private agentNames: Set<string> = new Set();
 
@@ -699,8 +756,10 @@ export class ProcessMonitor extends EventEmitter {
   /** For each held PID: its age and the scan time when it was held, to tell a reused PID. */
   private heldSince: Map<number, { elapsedSec: number; at: number }> = new Map();
   /** Unlisted processes the agents of this repository run, as of the last scan (see PauseTarget). */
-  private pauseExtras: Map<number, RawProcessInfo> = new Map();
+  private pauseExtras: Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }> = new Map();
   private lastScanAt = 0;
+  /** Parent of every process of the last scan, listed or not (shells and npx are not listed). */
+  private lastParentByPid: Map<number, number> = new Map();
   private alertedPids: Set<number> = new Set();
   /** CPU time samples per PID, oldest first, spaced CPU_SAMPLE_SPACING_MS apart. */
   private cpuSamples: Map<number, Array<{ at: number; cpuTimeSec: number }>> = new Map();
@@ -739,6 +798,7 @@ export class ProcessMonitor extends EventEmitter {
     this.processAlive =
       options.processAlive ?? (options.processKiller ? () => false : defaultProcessAlive);
     this.processAge = options.processAge ?? (options.processKiller ? () => undefined : defaultProcessAge);
+    this.processAges = options.processAges ?? (options.processKiller ? () => new Map() : defaultProcessAges);
     this.cwdResolver =
       options.cwdResolver ??
       (options.processLister ? async () => new Map<number, string>() : resolveProcessCwds);
@@ -1224,6 +1284,7 @@ export class ProcessMonitor extends EventEmitter {
         memorySource,
         uptime: formattedUptime,
         elapsedSec,
+        startedAt: now - elapsedSec * 1000,
         firstSeenAt: existing?.firstSeenAt ?? now,
         lastActiveAt,
         cpuTimeSec,
@@ -1278,12 +1339,21 @@ export class ProcessMonitor extends EventEmitter {
         if (cur === this.selfPid) break;
         const ancestor = this.tracked.get(cur);
         if (ancestor?.category === 'agent') {
-          if (ancestor.pauseTarget) this.pauseExtras.set(raw.pid, raw);
+          if (ancestor.pauseTarget) {
+            const elapsedSec = raw.etime !== undefined ? parseElapsedTime(raw.etime).elapsedSec : undefined;
+            this.pauseExtras.set(raw.pid, {
+              raw,
+              elapsedSec,
+              startedAt: elapsedSec === undefined ? undefined : now - elapsedSec * 1000,
+            });
+          }
           break;
         }
         cur = parentByPid.get(cur);
       }
     }
+    // With the list it belongs to: set while a scan waits, it paired a new tree with the old list
+    this.lastParentByPid = parentByPid;
 
     const processes = this.getProcesses();
     this.emit('scan-complete', processes);
@@ -1358,6 +1428,14 @@ export class ProcessMonitor extends EventEmitter {
   }
 
   /**
+   * Parent PID as of the last scan, for every process, listed or not. A walk up the tree over the
+   * list alone stops at the first shell or npx in between.
+   */
+  public parentOf(pid: number): number | undefined {
+    return this.lastParentByPid.get(pid);
+  }
+
+  /**
    * Terminates one monitored process: SIGTERM first, SIGKILL if it is still alive after the
    * grace period. Only PIDs from the current process list can be terminated — this is never
    * a general-purpose kill for arbitrary PIDs.
@@ -1375,6 +1453,11 @@ export class ProcessMonitor extends EventEmitter {
 
     this.tracked.delete(pid);
     this.alertedPids.delete(pid);
+    // Out of `tracked`, the pruning after a scan never reaches these again: a new process under
+    // this PID would inherit their history (external audit, 21.11.2026)
+    this.cpuSamples.delete(pid);
+    this.children.delete(pid);
+    this.footprints.delete(pid);
     this.emit('process-killed', { pid, process: proc, signal } satisfies ProcessKilledEvent);
 
     if (signal !== 'SIGKILL' && this.killGraceMs > 0) {
@@ -1410,16 +1493,29 @@ export class ProcessMonitor extends EventEmitter {
 
   /** What `pause` would hold right now: the agents of the watched repository and what they started. */
   public getPauseTargets(): PauseTarget[] {
+    // Each from the scan that saw it: a scan in flight already moved lastScanAt, not the list
+    // (safety review, 21.11.2026: the brake held nothing)
     const listed: PauseTarget[] = this.getProcesses()
       .filter((proc) => proc.pauseTarget && !proc.paused)
-      .map((proc) => ({ pid: proc.pid, cmd: proc.cmd, category: proc.category, cwd: proc.cwd, listed: true }));
+      .map((proc) => ({
+        pid: proc.pid,
+        cmd: proc.cmd,
+        category: proc.category,
+        cwd: proc.cwd,
+        listed: true,
+        firstSeenAt: proc.firstSeenAt,
+        startedAt: proc.startedAt,
+        elapsedSec: proc.elapsedSec,
+      }));
     const unlisted: PauseTarget[] = Array.from(this.pauseExtras.values())
-      .filter((raw) => !this.paused.has(raw.pid))
-      .map((raw) => ({
+      .filter(({ raw }) => !this.paused.has(raw.pid))
+      .map(({ raw, elapsedSec, startedAt }) => ({
         pid: raw.pid,
         cmd: formatReadableCmd(raw.name, raw.cmd ?? raw.name),
         category: 'child' as const,
         listed: false,
+        startedAt,
+        elapsedSec,
       }));
     return [...listed, ...unlisted];
   }
@@ -1449,19 +1545,48 @@ export class ProcessMonitor extends EventEmitter {
    * Holds the pause targets with SIGSTOP. Nothing is terminated and nothing is lost: `resume`
    * continues every process where it stopped. A long autonomous run is paid work; an emergency
    * brake must not throw it away.
+   *
+   * With `confirmed`, only the targets a person was shown, each still the same process: the list
+   * can change while the question is open (external audit, 21.11.2026).
    */
-  public pauseTargets(): number[] {
+  public pauseTargets(confirmed?: PauseTarget[]): PauseOutcome {
+    // Listed in both: the time strayps first saw it, exact. Otherwise the start time, which is
+    // known to a second from `etime`, so within 2 s
+    const same = (a: PauseTarget, b: PauseTarget): boolean => {
+      if (a.pid !== b.pid) return false;
+      if (a.firstSeenAt !== undefined && b.firstSeenAt !== undefined) return a.firstSeenAt === b.firstSeenAt;
+      if (a.startedAt === undefined || b.startedAt === undefined) return a.startedAt === b.startedAt;
+      return Math.abs(a.startedAt - b.startedAt) <= 2000;
+    };
+    let targets = this.getPauseTargets();
+    const gone: number[] = [];
+    const notAsked: number[] = [];
+    if (confirmed) {
+      for (const target of targets) if (!confirmed.some((c) => same(c, target))) notAsked.push(target.pid);
+      for (const c of confirmed) if (!targets.some((target) => same(c, target))) gone.push(c.pid);
+      targets = targets.filter((target) => confirmed.some((c) => same(c, target)));
+    }
+    // The list is up to one scan old. A process held under a reused PID would look new to the next
+    // scan, drop out of what strayps holds and stay stopped: its age now must fit
+    const ages = this.processAges(targets.map((t) => t.pid));
     const held: number[] = [];
     // The agents first, so they start nothing new while what they run is held
-    const targets = this.getPauseTargets().sort((a, b) => Number(b.category === 'agent') - Number(a.category === 'agent'));
+    targets.sort((a, b) => Number(b.category === 'agent') - Number(a.category === 'agent'));
     for (const target of targets) {
       if (target.pid === this.selfPid) continue;
+      const age = ages.get(target.pid);
+      if (age !== undefined && target.elapsedSec !== undefined && age + 2 < target.elapsedSec) {
+        gone.push(target.pid);
+        continue;
+      }
       if (this.processKiller(target.pid, 'SIGSTOP')) {
         this.paused.add(target.pid);
+        if (target.elapsedSec !== undefined) {
+          // the age and the time of the scan that saw it, so the next scans compare like with like
+          const at = target.startedAt !== undefined ? target.startedAt + target.elapsedSec * 1000 : this.lastScanAt;
+          this.heldSince.set(target.pid, { elapsedSec: target.elapsedSec, at });
+        }
         const listed = this.tracked.get(target.pid);
-        const raw = this.pauseExtras.get(target.pid);
-        const elapsedSec = listed?.elapsedSec ?? (raw?.etime !== undefined ? parseElapsedTime(raw.etime).elapsedSec : undefined);
-        if (elapsedSec !== undefined) this.heldSince.set(target.pid, { elapsedSec, at: this.lastScanAt });
         if (listed) listed.paused = true;
         held.push(target.pid);
       }
@@ -1476,7 +1601,7 @@ export class ProcessMonitor extends EventEmitter {
       }
       this.emit('processes-paused', held);
     }
-    return held;
+    return { pids: held, gone, notAsked };
   }
 
   /** Continues every process strayps is holding (SIGCONT). */

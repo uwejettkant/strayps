@@ -585,6 +585,33 @@ describe('interactive terminal view', () => {
     ui.stop();
   });
 
+  it('says that pause holds, not ends, in the question and when it refuses yes', async () => {
+    // The question for pause said "ENDS WHEN YOU ANSWER y" and "Nothing was ended" (external audit, 21.11.2026)
+    const procs = [{ pid: 100, name: 'claude', cmd: 'claude', etime: '01:00:00' }];
+    for (let i = 1; i <= 30; i++) {
+      procs.push({ pid: 100 + i, ppid: 100, name: 'node', cmd: `node /x/node_modules/.bin/mcp-server-${i}`, etime: '01:00:00' } as never);
+    }
+    const h = createHarness({ procs });
+    h.procs[0].cwd = h.dir;
+    await h.monitor.scan();
+    const { tty, ui, type } = await startUi(h);
+    type('pause\r');
+    expect(tty.screen).toContain('HELD WHEN YOU ANSWER y');
+    expect(tty.screen).not.toMatch(/ENDS WHEN|y ends them/);
+    type('y');
+    expect(h.kills).toEqual([]);
+    expect(tty.screen).toContain('Nothing was paused');
+    expect(tty.screen).not.toContain('Nothing was ended');
+
+    tty.rows = 50;
+    type('pause\r');
+    expect(tty.screen).toContain('y holds them');
+    type('y');
+    expect(h.kills.filter((k) => k.signal === 'SIGSTOP')).toHaveLength(31);
+    h.session.resume();
+    ui.stop();
+  });
+
   it('asks y/N before destructive commands and treats everything but y as no', async () => {
     const { tty, ui, type, h } = await startUi();
     type('kill 300\r');

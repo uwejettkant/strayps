@@ -29,6 +29,8 @@ export {
   defaultProcessKiller,
   defaultProcessLister,
   type MonitoredProcess,
+  type PauseOutcome,
+  type PauseTarget,
   parseCpuTime,
   parsePsOutput,
   redactSecrets,
