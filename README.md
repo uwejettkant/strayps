@@ -213,7 +213,6 @@ console.log(dashboard.url);
 strayps/
 ├── assets/                  # SVG banner
 ├── scripts/
-│   ├── agents/              # Guard hook for coding agents working on this repo
 │   └── scenarios/           # Sandbox repo, pseudo-terminal driver, package check
 ├── src/
 │   ├── cli.ts               # Binary entry point
@@ -245,7 +244,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 180 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 176 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real

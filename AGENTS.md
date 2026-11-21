@@ -19,7 +19,7 @@ It is a safety tool. People install it so that less goes wrong. Every change is 
    - Tests and experiments use a fake process table: `createHarness()` in `tests/helpers/harness.ts`, or `--demo`.
    - Never send `kill` or `pause` to an instance that runs without `--demo`. Builds up to the tag `v0.1-full-guard` also answer `POST /api/kill/*` and `/api/pause`: never call those either.
    - `strayps status` is read-only and fine against the real machine.
-   - Safety nets, not excuses: `tests/setup.ts` blocks `process.kill` inside the test suite; `scripts/agents/leash-guard.mjs` (Claude Code hook) asks the user before a kill or pause endpoint of an older build is called.
+   - Safety net, not an excuse: `tests/setup.ts` blocks `process.kill` inside the test suite.
 2. **Do not run an older build on a repository someone is working in.** Builds up to the tag `v0.1-full-guard` watch files and roll one back on a confirmed `revert`. The current build reads no file but `.strayps.json`. Scenario runs that need a config file to edit go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
 3. **Product safety invariants.** Each one has tests. If a change breaks one of those tests, the change is wrong, not the test.
    - *Files*: the only file strayps reads in a repository is `.strayps.json`, never through a symbolic or hard link; broken JSON is never quoted, and the keys and values a warning names are untrusted text. It writes that file only on `init`, `config set` and `config unset`. No other file of a repository is read, written, restored or deleted. Outside repositories it writes one thing: `footprint`'s JSON, in a private temporary directory it removes right after reading.
@@ -117,7 +117,7 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 - For a safety fix, show once that the new test fails on the old code.
 - Platform truth: verified on macOS. Linux paths exist (`/proc` lookup) but are unverified; Windows is not supported. Do not claim more in user-facing text.
 
-## 7. Skills, subagents, hook
+## 7. Skills and subagents
 
 | What | Where | Use it when |
 | :--- | :--- | :--- |
@@ -126,7 +126,6 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 | Skill `release-check` | `.agents/skills/release-check/` | The maintainer asks for a release, or to judge release readiness. |
 | Subagent `scenario-tester` | `.claude/agents/scenario-tester.md` | The scenario pass should run in its own context and come back as a findings list. |
 | Subagent `safety-reviewer` | `.claude/agents/safety-reviewer.md` | A diff touches termination, pause, the server, the config file or anything rendered from watched data. |
-| Hook `leash-guard` | `scripts/agents/leash-guard.mjs`, `.claude/settings.json` | Always on in Claude Code: asks before a kill/pause endpoint of an older build is called. |
 
 Skills are created and edited only in `.agents/skills/`, with `name` and `description` as their only frontmatter. `.claude/skills/` holds symlinks to them. `.agents/` contains no `AGENTS.md`.
 
