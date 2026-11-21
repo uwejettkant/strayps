@@ -4,8 +4,9 @@
 #   SANDBOX=$(scripts/scenarios/make-sandbox.sh)
 #   node dist/cli.js watch "$SANDBOX" --port 47321
 #
-# Contents: two source files, a .env (gitignored), a docker-compose.yml (protected by default),
-# a gitignored data file and one committed baseline. Everything lives under the system temp dir.
+# Contents: two source files, a gitignored .env and data file, a docker-compose.yml and one
+# committed baseline: an ordinary repository to start strayps in and to keep a .strayps.json.
+# Everything lives under the system temp dir.
 set -euo pipefail
 
 SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/strayps-sandbox-XXXXXX")

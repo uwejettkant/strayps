@@ -29,7 +29,7 @@ Example (safe: --demo touches no files and no real processes):
 Never drive kill or pause against an instance that runs without --demo.
 POSIX only (pty, termios).
 """
-import fcntl, os, pty, re, select, signal, struct, sys, termios, time
+import codecs, fcntl, os, pty, re, select, signal, struct, sys, termios, time
 
 KEYS = {
     'enter': b'\r', 'tab': b'\t', 'esc': b'\x1b', 'up': b'\x1b[A', 'down': b'\x1b[B',
@@ -148,6 +148,9 @@ def main():
     raw_since = ''
     everything = ''
     status = None
+    # A character split across two reads must not turn into two replacement characters: that
+    # made a line look one column wider than the terminal (scenario pass, 20.11.2026)
+    decoder = codecs.getincrementaldecoder('utf-8')('replace')
 
     def pump(seconds):
         nonlocal raw_since, everything, status
@@ -161,7 +164,7 @@ def main():
                     data = b''
                 if not data:
                     break
-                text = data.decode('utf-8', 'replace')
+                text = decoder.decode(data)
                 raw_since += text
                 everything += text
                 screen.feed(text)
