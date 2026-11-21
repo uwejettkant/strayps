@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { completeInput, parseCommand, runCommand } from '../src/ui/commands.js';
@@ -131,6 +133,16 @@ describe('running commands against a session', () => {
     expect(h.kills.at(-1)).toEqual({ pid: 100, signal: 'SIGCONT' });
   });
 
+  it('says that nothing was paused when every confirmed process exited before the answer', async () => {
+    // It said "Paused 0 processes; type resume to continue" (external audit, 21.11.2026)
+    const h = await busyHarness();
+    const pause = runCommand(h.session, parseCommand('pause'));
+    h.procs.splice(h.procs.findIndex((p) => p.pid === 100), 1);
+    await h.monitor.scan();
+    expect(pause.confirm!.run().message).toBe('Nothing was paused; PID 100 had exited or is another process now, not held');
+    expect(h.kills).toEqual([]);
+  });
+
   it('ends an agent session with the processes it started after one confirmation that names them', async () => {
     const h = createHarness({
       procs: [
@@ -225,6 +237,17 @@ describe('text that reaches the terminal', () => {
     expect(clean).toContain('a?[2J');
     expect(sanitize(undefined)).toBe('');
     expect(sanitize(42)).toBe('42');
+    // every bidirectional control, the isolates and marks too
+    expect(sanitize('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')).toBe('????????????');
+  });
+
+  it('keeps hidden bidirectional characters out of its own sources', () => {
+    // sanitize() held six of them raw, and GitHub warns about hidden text on such a file
+    // (external audit, 21.11.2026)
+    const hidden = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+    const files = fs.readdirSync('src', { recursive: true, encoding: 'utf-8' }).filter((f) => /\.(ts|html)$/.test(f));
+    expect(files.length).toBeGreaterThan(10);
+    for (const file of files) expect(hidden.test(fs.readFileSync(path.join('src', file), 'utf-8')), file).toBe(false);
   });
 
   it('truncates by visible characters', () => {

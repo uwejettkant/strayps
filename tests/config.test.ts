@@ -91,6 +91,16 @@ describe('.strayps.json that is not a plain file', () => {
     expect(fs.readFileSync(path.join(dir, '.env'), 'utf-8')).toBe('SECRET=from-env-123\n');
   });
 
+  it('reports a link that points nowhere as there and refused, not as missing', () => {
+    // config show said "No .strayps.json here" and, below it, that it is a symbolic link
+    const dir = makeTmpDir();
+    fs.symlinkSync('does-not-exist.json', path.join(dir, CONFIG_FILENAME));
+    const manager = new ConfigManager(dir, undefined, { readOnly: true });
+    expect(manager.hasConfigFile()).toBe(true);
+    expect(manager.getWarnings().join(' ')).toContain('symbolic link');
+    expect(new ConfigManager(makeTmpDir(), undefined, { readOnly: true }).hasConfigFile()).toBe(false);
+  });
+
   it.skipIf(process.platform === 'win32')('reads and writes nothing through a hard link', () => {
     const outside = makeTmpDir('strayps-outside-');
     const dir = makeTmpDir();

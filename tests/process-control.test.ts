@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   defaultProcessAges,
@@ -745,6 +746,48 @@ describe('ProcessMonitor termination', () => {
     expect(second.kills.map((k) => k.signal)).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
+  it('sends no SIGTERM when the PID belongs to a process younger than the one listed', async () => {
+    // The list is up to one scan old: the listed process exited and its PID went to a new one
+    // before the answer came (external audit, 21.11.2026)
+    let age = 1;
+    const { monitor, kills } = setup([agent(100, REPO, { etime: '10:00' })], { processAge: () => age });
+    await monitor.scan(1_000);
+    expect(monitor.killProcess(100)).toBe(false);
+    expect(kills).toEqual([]);
+
+    // the listed process itself, older by now
+    age = 605;
+    expect(monitor.killProcess(100)).toBe(true);
+    expect(kills).toEqual([{ pid: 100, signal: 'SIGTERM' }]);
+    monitor.stop();
+  });
+
+  it('reads the real age with ps before SIGTERM and sends nothing to a PID younger than the listed process', async () => {
+    // read-only: ps on the parent of this test process, listed as ten days old; the real killer is
+    // used, and the suite-wide guard would record a kill that got through
+    const monitor = new ProcessMonitor({
+      rootDir: REPO,
+      selfPid: 999_999,
+      processLister: async () => [agent(process.ppid, REPO, { etime: '10-00:00:00' })],
+    });
+    await monitor.scan(1_000);
+    expect(monitor.killProcess(process.ppid)).toBe(false);
+    expect(takeBlockedKills()).toEqual([]);
+    monitor.stop();
+  });
+
+  it('sends no SIGKILL to a PID that a younger process took before SIGTERM, once it can be read', async () => {
+    // ps could not read the age before SIGTERM; three seconds later it reads a process younger
+    // than the listed one, but older than the SIGTERM
+    vi.useFakeTimers();
+    const ages: Array<number | undefined> = [undefined, 5];
+    const { monitor, kills } = setup([agent(100, REPO, { etime: '10:00' })], { processAge: () => ages.shift() });
+    await monitor.scan(1_000);
+    expect(monitor.killProcess(100)).toBe(true);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(kills).toEqual([{ pid: 100, signal: 'SIGTERM' }]);
+  });
+
   it('settles pending terminations when the monitor stops', async () => {
     vi.useFakeTimers();
     const { monitor, kills } = setup([agent(100, REPO)]);
@@ -818,7 +861,8 @@ describe('ProcessMonitor termination', () => {
     const monitor = new ProcessMonitor({
       rootDir: REPO,
       selfPid: 999_999,
-      processLister: async () => [agent(process.ppid, REPO)],
+      // listed no older than it is: the age check before SIGTERM reads the real one
+      processLister: async () => [agent(process.ppid, REPO, { etime: '00:00' })],
       // no processKiller: this is the real one
     });
     await monitor.scan(1_000);
@@ -989,6 +1033,93 @@ describe('secrets in command lines', () => {
     );
   });
 
+  it('redacts query parameters, JSON keys, quoted values, tokens before the @ of a URL and common token formats', () => {
+    // each of these was shown in full (external audit, 21.11.2026)
+    const cases: Array<[string, string]> = [
+      ['mcp-remote https://api.example.com/sse?api_key=SUPERSECRET1&foo=bar', 'mcp-remote https://api.example.com/sse?api_key=[redacted]&foo=bar'],
+      ['mcp-remote https://api.example.com/sse?x=1&token=SUPERSECRET1', 'mcp-remote https://api.example.com/sse?x=1&token=[redacted]'],
+      [`x --headers '{"x-api-key":"SUPERSECRET1"}'`, `x --headers '{"x-api-key":"[redacted]"}'`],
+      ['x --headers {"Authorization": "Bearer A B", "accept": "json"}', 'x --headers {"Authorization": "[redacted]", "accept": "json"}'],
+      // quotes that are part of the argument (a command for sh -c): up to the closing one
+      ['sh -c x --token "my secret with spaces" --other', 'sh -c x --token [redacted] --other'],
+      ["sh -c x --token='my secret' --next", 'sh -c x --token=[redacted] --next'],
+      ['sh -c x API_KEY="a b c" y', 'sh -c x API_KEY=[redacted] y'],
+      ['git clone https://SUPERSECRETTOKEN1@github.com/a/b', 'git clone https://[redacted]@github.com/a/b'],
+      ['curl --header=Authorization: token abc123', 'curl --header=Authorization: token [redacted]'],
+      [
+        'x AIzaSyA1234567890abcdefghijklmnopqrstu AKIAIOSFODNN7EXAMPLE npm_abcdefghijklmnopqrstuvwxyz0123456789 glpat-abcdefghij1234567890',
+        'x [redacted] [redacted] [redacted] [redacted]',
+      ],
+    ];
+    for (const [cmd, shown] of cases) expect(redactSecrets(cmd), cmd).toBe(shown);
+
+    // shapes the first rewrite showed in full and the old patterns had hidden (safety review, 21.11.2026)
+    const kept: Array<[string, string]> = [
+      ['curl -H Accept:json,Authorization:Basic dXNlcjpwYXNz https://x', 'curl -H Accept:json,Authorization:Basic [redacted] https://x'],
+      ['x {Authorization: token abc123def}', 'x {Authorization: token [redacted]}'],
+      ['x headers:Authorization:token abc123def', 'x headers:Authorization:token [redacted]'],
+      ['x -H x-api-key : v123', 'x -H x-api-key : [redacted]'],
+      ['sh -c curl -H x-api-key:"abc123" https://x', 'sh -c curl -H x-api-key:"[redacted]" https://x'],
+      ['sh -c curl -H "x-api-key: abc 123" https://x', 'sh -c curl -H "x-api-key: [redacted]" https://x'],
+      ["sh -c curl -H 'Authorization: Bearer abc def'", "sh -c curl -H 'Authorization: Bearer [redacted]'"],
+      ['redis-cli -u redis://default:pa#ss@host:6379', 'redis-cli -u redis://[redacted]@host:6379'],
+      ['psql postgres://u:p?w@h/db', 'psql postgres://[redacted]@h/db'],
+      ['pip install -ihttps://user:tok@host/simple x', 'pip install -ihttps://[redacted]@host/simple x'],
+      [`x ${'a'.repeat(40)}+db://u:pw@h`, `x ${'a'.repeat(40)}+db://[redacted]@h`],
+      ['node --NO-auth secret-value', 'node --NO-auth secret-value'],
+    ];
+    for (const [cmd, shown] of kept) expect(redactSecrets(cmd), cmd).toBe(shown);
+
+    // what only looks alike stays readable
+    for (const cmd of [
+      'npx -y @modelcontextprotocol/server-github@1.2.3 https://registry.npmjs.org/@scope/pkg',
+      'docker run -p 8080:80 -v /data:/run/data image:latest localhost:3000',
+      'node --inspect=127.0.0.1:9229 x.js PATH=/usr/bin:/bin',
+      'claude --model claude-sonnet-5-5 --permission-mode acceptEdits',
+      'x --token',
+      'x --token= y',
+    ]) {
+      expect(redactSecrets(cmd), cmd).toBe(cmd);
+    }
+  });
+
+  it('takes milliseconds for a command line of 100,000 characters, not seconds per scan', async () => {
+    // One argument of 50,000 letters held every scan for 2.7 s: the patterns started anew at each
+    // character (external audit, 21.11.2026). macOS allows command lines of 1 MB.
+    const n = 100_000;
+    const hostile = [
+      ' ' + 'a'.repeat(n),
+      ' ' + 'token'.repeat(n / 5),
+      ' ' + 'x-'.repeat(n / 2),
+      ' --' + 'a-'.repeat(n / 2),
+      ' ' + 'a://b:'.repeat(n / 6),
+      ' "token":"' + 'x'.repeat(n),
+      ' ?' + 'token=a&'.repeat(n / 8),
+      ' --token "a'.repeat(n / 11),
+      ' ' + 'sk-'.repeat(n / 3),
+      ' "token:a'.repeat(n / 9),
+      ' token:"a'.repeat(n / 9),
+      ' ' + 'token:a,'.repeat(n / 8),
+      ' x://' + 'a:'.repeat(n / 2),
+    ];
+    for (const cmd of hostile) {
+      const started = performance.now();
+      redactSecrets(cmd);
+      expect(performance.now() - started, cmd.slice(0, 12)).toBeLessThan(250);
+    }
+
+    // the whole scan, with such a line on an agent, an MCP server and a process nobody lists
+    const { monitor } = setup([
+      agent(100, REPO, { cmd: `claude -p ${'a'.repeat(n)}` }),
+      mcp(101, 100, { cmd: `node /x/node_modules/.bin/some-mcp-server ${'token'.repeat(n / 5)}` }),
+      { pid: 300, ppid: 1, name: 'python3', cmd: `python3 -c ${'x-'.repeat(n / 2)}`, etime: '10:00' },
+    ]);
+    const started = performance.now();
+    const list = await monitor.scan(1_000);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(list.map((p) => p.pid).sort()).toEqual([100, 101]);
+  });
+
   it('redacts before it shortens: a secret cut at the edge of the line stays hidden', async () => {
     // Shortened first, a URL lost its "@" and a token its length, and neither was recognized any
     // more: the visible part of the password or token was shown (external audit, 21.11.2026)
@@ -1000,6 +1131,18 @@ describe('secrets in command lines', () => {
     const text = list.map((p) => p.cmd).join('\n');
     expect(list).toHaveLength(2);
     expect(text).not.toMatch(/hunter|ghp_a/);
+  });
+});
+
+describe('working directories', () => {
+  it('shortens the home directory to ~, but not a directory whose name only starts like it', async () => {
+    // /Users/x-backup/repo was shown as ~-backup/repo (external audit, 21.11.2026)
+    const home = os.homedir();
+    const { monitor } = setup([agent(100, `${home}/projects/app`), agent(200, `${home}-backup/repo`), agent(300, home)]);
+    const byPid = new Map((await monitor.scan(1_000)).map((p) => [p.pid, p.cwd]));
+    expect(byPid.get(100)).toBe('~/projects/app');
+    expect(byPid.get(200)).toBe(`${home}-backup/repo`);
+    expect(byPid.get(300)).toBe('~');
   });
 });
 

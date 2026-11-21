@@ -6,7 +6,7 @@
 
 **See every AI coding agent and MCP server running on your machine, find the ones left behind, and end them one session at a time. Local only: no account, no telemetry.**
 
-![package size](https://img.shields.io/badge/package-65.9%20kB-5BE49B?style=flat-square&labelColor=0D120F)
+![package size](https://img.shields.io/badge/package-67.0%20kB-5BE49B?style=flat-square&labelColor=0D120F)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-5BE49B?style=flat-square&logo=typescript&labelColor=0D120F)](./tsconfig.json)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20%20LTS-5BE49B?style=flat-square&logo=node.js&labelColor=0D120F)](./package.json)
 [![Local](https://img.shields.io/badge/privacy-local%20only%20%C2%B7%20no%20account%20%C2%B7%20no%20telemetry-5BE49B?style=flat-square&labelColor=0D120F)](#security-model)
@@ -84,7 +84,7 @@ Besides agents and MCP servers, the list shows what an agent started and is stil
 - **Agents inside apps.** An agent built into an editor (Cursor's agent, Copilot in VS Code) is part of the editor's own processes. The MCP servers such an app starts are listed, attached to the app; the agent itself is not a process of its own, and the app is never taken for one.
 - **Processes that left the tree.** A process that outlived the agent that started it, or detached itself (`nohup`, `setsid`, a daemon), no longer shows which session it belongs to, and ending the session does not end it. If it is an MCP server or an agent, it still appears in the list, as a process of its own; anything else, such as a dev server left running, is not listed any more.
 - **Agents it does not recognize.** An agent with a name strayps does not know that starts no MCP server is not listed until you add its name to `agents`.
-- **Other systems.** Verified on macOS. Linux is implemented but not yet verified, and its classification is less reliable. Windows is not supported.
+- **Other systems.** Verified on macOS. Linux is implemented but not yet verified, and its classification is less reliable. Windows is not supported, and npm does not install strayps there.
 
 ---
 
@@ -201,9 +201,9 @@ console.log(dashboard.url);
 - The dashboard server binds to `127.0.0.1`, answers only when addressed as this machine, and changes nothing: every request that is not a read is refused. A web page on another site cannot open its live stream.
 - Only processes from the monitored list can be terminated, and only from the terminal: one process, or one agent with the processes it started, exactly as the confirmation listed them. `pause` holds only the agents of the repository strayps was started in and the processes they started, as the confirmation listed them, each checked to still be the same process (its start time, and its age read again right before it is held, where `ps` can read it), and strayps continues them when it exits: by `exit`, Ctrl+C, SIGTERM, SIGHUP, SIGQUIT, or a crash in its own code. Ended by a signal it does not handle (`kill -9`, or a rarely used one such as SIGUSR2 or SIGALRM), or by a fatal error of Node itself (out of memory), it cannot run anything, and the held processes stay stopped: `kill -CONT <pid>` continues them.
 - The only file strayps reads in a repository is `.strayps.json`, and only when it is a plain file (never through a symbolic or hard link). It writes that file only on `init`, `config set` and `config unset`. Of an old `.agentguard.json` it only checks whether it is there, without opening it. To read memory on macOS it runs `/usr/bin/footprint`, which writes its result into a private temporary directory that strayps removes right after; `ps`, `lsof` and `footprint` are run by their full paths there, so a program of the same name in a repository's `node_modules/.bin` is never run instead.
-- Command lines, directories and log messages are treated as untrusted text in the dashboard and in the terminal. Values that look like secrets in command lines (`--token`, `--api-key`, `--password`, `API_KEY=…`, credentials in URLs) are shown as `[redacted]`.
+- Command lines, directories and log messages are treated as untrusted text in the dashboard and in the terminal. Values that look like secrets in command lines are shown as `[redacted]`: flags and variables named like a token, key or password (`--token`, `--api-key=…`, `API_KEY=…`), headers (`Authorization:`, `x-api-key:`), query parameters (`?token=…`), JSON keys (`{"api_key":"…"}`), whatever stands before the `@` of a URL, and well-known token formats (GitHub, OpenAI and Anthropic `sk-…`, Slack, Google, AWS, npm, GitLab).
 - Found a vulnerability? Please report it privately, see [`SECURITY.md`](./SECURITY.md).
-- Known limits: any local process, another user account included, can read the dashboard: it shows command lines (with secrets redacted) and directories. The agents you watch can edit `.strayps.json`; a running strayps applies the edit and logs it as a warning. The dashboard loads nothing from another host: its styles are generated when the package is built and served by strayps itself. It needs a current browser (Chrome 111, Safari 16.4, Firefox 128 or newer).
+- Known limits: any local process, another user account included, can read the dashboard: it shows command lines (with secrets redacted) and directories. Secrets are recognized by their name or format; anything else in a command line is shown. `ps` joins the arguments with spaces, so a secret with spaces in it that was passed as one argument is redacted only up to its first space. The agents you watch can edit `.strayps.json`; a running strayps applies the edit and logs it as a warning. The dashboard loads nothing from another host: its styles are generated when the package is built and served by strayps itself. It needs a current browser (Chrome 111, Safari 16.4, Firefox 128 or newer).
 
 ---
 
@@ -244,7 +244,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 194 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 206 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real

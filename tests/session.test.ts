@@ -122,6 +122,28 @@ describe('MonitorSession', () => {
     expect(h.session.getKillPlan(800)!.alsoEnds.map((p) => p.pid)).toEqual([801]);
   });
 
+  it('treats the home directory as home also when HOME ends with a slash', async () => {
+    // HOME=/Users/x/ made /Users/x look like any other directory: an agent started in the home
+    // directory took along the other agents started there (safety review, 21.11.2026)
+    const before = process.env.HOME;
+    const home = os.homedir().replace(/\/+$/, '');
+    process.env.HOME = `${home}/`;
+    try {
+      const h = createHarness({
+        procs: [
+          { pid: 800, name: 'nvim', cmd: 'nvim', cwd: home, etime: '05:00:00' },
+          { pid: 801, ppid: 800, name: 'node', cmd: 'node /x/node_modules/.bin/mcp-hub', etime: '05:00:00' },
+          { pid: 802, ppid: 800, name: 'claude', cmd: 'claude', cwd: home, etime: '04:00:00' },
+        ],
+      });
+      await h.monitor.scan();
+      expect(h.session.getSnapshot().processes.find((p) => p.pid === 800)?.cwd).toBe('~');
+      expect(h.session.getKillPlan(800)!.alsoEnds.map((p) => p.pid)).toEqual([801]);
+    } finally {
+      process.env.HOME = before;
+    }
+  });
+
   it('does not end what an agent started in another directory: that is a session of its own', async () => {
     // An agent strayps does not recognize (no MCP server, not in the settings), started by a
     // recognized one in another repository, became its child and would have ended with it (review, 20.11.2026)

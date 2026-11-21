@@ -3,64 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- MANDATORY: Declare support for both light and dark themes -->
-  <meta name="color-scheme" content="light dark" />
+  <meta name="color-scheme" content="dark" />
   <title>strayps — agent and MCP processes</title>
   <link rel="stylesheet" href="/dashboard.css" />
   <style nonce="__STRAYPS_NONCE__">
     :root {
-      --bg-light: #f4f7f5;
-      --bg-dark: #080B09;
-      --surface-light: #ffffff;
-      --surface-dark: #0D120F;
-      --surface-2-light: #edf2ee;
-      --surface-2-dark: #0B0F0D;
-      --border-light: #cdd8d1;
-      --border-dark: #1F2C25;
-      --text-strong-light: #09110c;
-      --text-strong-dark: #F2F7F4;
-      --text-body-light: #2b3b32;
-      --text-body-dark: #C9D6CE;
-      --text-muted-light: #52665b;
-      --text-muted-dark: #8FA197;
-      --accent-light: #0d8a4e;
-      --accent-dark: #5BE49B;
-
-      --bg: var(--bg-dark);
-      --surface: var(--surface-dark);
-      --surface-2: var(--surface-2-dark);
-      --border: var(--border-dark);
-      --text-strong: var(--text-strong-dark);
-      --text-body: var(--text-body-dark);
-      --text-muted: var(--text-muted-dark);
-      --accent: var(--accent-dark);
-
-      /* MANDATORY: Fallback for browsers without light-dark support */
-      @media (prefers-color-scheme: dark) {
-        --bg: var(--bg-dark);
-        --surface: var(--surface-dark);
-        --surface-2: var(--surface-2-dark);
-        --border: var(--border-dark);
-        --text-strong: var(--text-strong-dark);
-        --text-body: var(--text-body-dark);
-        --text-muted: var(--text-muted-dark);
-        --accent: var(--accent-dark);
-      }
-
-      @supports (color: light-dark(white, black)) {
-        --bg: light-dark(var(--bg-light), var(--bg-dark));
-        --surface: light-dark(var(--surface-light), var(--surface-dark));
-        --surface-2: light-dark(var(--surface-2-light), var(--surface-2-dark));
-        --border: light-dark(var(--border-light), var(--border-dark));
-        --text-strong: light-dark(var(--text-strong-light), var(--text-strong-dark));
-        --text-body: light-dark(var(--text-body-light), var(--text-body-dark));
-        --text-muted: light-dark(var(--text-muted-light), var(--text-muted-dark));
-        --accent: light-dark(var(--accent-light), var(--accent-dark));
-      }
-
-      /* Force dark console appearance by default while respecting color-scheme mechanics */
+      /* A dark console only: the colors below are fixed */
       color-scheme: dark;
-      accent-color: var(--accent);
+      accent-color: #5BE49B;
     }
 
     body {
@@ -86,17 +36,6 @@
     .status-dot-live {
       background-color: #5BE49B;
       box-shadow: 0 0 8px #5BE49B;
-    }
-
-    /* MANDATORY dialog scroll containment rules */
-    dialog:modal {
-      overscroll-behavior: contain;
-    }
-    dialog::backdrop {
-      overflow: hidden;
-      overscroll-behavior: contain;
-      background: rgba(4, 8, 6, 0.82);
-      backdrop-filter: blur(3px);
     }
   </style>
 </head>
@@ -226,8 +165,11 @@
   <script nonce="__STRAYPS_NONCE__">
     // Everything shown here comes from command lines, working directories and reasons, i.e. from
     // the very processes this page shows. Never insert it as markup.
+    // Bidirectional controls would let a command line display differently from what it is: they
+    // become "?", as in the terminal
     function esc(value) {
       return String(value ?? '')
+        .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '?')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -235,7 +177,6 @@
         .replace(/'/g, '&#39;');
     }
 
-    let lastStatus = null;
     // An observation (old, orphaned, silent), never a verdict that a process may be killed
     const isStaleOrFrozen = (p) => p.status === 'FROZEN' || p.status === 'STALE';
 
@@ -248,7 +189,6 @@
 
     function renderStatus(state) {
       if (!state) return;
-      lastStatus = state;
       const cfg = state.config;
       document.getElementById('repo-path').textContent = state.rootDir || '.';
       document.getElementById('agent-names').textContent = (cfg.agents || []).length > 0 ? cfg.agents.join(', ') : 'none';

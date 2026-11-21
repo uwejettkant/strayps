@@ -8,10 +8,12 @@ import type { ActivityEvent } from '../core/events.js';
  * Before any of it reaches a terminal, control characters and escape sequences are neutralized
  * (a file name must not be able to clear the screen, move the cursor or retitle the window),
  * as are bidirectional overrides that would let text display differently from what it is.
+ * The pattern names them as escapes: written raw, they are invisible in the source, and GitHub warns
+ * about hidden bidirectional text on the file.
  */
 export function sanitize(text: unknown): string {
   return String(text ?? '').replace(
-    /[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g,
+    /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
     '?',
   );
 }
@@ -52,7 +54,7 @@ export function formatClock(timestamp: number): string {
 
 /** `/Users/me/Projekte/app` -> `~/Projekte/app` */
 export function tildify(absPath: string): string {
-  const home = os.homedir();
+  const home = os.homedir().replace(/\/+$/, '');
   if (home && (absPath === home || absPath.startsWith(home + '/'))) {
     return `~${absPath.slice(home.length)}`;
   }

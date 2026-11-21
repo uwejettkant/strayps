@@ -69,6 +69,14 @@ function loadDashboardHtml(): string {
   return `<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8"><meta name="color-scheme" content="light dark"><title>strayps</title></head><body><h1>strayps</h1><p>Dashboard assets are missing from this installation. The terminal view and the API still work.</p></body></html>`;
 }
 
+/**
+ * A browser says where a request comes from. Without the header (curl, a script) or typed into the
+ * address bar ("none"), the request is local; from another site it is refused.
+ */
+function isCrossSite(fetchSite: string | undefined): boolean {
+  return Boolean(fetchSite) && fetchSite !== 'same-origin' && fetchSite !== 'none';
+}
+
 /** `localhost:4321` -> `localhost`, `[::1]:4321` -> `[::1]` */
 function hostnameOf(hostHeader: string): string {
   const value = hostHeader.trim().toLowerCase();
@@ -108,6 +116,7 @@ export function createDashboardApp(deps: DashboardServerDeps) {
   // the kill route.
   app.use('*', async (c, next) => {
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
+      c.header('Allow', 'GET, HEAD');
       return c.json({ error: 'This dashboard is read-only; use the terminal to end or pause processes' }, 405);
     }
     await next();
@@ -154,6 +163,9 @@ export function createDashboardApp(deps: DashboardServerDeps) {
 
   // REST Status API
   app.get('/api/status', (c) => {
+    // Another site cannot read the answer (no CORS headers), but it need not get one either
+    if (isCrossSite(c.req.header('sec-fetch-site'))) return c.json({ error: 'Forbidden: cross-site request' }, 403);
+    c.header('X-Content-Type-Options', 'nosniff');
     c.header('Cache-Control', 'no-store');
     return c.json(getStatusSnapshot());
   });
@@ -167,8 +179,7 @@ export function createDashboardApp(deps: DashboardServerDeps) {
   const openStreams = new Set<() => void>();
   session.setMaxListeners(MAX_EVENT_STREAMS + 10);
   app.get('/api/events', (c) => {
-    const fetchSite = c.req.header('sec-fetch-site');
-    if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+    if (isCrossSite(c.req.header('sec-fetch-site'))) {
       return c.json({ error: 'Forbidden: cross-site request' }, 403);
     }
     return streamSSE(c, async (stream) => {

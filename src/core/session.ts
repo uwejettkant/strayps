@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import os from 'node:os';
 import {
   CONFIG_FILENAME,
   type ConfigReloadResult,
@@ -10,6 +9,7 @@ import {
 import type { ActivityEvent, ActivityEventType } from './events.js';
 import {
   formatMemory,
+  homeDirectory,
   type MonitoredProcess,
   type PauseTarget,
   type ProcessKilledEvent,
@@ -281,7 +281,7 @@ export class MonitorSession extends EventEmitter {
     if (!target) return null;
     if (target.category !== 'agent') return { target, alsoEnds: [] };
     const byPid = new Map(processes.map((p) => [p.pid, p]));
-    const home = os.homedir();
+    const home = homeDirectory();
     const sharedDirectory = (agent: MonitoredProcess): boolean =>
       Boolean(agent.cwd && agent.cwd === target.cwd && !['/', '~', home].includes(agent.cwd));
     const saysNothing = (dir: string | undefined): boolean => !dir || ['/', '~', home].includes(dir);
@@ -353,7 +353,7 @@ export class MonitorSession extends EventEmitter {
       this.scheduleUpdate();
       return killed
         ? { ok: true, pid }
-        : { ok: false, pid, error: 'Signal could not be delivered (already gone or not permitted)' };
+        : { ok: false, pid, error: 'Nothing was sent: the process is gone, its PID belongs to another process now, or the signal was not permitted' };
     }
 
     const confirmed = new Map(also!.map((c) => [c.pid, c.firstSeenAt]));
@@ -378,7 +378,7 @@ export class MonitorSession extends EventEmitter {
     }
     this.scheduleUpdate();
     if (!killed && alsoEnded.length === 0) {
-      return { ok: false, pid, error: 'Signal could not be delivered (already gone or not permitted)' };
+      return { ok: false, pid, error: 'Nothing was sent: the process is gone, its PID belongs to another process now, or the signal was not permitted' };
     }
     return { ok: true, pid, targetSignalled: killed, alsoEnded, leftRunning, notFound, failed };
   }

@@ -178,7 +178,7 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
               const endedText = `${ended} process${ended === 1 ? '' : 'es'} it started`;
               const parts = [
                 result.targetSignalled === false
-                  ? `PID ${proc.pid} had already exited; sent SIGTERM to the ${endedText}`
+                  ? `PID ${proc.pid}: nothing sent (gone, another process now, or not permitted); sent SIGTERM to the ${endedText}`
                   : `Sent SIGTERM to PID ${proc.pid} and the ${endedText}`,
               ];
               const left = result.leftRunning ?? [];
@@ -186,7 +186,7 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
               const gone = result.notFound ?? [];
               if (gone.length > 0) parts.push(`PID ${gone.join(', ')} had exited or no longer ${gone.length === 1 ? 'belongs' : 'belong'} to the session, nothing sent`);
               const failed = result.failed ?? [];
-              if (failed.length > 0) parts.push(`PID ${failed.join(', ')} could not be signalled`);
+              if (failed.length > 0) parts.push(`PID ${failed.join(', ')}: nothing sent (gone, another process now, or not permitted)`);
               return { message: parts.join('; '), level: left.length > 0 || failed.length > 0 ? 'warn' : 'info' };
             },
           },
@@ -227,7 +227,11 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
             const { pids, gone = [], notAsked } = session.pause(targets);
             // A reused PID is in both lists: it counts as gone, not as new
             const fresh = (notAsked ?? []).filter((pid) => !gone.includes(pid));
-            const parts = [`Paused ${pids.length} process${pids.length === 1 ? '' : 'es'}; type resume to continue`];
+            const parts = [
+              pids.length > 0
+                ? `Paused ${pids.length} process${pids.length === 1 ? '' : 'es'}; type resume to continue`
+                : 'Nothing was paused',
+            ];
             if (gone.length > 0) {
               parts.push(`PID ${gone.join(', ')} had exited or ${gone.length === 1 ? 'is another process' : 'are other processes'} now, not held`);
             }

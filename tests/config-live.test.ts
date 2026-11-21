@@ -147,7 +147,8 @@ describe('changing single values (strayps config set / unset)', () => {
 
   it('validates values the way the file is validated', () => {
     expect(parseConfigValue('limits.staleSessionHours', '20')).toEqual({ ok: true, value: 20 });
-    for (const bad of ['0', '-1', '1.5', 'many', '', '20 hours']) {
+    // 400 digits: Infinity, written to the file as null (external audit, 21.11.2026)
+    for (const bad of ['0', '-1', '1.5', 'many', '', '20 hours', '9'.repeat(400)]) {
       expect(parseConfigValue('limits.staleSessionHours', bad), bad).toMatchObject({ ok: false });
     }
     expect(parseConfigValue('agents', 'vibe, opencode')).toEqual({ ok: true, value: ['vibe', 'opencode'] });

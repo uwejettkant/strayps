@@ -347,8 +347,14 @@ export class ConfigManager {
     return { ...this.sources };
   }
 
+  /** Something is there, followed or not: a link that points nowhere is reported, not called missing. */
   public hasConfigFile(): boolean {
-    return fs.existsSync(this.configFilePath);
+    try {
+      fs.lstatSync(this.configFilePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   public isReadOnly(): boolean {
@@ -484,7 +490,8 @@ export function parseConfigValue(key: ConfigKey, raw: string): ParsedConfigValue
       ? { ok: false, error: `"${invalid}" is not a program name (no path, no spaces), e.g. vibe` }
       : { ok: true, value: names };
   }
-  if (!/^\d+$/.test(text) || Number(text) < 1) {
+  // 400 digits are a number too, but Infinity, written to the file as null
+  if (!/^\d+$/.test(text) || Number(text) < 1 || !Number.isSafeInteger(Number(text))) {
     return { ok: false, error: `${key} must be a whole number >= 1 (got "${raw}")` };
   }
   return { ok: true, value: Number(text) };

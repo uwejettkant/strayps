@@ -209,6 +209,20 @@ describe('dashboard page', () => {
     }
   });
 
+  it('shows bidirectional controls in command lines as "?", as the terminal does', () => {
+    // "‮" turns "evil.exe" around on screen; the terminal neutralized it, the page did not
+    // (safety review, 21.11.2026)
+    const { api, getElementById } = loadDashboard();
+    api.renderStatus(
+      stateWith({
+        processes: [{ pid: 1, status: 'ACTIVE', category: 'agent', cmd: 'node a‮gnp.exe ⁦x⁩', cwd: '/w‏', memoryMb: 1, cpu: 0 }],
+      }),
+    );
+    const markup = getElementById('process-list').innerHTML;
+    expect(markup).not.toMatch(/[؜‎‏‪-‮⁦-⁩]/);
+    expect(markup).toContain('a?gnp.exe ?x?');
+  });
+
   it('labels a process by where it really runs, and never as safe to kill', () => {
     const { api, getElementById } = loadDashboard();
     const proc = { status: 'ACTIVE', category: 'agent', cmd: 'claude', memoryMb: 1, cpu: 1 };

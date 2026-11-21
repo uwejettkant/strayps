@@ -247,6 +247,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
       });
     } catch (err) {
       processMonitor.stop();
+      session.dispose();
       throw new CliError(err instanceof Error ? err.message : String(err));
     }
   }

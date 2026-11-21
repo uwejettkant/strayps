@@ -56,6 +56,24 @@ describe('dashboard API: read-only', () => {
     expect(h.session.getSnapshot().processes.every((p) => !p.paused)).toBe(true);
   });
 
+  it('names the methods it allows, and gives the status to its own page, curl and scripts, not to another site', async () => {
+    const h = createHarness();
+    const { app } = appFor(h);
+    const refused = await app.request('/api/status', { method: 'POST' });
+    expect(refused.status).toBe(405);
+    expect(refused.headers.get('allow')).toBe('GET, HEAD');
+
+    for (const site of [undefined, 'same-origin', 'none']) {
+      const res = await app.request('/api/status', { headers: site ? { 'Sec-Fetch-Site': site } : {} });
+      expect(res.status, String(site)).toBe(200);
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    }
+    for (const site of ['cross-site', 'same-site']) {
+      const res = await app.request('/api/status', { headers: { 'Sec-Fetch-Site': site } });
+      expect(res.status, site).toBe(403);
+    }
+  });
+
   it('answers only when addressed as this machine (DNS rebinding)', async () => {
     const h = createHarness();
     const { app } = appFor(h);
