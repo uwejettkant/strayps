@@ -1127,9 +1127,10 @@ export class ProcessMonitor extends EventEmitter {
     const reached = new Set<number>(agents);
     for (const raw of below) {
       if (!reached.has(raw.ppid ?? -1) || selfChain.has(raw.pid)) continue;
-      // an agent first: it is named, whatever program runs it
+      // an agent first: it is named, whatever program runs it. Not one being ended: it runs only
+      // until it exits, and "type pause again" would offer nothing (safety review, 22.11.2026)
       if (isAgent(raw)) {
-        asked.push(raw);
+        if (!this.terminating.has(raw.pid)) asked.push(raw);
         continue;
       }
       if (isAppOrTerminal(raw)) continue;

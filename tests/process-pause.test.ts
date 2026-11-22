@@ -297,6 +297,25 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     expect(asked.map((t) => t.pid)).toEqual([100]);
     expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [] });
     expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '100:SIGSTOP']);
+    // hold() refuses it too, whatever offers it: every SIGSTOP goes through there
+    const internals = monitor as unknown as { hold(pid: number, elapsedSec: number, at: number): boolean };
+    expect(internals.hold(102, 120, 0)).toBe(false);
+    expect(kills.filter((k) => k.pid === 102).map((k) => k.signal)).toEqual(['SIGTERM']);
+    monitor.resumePaused();
+  });
+
+  it('does not name an agent being ended as one that keeps running', async () => {
+    // A subagent in its grace period was reported as "started after the question and keeps
+    // running: type pause again", which the next pause did not offer either (safety review, 22.11.2026)
+    const { monitor, kills } = setup([agent(100, REPO, { cpu: 1 }), agent(200, REPO, { ppid: 100, cpu: 1 })]);
+    await monitor.scan(1_000);
+    expect(monitor.killProcess(200)).toBe(true);
+    await monitor.scan(3_000);
+
+    const asked = monitor.getPauseTargets();
+    expect(asked.map((t) => t.pid)).toEqual([100]);
+    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [] });
+    expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['200:SIGTERM', '100:SIGSTOP']);
     monitor.resumePaused();
   });
 

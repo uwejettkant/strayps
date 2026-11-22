@@ -245,7 +245,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 243 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 244 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real
