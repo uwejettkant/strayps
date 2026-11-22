@@ -120,6 +120,11 @@ export interface PauseOutcome {
    * question was open (also in `pids`). Never an agent.
    */
   alsoHeld: number[];
+  /**
+   * Not held because they run below a process being ended (inside its SIGTERM grace period), up to
+   * their agent: held, they could keep it from exiting cleanly. Never an agent.
+   */
+  belowEnding: number[];
 }
 
 export interface ProcessKilledEvent {

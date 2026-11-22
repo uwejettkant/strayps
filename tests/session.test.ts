@@ -336,7 +336,7 @@ describe('MonitorSession', () => {
     await h.monitor.scan();
 
     const result = h.session.pause(asked);
-    expect(result).toEqual({ pids: [100, 102], gone: [101], notAsked: [103], alsoHeld: [102] });
+    expect(result).toEqual({ pids: [100, 102], gone: [101], notAsked: [103], alsoHeld: [102], belowEnding: [] });
     expect(h.kills).toEqual([
       { pid: 100, signal: 'SIGSTOP' },
       { pid: 102, signal: 'SIGSTOP' },
@@ -362,7 +362,31 @@ describe('MonitorSession', () => {
     expect(h.session.getPauseTargets().map((t) => t.pid).sort()).toEqual([100, 101]);
 
     const result = h.session.pause(asked);
-    expect(result).toEqual({ pids: [100, 101], gone: [], notAsked: [], alsoHeld: [101] });
+    expect(result).toEqual({ pids: [100, 101], gone: [], notAsked: [], alsoHeld: [101], belowEnding: [] });
+    h.session.resume();
+  });
+
+  it('pause leaves what runs below a process being ended to it, and says which', async () => {
+    const h = createHarness({
+      procs: [
+        { pid: 100, name: 'claude', cmd: 'claude', cpu: 5, etime: '10:00' },
+        { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', etime: '02:00' },
+        { pid: 103, ppid: 102, name: 'node', cmd: 'node vite-worker.js', etime: '02:00' },
+      ],
+    });
+    h.procs[0].cwd = h.dir;
+    // it takes its time to exit after SIGTERM
+    h.stubborn.add(102);
+    await h.monitor.scan();
+    expect(h.session.killProcess(102)).toMatchObject({ ok: true });
+    await h.monitor.scan();
+
+    const result = h.session.pause(h.session.getPauseTargets());
+    expect(result).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [], belowEnding: [103] });
+    expect(h.kills).toEqual([
+      { pid: 102, signal: 'SIGTERM' },
+      { pid: 100, signal: 'SIGSTOP' },
+    ]);
     h.session.resume();
   });
 

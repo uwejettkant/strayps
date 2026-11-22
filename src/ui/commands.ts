@@ -228,7 +228,7 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
           run: () => {
             // What was shown, each still the same process, and what those agents started while the
             // question was open; a new agent is asked about first, by the next pause
-            const { pids, gone = [], notAsked, alsoHeld = [] } = session.pause(targets);
+            const { pids, gone = [], notAsked, alsoHeld = [], belowEnding = [] } = session.pause(targets);
             // A reused PID is in both lists: it counts as gone, not as new
             const fresh = (notAsked ?? []).filter((pid) => !gone.includes(pid));
             const parts = [
@@ -244,6 +244,9 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
             }
             if (fresh.length > 0) {
               parts.push(`PID ${fresh.join(', ')} started after the question and ${fresh.length === 1 ? 'keeps' : 'keep'} running: type pause again to hold ${fresh.length === 1 ? 'it' : 'them'}`);
+            }
+            if (belowEnding.length > 0) {
+              parts.push(`PID ${belowEnding.join(', ')} ${belowEnding.length === 1 ? 'runs' : 'run'} below a process being ended and ${belowEnding.length === 1 ? 'is' : 'are'} not held`);
             }
             return { message: parts.join('; '), level: 'warn' };
           },

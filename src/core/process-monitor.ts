@@ -131,6 +131,14 @@ interface Candidates {
   byPid: Map<number, Candidate>;
 }
 
+/** An unlisted process the agents of this repository run (see PauseTarget), and its agent. */
+interface PauseExtra {
+  raw: RawProcessInfo;
+  elapsedSec?: number;
+  startedAt?: number;
+  agent: number;
+}
+
 /** What one scan knows beyond a single process, built once per scan. */
 interface ScanContext {
   now: number;
@@ -176,7 +184,7 @@ export class ProcessMonitor extends EventEmitter {
   private holdCount = 0;
   private holdNumber: Map<number, number> = new Map();
   /** Unlisted processes the agents of this repository run, as of the last scan (see PauseTarget). */
-  private pauseExtras: Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }> = new Map();
+  private pauseExtras: Map<number, PauseExtra> = new Map();
   /**
    * Every process the last finished scan saw, listed or not (shells and npx are not listed), and
    * its monotonic time: what pause falls back to, and where `parentOf` looks.
@@ -558,7 +566,8 @@ export class ProcessMonitor extends EventEmitter {
         (agentPid !== undefined &&
           (scan.repoPids.has(agentPid) || hasRepoAncestor(agentPid)) &&
           !selfAncestors.has(agentPid) &&
-          !hostOnTheWay(tree, raw.pid, agentPid)));
+          !hostOnTheWay(tree, raw.pid, agentPid) &&
+          !this.endingAbove(tree, raw.pid, agentPid)));
     const paused = this.stillHeld(raw, listedAt, scan.heldAfterList(raw.pid));
 
     const { status, reason } = classifyStatus(
@@ -714,12 +723,8 @@ export class ProcessMonitor extends EventEmitter {
    * What the agents of this repository run beyond the list: pause holds that too. Never strayps,
    * its wrappers or what it runs: holding those would stop the brake itself.
    */
-  private unlistedPauseTargets(
-    tree: ProcessTree,
-    selfAncestors: Set<number>,
-    listedAt: number,
-  ): Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }> {
-    const extras = new Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }>();
+  private unlistedPauseTargets(tree: ProcessTree, selfAncestors: Set<number>, listedAt: number): Map<number, PauseExtra> {
+    const extras = new Map<number, PauseExtra>();
     for (const raw of tree.raws) {
       if (this.tracked.has(raw.pid) || raw.pid === this.selfPid || selfAncestors.has(raw.pid)) continue;
       // Ended a moment ago: no scan lists it, so it looked like a call its agent made. Held, it could
@@ -735,6 +740,7 @@ export class ProcessMonitor extends EventEmitter {
               raw,
               elapsedSec,
               startedAt: elapsedSec === undefined ? undefined : listedAt - elapsedSec * 1000,
+              agent: cur,
             });
           }
           break;
@@ -889,31 +895,64 @@ export class ProcessMonitor extends EventEmitter {
 
   /** What `pause` would hold right now: the agents of the watched repository and what they started. */
   public getPauseTargets(): PauseTarget[] {
+    return this.pauseCandidates()
+      .filter((candidate) => !candidate.belowEnding)
+      .map((candidate) => candidate.target);
+  }
+
+  /**
+   * The pause targets of the last scan, each marked when a process being ended lies above it now:
+   * a kill can come after the scan, and pause must leave its subtree alone at once.
+   */
+  private pauseCandidates(): Array<{ target: PauseTarget; belowEnding: boolean }> {
+    const tree = this.lastScan.tree;
     // Each from the scan that saw it: a scan in flight already moved lastScanAt, not the list
     // (safety review, 21.11.2026: the brake held nothing)
-    const listed: PauseTarget[] = this.getProcesses()
+    const listed = this.getProcesses()
       .filter((proc) => proc.pauseTarget && !proc.paused)
       .map((proc) => ({
-        pid: proc.pid,
-        cmd: proc.cmd,
-        category: proc.category,
-        cwd: proc.cwd,
-        listed: true,
-        firstSeenAt: proc.firstSeenAt,
-        startedAt: proc.startedAt,
-        elapsedSec: proc.elapsedSec,
+        target: {
+          pid: proc.pid,
+          cmd: proc.cmd,
+          category: proc.category,
+          cwd: proc.cwd,
+          listed: true,
+          firstSeenAt: proc.firstSeenAt,
+          startedAt: proc.startedAt,
+          elapsedSec: proc.elapsedSec,
+        },
+        // an agent is always its own: it is asked about, whatever runs above it
+        belowEnding: proc.category !== 'agent' && this.endingAbove(tree, proc.pid, proc.agentPid),
       }));
-    const unlisted: PauseTarget[] = Array.from(this.pauseExtras.values())
+    const unlisted = Array.from(this.pauseExtras.values())
       .filter(({ raw }) => !this.paused.has(raw.pid))
-      .map(({ raw, elapsedSec, startedAt }) => ({
-        pid: raw.pid,
-        cmd: formatReadableCmd(raw.name, raw.cmd ?? raw.name),
-        category: 'child' as const,
-        listed: false,
-        startedAt,
-        elapsedSec,
+      .map(({ raw, elapsedSec, startedAt, agent }) => ({
+        target: {
+          pid: raw.pid,
+          cmd: formatReadableCmd(raw.name, raw.cmd ?? raw.name),
+          category: 'child' as const,
+          listed: false,
+          startedAt,
+          elapsedSec,
+        },
+        belowEnding: this.endingAbove(tree, raw.pid, agent),
       }));
     return [...listed, ...unlisted];
+  }
+
+  /**
+   * True when a process being ended (inside its SIGTERM grace period) lies above `pid`, up to and
+   * including its agent. Held, what runs below it can keep it from exiting: its SIGTERM handler
+   * waits for a stopped child, and the escalation ends it with SIGKILL (maintainer decision,
+   * 22.11.2026). Left out for the grace period only: then it is gone, or no agent is above it.
+   */
+  private endingAbove(tree: ProcessTree, pid: number, agent: number | undefined): boolean {
+    if (agent === undefined) return false;
+    for (const cur of tree.ancestors(pid)) {
+      if (this.terminating.has(cur)) return true;
+      if (cur === agent) return false;
+    }
+    return false;
   }
 
   /** True when this PID is held and still names the process that was held. */
@@ -956,12 +995,17 @@ export class ProcessMonitor extends EventEmitter {
       if (a.startedAt === undefined || b.startedAt === undefined) return a.startedAt === b.startedAt;
       return Math.abs(a.startedAt - b.startedAt) <= 2000;
     };
-    let targets = this.getPauseTargets();
+    const candidates = this.pauseCandidates();
+    let targets = candidates.filter((c) => !c.belowEnding).map((c) => c.target);
+    const spared = candidates.filter((c) => c.belowEnding).map((c) => c.target);
     let gone: number[] = [];
     let notAsked: number[] = [];
     if (confirmed) {
       for (const target of targets) if (!confirmed.some((c) => same(c, target))) notAsked.push(target.pid);
-      for (const c of confirmed) if (!targets.some((target) => same(c, target))) gone.push(c.pid);
+      // below a process ended since the question: named as such, not as gone
+      for (const c of confirmed) {
+        if (!targets.some((target) => same(c, target)) && !spared.some((s) => same(c, s))) gone.push(c.pid);
+      }
       targets = targets.filter((target) => confirmed.some((c) => same(c, target)));
     }
     // The list is up to one scan old. A process held under a reused PID would look new to the next
@@ -989,15 +1033,19 @@ export class ProcessMonitor extends EventEmitter {
     // An agent at work starts its next tool call while the person reads the question; held only
     // as far as the question went, the agent stopped and the call ran on (maintainer decision,
     // 22.11.2026). The agents are stopped now and start nothing more.
-    const { alsoHeld, missed, alive } = this.holdWhatTheyStarted(heldAgents);
+    const { alsoHeld, missed, belowEnding: sparedNow, alive } = this.holdWhatTheyStarted(heldAgents);
     held.push(...alsoHeld);
     // A PID held now is neither "not held" nor "keeps running"; one the last look missed has ended
     gone = gone.filter((pid) => !alsoHeld.includes(pid));
     notAsked = Array.from(new Set([...notAsked, ...missed])).filter(
       (pid) => !held.includes(pid) && (alive === undefined || alive.has(pid)),
     );
+    // in the order of the tree, parents first; what only the last scan knew after that
+    const belowEnding = Array.from(new Set([...sparedNow, ...spared.map((t) => t.pid)])).filter(
+      (pid) => !held.includes(pid) && (alive === undefined || alive.has(pid)),
+    );
     if (held.length > 0) this.emit('processes-paused', held);
-    return { pids: held, gone, notAsked, alsoHeld };
+    return { pids: held, gone, notAsked, alsoHeld, belowEnding };
   }
 
   /**
@@ -1048,13 +1096,20 @@ export class ProcessMonitor extends EventEmitter {
    * process table shows it; when the table cannot be read, as the last scan saw it. Looks again
    * while a look held something: a tool call can fork between a look and its SIGSTOP. Out of looks
    * or time, one more look only names what still runs (`missed`), as it does with every new agent
-   * below them. `alive` is every PID of the last new look, undefined without one.
+   * below them. What runs below a process being ended is left to it (`belowEnding`). `alive` is
+   * every PID of the last new look, undefined without one.
    */
-  private holdWhatTheyStarted(agents: Set<number>): { alsoHeld: number[]; missed: number[]; alive?: Set<number> } {
+  private holdWhatTheyStarted(agents: Set<number>): {
+    alsoHeld: number[];
+    missed: number[];
+    belowEnding: number[];
+    alive?: Set<number>;
+  } {
     const alsoHeld: number[] = [];
     const missed = new Set<number>();
+    const spared = new Set<number>();
     let alive: Set<number> | undefined;
-    if (agents.size === 0) return { alsoHeld, missed: [] };
+    if (agents.size === 0) return { alsoHeld, missed: [], belowEnding: [] };
     const startedAt = this.monotonicNow();
     for (let look = 0; ; look++) {
       let fresh: RawProcessInfo[] | undefined;
@@ -1067,8 +1122,9 @@ export class ProcessMonitor extends EventEmitter {
       // the ages in `tree` are those of this moment, or of the last scan (monotonic clock)
       const at = fresh ? this.monotonicNow() : this.lastScan.at;
       if (fresh) alive = new Set(fresh.map((raw) => raw.pid));
-      const { found, asked } = this.startedBy(agents, tree);
+      const { found, asked, belowEnding } = this.startedBy(agents, tree);
       for (const raw of asked) missed.add(raw.pid);
+      for (const raw of belowEnding) spared.add(raw.pid);
       if (look >= PAUSE_LOOKS || this.monotonicNow() - startedAt > PAUSE_LOOK_BUDGET_MS) {
         for (const raw of found) missed.add(raw.pid);
         break;
@@ -1086,7 +1142,12 @@ export class ProcessMonitor extends EventEmitter {
       // The last scan shows the same each time; a new look shows more only below what was just held
       if (!fresh || !heldNow) break;
     }
-    return { alsoHeld, missed: Array.from(missed).filter((pid) => !alsoHeld.includes(pid)), alive };
+    return {
+      alsoHeld,
+      missed: Array.from(missed).filter((pid) => !alsoHeld.includes(pid)),
+      belowEnding: Array.from(spared).filter((pid) => !alsoHeld.includes(pid)),
+      alive,
+    };
   }
 
   /**
@@ -1094,9 +1155,13 @@ export class ProcessMonitor extends EventEmitter {
    * does not hold yet. Never what a person has to be asked about first, nor anything below it: a
    * process recognized as an agent (by its name, the `agents` setting or the MCP server it
    * started), which is named in `asked`; an editor, desktop app or terminal; strayps itself and the
-   * wrappers that started it.
+   * wrappers that started it. Nor a process being ended or what runs below it: that is named in
+   * `belowEnding`.
    */
-  private startedBy(agents: Set<number>, tree: ProcessTree): { found: RawProcessInfo[]; asked: RawProcessInfo[] } {
+  private startedBy(
+    agents: Set<number>,
+    tree: ProcessTree,
+  ): { found: RawProcessInfo[]; asked: RawProcessInfo[]; belowEnding: RawProcessInfo[] } {
     const selfChain = new Set<number>([this.selfPid, ...tree.ancestors(this.selfPid, this.lastScan.tree)]);
 
     // Everything below the agents, breadth first: parents before what they run
@@ -1124,20 +1189,31 @@ export class ProcessMonitor extends EventEmitter {
     // Again from the agents, without passing what has to be asked about
     const found: RawProcessInfo[] = [];
     const asked: RawProcessInfo[] = [];
+    const belowEnding: RawProcessInfo[] = [];
     const reached = new Set<number>(agents);
+    // processes being ended below the agents, and what runs below them
+    const ending = new Set<number>();
     for (const raw of below) {
-      if (!reached.has(raw.ppid ?? -1) || selfChain.has(raw.pid)) continue;
+      const underEnding = ending.has(raw.ppid ?? -1);
+      if ((!reached.has(raw.ppid ?? -1) && !underEnding) || selfChain.has(raw.pid)) continue;
       // an agent first: it is named, whatever program runs it. Not one being ended: it runs only
       // until it exits, and "type pause again" would offer nothing (safety review, 22.11.2026)
       if (isAgent(raw)) {
-        if (!this.terminating.has(raw.pid)) asked.push(raw);
+        if (this.terminating.has(raw.pid)) ending.add(raw.pid);
+        else asked.push(raw);
         continue;
       }
       if (isAppOrTerminal(raw)) continue;
+      // left to the process being ended, which may wait for it (maintainer decision, 22.11.2026)
+      if (underEnding || this.terminating.has(raw.pid)) {
+        ending.add(raw.pid);
+        if (underEnding && !this.paused.has(raw.pid)) belowEnding.push(raw);
+        continue;
+      }
       reached.add(raw.pid);
-      if (!this.paused.has(raw.pid) && !this.terminating.has(raw.pid)) found.push(raw);
+      if (!this.paused.has(raw.pid)) found.push(raw);
     }
-    return { found, asked };
+    return { found, asked, belowEnding };
   }
 
   /** Continues every process strayps is holding (SIGCONT). */

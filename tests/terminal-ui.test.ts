@@ -160,6 +160,23 @@ describe('running commands against a session', () => {
     h.session.resume();
   });
 
+  it('names what pause left to a process being ended', async () => {
+    const h = await busyHarness();
+    h.procs.push(
+      { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', etime: '02:00' },
+      { pid: 103, ppid: 102, name: 'node', cmd: 'node vite-worker.js', etime: '02:00' },
+      { pid: 104, ppid: 102, name: 'bash', cmd: 'bash -c esbuild', etime: '02:00' },
+    );
+    h.stubborn.add(102);
+    await h.monitor.scan();
+    expect(h.session.killProcess(102)).toMatchObject({ ok: true });
+    const pause = runCommand(h.session, parseCommand('pause'));
+    expect(pause.confirm!.run().message).toBe(
+      'Paused 1 process; type resume to continue; PID 103, 104 run below a process being ended and are not held',
+    );
+    h.session.resume();
+  });
+
   it('ends an agent session with the processes it started after one confirmation that names them', async () => {
     const h = createHarness({
       procs: [

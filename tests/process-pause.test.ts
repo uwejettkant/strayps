@@ -201,7 +201,7 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     alive.add(110).add(111);
 
     const outcome = monitor.pauseTargets(asked);
-    expect(outcome).toEqual({ pids: [100, 101, 110, 111], gone: [], notAsked: [], alsoHeld: [110, 111] });
+    expect(outcome).toEqual({ pids: [100, 101, 110, 111], gone: [], notAsked: [], alsoHeld: [110, 111], belowEnding: [] });
     expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['100:SIGSTOP', '101:SIGSTOP', '110:SIGSTOP', '111:SIGSTOP']);
 
     // listed and held until resume continues them
@@ -276,7 +276,7 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     procs.push(...started);
     for (const p of started) alive.add(p.pid);
 
-    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [] });
+    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [], belowEnding: [] });
     expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '100:SIGSTOP']);
     monitor.resumePaused();
   });
@@ -295,7 +295,7 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
 
     const asked = monitor.getPauseTargets();
     expect(asked.map((t) => t.pid)).toEqual([100]);
-    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [] });
+    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [], belowEnding: [] });
     expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '100:SIGSTOP']);
     // hold() refuses it too, whatever offers it: every SIGSTOP goes through there
     const internals = monitor as unknown as { hold(pid: number, elapsedSec: number, at: number): boolean };
@@ -314,8 +314,85 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
 
     const asked = monitor.getPauseTargets();
     expect(asked.map((t) => t.pid)).toEqual([100]);
-    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [] });
+    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [], belowEnding: [] });
     expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['200:SIGTERM', '100:SIGSTOP']);
+    monitor.resumePaused();
+  });
+
+  // Held, what runs below a process being ended can keep it from exiting: its SIGTERM handler waits
+  // for a stopped child, and after the grace period it is ended with SIGKILL instead (maintainer
+  // decision, 22.11.2026). It is left out up to the nearest agent, for the grace period, and named.
+  it('leaves what runs below a process being ended to it, listed or not, and names it', async () => {
+    const { monitor, kills, procs, alive } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: REPO, etime: '02:00' },
+      // its worker, listed, and a shell it just started, not listed yet
+      { pid: 103, ppid: 102, name: 'node', cmd: 'node vite-worker.js', cwd: REPO, etime: '02:00' },
+      { pid: 104, ppid: 102, name: 'bash', cmd: 'bash -c esbuild', cwd: REPO, etime: '00:01' },
+    ]);
+    await monitor.scan(1_000);
+    expect(monitor.getPauseTargets().map((t) => t.pid).sort()).toEqual([100, 102, 103, 104]);
+    expect(monitor.killProcess(102)).toBe(true);
+    await monitor.scan(3_000);
+    expect(monitor.getProcesses().find((p) => p.pid === 103)?.pauseTarget).toBe(false);
+
+    const asked = monitor.getPauseTargets();
+    expect(asked.map((t) => t.pid)).toEqual([100]);
+    // started below the process being ended while the question is open
+    procs.push({ pid: 105, ppid: 103, name: 'bash', cmd: 'bash -c sleep 1', cwd: REPO, etime: '00:00' });
+    alive.add(105);
+    expect(monitor.pauseTargets(asked)).toEqual({
+      pids: [100],
+      gone: [],
+      notAsked: [],
+      alsoHeld: [],
+      belowEnding: [103, 104, 105],
+    });
+    expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '100:SIGSTOP']);
+    monitor.resumePaused();
+  });
+
+  it('leaves it out right after the kill too, before a scan has seen it', async () => {
+    const { monitor, kills } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: REPO, etime: '02:00' },
+      { pid: 103, ppid: 102, name: 'node', cmd: 'node vite-worker.js', cwd: REPO, etime: '02:00' },
+      { pid: 104, ppid: 102, name: 'bash', cmd: 'bash -c esbuild', cwd: REPO, etime: '00:01' },
+    ]);
+    await monitor.scan(1_000);
+    const before = monitor.getPauseTargets();
+    expect(monitor.killProcess(102)).toBe(true);
+
+    expect(monitor.getPauseTargets().map((t) => t.pid)).toEqual([100]);
+    // confirmed before the kill: not "gone", and not held
+    expect(monitor.pauseTargets(before)).toEqual({
+      pids: [100],
+      gone: [102],
+      notAsked: [],
+      alsoHeld: [],
+      belowEnding: [103, 104],
+    });
+    expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '100:SIGSTOP']);
+    monitor.resumePaused();
+  });
+
+  it('leaves out what a subagent being ended runs, and still asks about agents below it', async () => {
+    const { monitor, kills } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      agent(200, REPO, { ppid: 100, cpu: 1 }),
+      { pid: 201, ppid: 200, name: 'node', cmd: 'node node_modules/.bin/tsc --watch', cwd: REPO, etime: '02:00' },
+      // an agent the subagent started: a session of its own, asked about like every agent
+      agent(210, REPO, { ppid: 200, name: 'codex', cmd: 'codex exec', cpu: 1 }),
+    ]);
+    await monitor.scan(1_000);
+    expect(monitor.killProcess(200)).toBe(true);
+    expect(monitor.getPauseTargets().map((t) => t.pid).sort()).toEqual([100, 210]);
+    await monitor.scan(3_000);
+
+    const asked = monitor.getPauseTargets();
+    expect(asked.map((t) => t.pid).sort()).toEqual([100, 210]);
+    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100, 210], gone: [], notAsked: [], alsoHeld: [], belowEnding: [201] });
+    expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['200:SIGTERM', '100:SIGSTOP', '210:SIGSTOP']);
     monitor.resumePaused();
   });
 
@@ -346,7 +423,7 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     ];
     procs.push(...started);
     for (const p of started) alive.add(p.pid);
-    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [] });
+    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [], belowEnding: [] });
     expect(kills.map((k) => k.pid)).toEqual([100]);
     monitor.resumePaused();
 
@@ -592,7 +669,7 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     alive.add(111);
 
     const outcome = monitor.pauseTargets(asked);
-    expect(outcome).toEqual({ pids: [100, 110], gone: [], notAsked: [], alsoHeld: [110] });
+    expect(outcome).toEqual({ pids: [100, 110], gone: [], notAsked: [], alsoHeld: [110], belowEnding: [] });
     expect(kills.map((k) => k.pid)).toEqual([100, 110]);
     monitor.resumePaused();
   });

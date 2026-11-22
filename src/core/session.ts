@@ -37,6 +37,8 @@ export interface PauseResult {
   notAsked?: number[];
   /** pause: what the confirmed agents started while the question was open; held too (also in `pids`). */
   alsoHeld?: number[];
+  /** pause: what runs below a process being ended (in its SIGTERM grace period); not held. */
+  belowEnding?: number[];
 }
 
 /**
