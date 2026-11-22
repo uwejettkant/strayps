@@ -57,7 +57,7 @@ Activity is measured, not read from `ps %cpu`: the lister reads the CPU time a p
 
 Both thresholds are user settings: `limits.staleSessionHours` (default 6) and `limits.mcpSilenceTimeoutSec` (default 45) in `.strayps.json`, applied to a running monitor by `setStaleSessionHours` / `setSilenceTimeoutSec` when the file changes; `agents` likewise by `setAgentNames`. A lower threshold makes more processes look stale, so a rule uses the configured value (`staleSessionSec`, `mcpSilenceTimeoutSec`), never the default as a literal.
 
-## 3. Incidents (each has a regression test in `tests/process-control.test.ts`)
+## 3. Incidents (each has a regression test in `tests/process-classification.test.ts`)
 
 - **22,042 seconds.** After 6 h 7 min of work the active VS Code session of the watched repository was marked `STALE` during an idle moment and killed by the next cleanup. Fix: rule 6.
 - **Its MCP server too.** The same session's MCP server was still marked `STALE` after 6 h when its working directory was not inside the repository (rule 3 ran before rule 5). Fix: `inWatchedRepo` through the process tree.
@@ -85,7 +85,7 @@ Do not settle these by yourself. Propose, with evidence.
 ## 5. Procedure for a change
 
 1. **Start from a real case.** Take the process tree that was classified wrongly (`ps -Ao pid,ppid,etime,pcpu,comm` and the working directory), reduce it to the fields that matter, and remove anything private from command lines.
-2. **Write the test first**, in `tests/process-control.test.ts`, as a small fake process table (`agent(...)`, `mcp(...)` helpers, a terminal tab for launchers). Run it against the current code and see it fail.
+2. **Write the test first**, in `tests/process-classification.test.ts` (what pause holds: `tests/process-pause.test.ts`), as a small fake process table (`setup`, `agent(...)`, `mcp(...)` from `tests/helpers/processes.ts`, a terminal tab for launchers). Run it against the current code and see it fail.
 3. **Scan more than once.** A rule that holds on the first scan can flip after the silence timeout. Scan at `t0`, `t0 + 46 s` and far beyond.
 4. **Change the rule**, keep the tables in this file current.
 5. **Check the other direction.** A change that recognizes more must not turn an editor, an app or a dev server into an agent or a pause target; a change that protects more must not hide what is really orphaned.

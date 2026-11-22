@@ -109,7 +109,7 @@ How the CLI picks its output: full-screen view when stdin and stdout are a termi
 
 ## 6. Testing
 
-- Tests live in `tests/*.test.ts` (Vitest). `tests/helpers/harness.ts` builds config, monitor and session with a fake process table and a fake killer; `tests/helpers/kill-guard.ts` is the suite-wide block on real kills.
+- Tests live in `tests/*.test.ts` (Vitest). `tests/helpers/harness.ts` builds config, monitor and session with a fake process table and a fake killer; `tests/helpers/processes.ts` builds a bare monitor on a fake table for the process tests (`process-classification`, `-kill`, `-pause`, `-bookkeeping`); `tests/helpers/kill-guard.ts` is the suite-wide block on real kills.
 - Config tests use real temporary directories (`makeTmpDir`). Time-dependent code uses fake timers or an injected `now`.
 - `tests/cli.e2e.test.ts` starts the real CLI in a child process. Anything that could reach processes runs with `--demo`.
 - The full-screen view is tested twice: `renderFrame` and `TerminalUI` against a fake terminal in Vitest, and by hand in a real pseudo-terminal with `scripts/scenarios/pty-drive.py`.

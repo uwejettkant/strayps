@@ -91,7 +91,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   const monitor = new ProcessMonitor({
     rootDir: dir,
     selfPid: 999_999,
-    // front-end tests need a STALE row at once; the window itself is tested in process-control
+    // front-end tests need a STALE row at once; the window itself is tested in process-classification
     staleQuietSec: 0,
     killGraceMs: options.killGraceMs ?? 3000,
     processLister: async () => procs.map((p) => ({ ...p })),
@@ -109,7 +109,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     processAlive: (pid) => procs.some((p) => p.pid === pid),
     // what pause sees when it looks again right after holding the agents
     processTree: () => procs.map((p) => ({ ...p })),
-    // the table's RSS stands in for the footprint; RSS-only display is tested in process-control
+    // the table's RSS stands in for the footprint; RSS-only display is tested in process-bookkeeping
     memoryReader: async (pids) =>
       new Map(procs.filter((p) => pids.includes(p.pid) && p.rssKb !== undefined).map((p) => [p.pid, p.rssKb! * 1024])),
   });
