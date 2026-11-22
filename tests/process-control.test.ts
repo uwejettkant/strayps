@@ -503,6 +503,53 @@ describe('ProcessMonitor agent detection (no list of products to keep up to date
     expect(byPid.get(91)).toMatchObject({ agentPid: 90, host: 'terminal' });
   });
 
+  it('recognizes an agent by its MCP server even when its path names an IDE, while refusing real IDEs and their helpers', async () => {
+    // HOST_PATTERNS matched words anywhere in a path, so an MCP client inside ~/WebstormProjects
+    // or ~/PycharmProjects looked like the IDE and was missed (maintainer decision, 22.11.2026)
+    const { monitor } = setup([
+      ...terminalTab,
+      { pid: 80, ppid: 71, name: '/usr/local/bin/node', cmd: 'node /Users/x/WebstormProjects/my-agent/cli.js', cwd: REPO, cpu: 1, etime: '10:00' },
+      mcp(81, 80, { cwd: REPO }),
+      {
+        pid: 82,
+        ppid: 71,
+        name: '/Users/x/PycharmProjects/bot/.venv/bin/python',
+        cmd: '/Users/x/PycharmProjects/bot/.venv/bin/python /Users/x/PycharmProjects/bot/bot.py',
+        cwd: REPO,
+        cpu: 1,
+        etime: '10:00',
+      },
+      mcp(83, 82, { cwd: REPO }),
+      // other direction: real IDE processes that start MCP servers must never become agents
+      { pid: 90, ppid: 1, pgid: 90, name: '/Applications/Antigravity.app/Contents/MacOS/Antigravity', cmd: '/Applications/Antigravity.app/Contents/MacOS/Antigravity' },
+      {
+        pid: 91,
+        ppid: 90,
+        pgid: 90,
+        name: '/Applications/Antigravity.app/Contents/Resources/app/extensions/antigravity/bin/language_server',
+        cmd: '/Applications/Antigravity.app/Contents/Resources/app/extensions/antigravity/bin/language_server --port 9000',
+      },
+      { pid: 92, ppid: 91, name: 'npm', cmd: 'npm exec x-mcp-server' },
+      mcp(93, 92),
+      { pid: 94, ppid: 1, pgid: 94, name: '/opt/jetbrains/bin/webstorm', cmd: '/opt/jetbrains/bin/webstorm' },
+      mcp(95, 94, { cwd: REPO }),
+      { pid: 96, ppid: 1, pgid: 96, name: '/home/dev/.vscode-server/bin/abc/node', cmd: '/home/dev/.vscode-server/bin/abc/node /home/dev/.vscode-server/bin/abc/out/server-main.js' },
+      mcp(97, 96, { cwd: REPO }),
+    ]);
+    const byPid = new Map((await monitor.scan(1_000)).map((p) => [p.pid, p]));
+    expect(byPid.get(80)).toMatchObject({ category: 'agent', detectedBy: 'mcp-client', host: 'terminal', pauseTarget: true });
+    expect(byPid.get(81)).toMatchObject({ category: 'mcp', agentPid: 80, host: 'terminal' });
+    expect(byPid.get(82)).toMatchObject({ category: 'agent', detectedBy: 'mcp-client', host: 'terminal', pauseTarget: true });
+    expect(byPid.get(83)).toMatchObject({ category: 'mcp', agentPid: 82, host: 'terminal' });
+    for (const idePid of [90, 91, 94, 96]) {
+      expect(byPid.has(idePid), `IDE PID ${idePid} must not become an agent`).toBe(false);
+    }
+    expect(byPid.get(93)?.agentPid).toBeUndefined();
+    expect(byPid.get(93)?.host).toBe('Antigravity');
+    expect(byPid.get(95)?.agentPid).toBeUndefined();
+    expect(byPid.get(97)?.agentPid).toBeUndefined();
+  });
+
   it('does not take the login program of a terminal tab for an agent', async () => {
     // Terminal.app and Ghostty start the shell through login; an MCP server run by hand in such a
     // tab made login an agent, and everything in the tab its session (review, 20.11.2026)
@@ -959,19 +1006,80 @@ describe('ProcessMonitor pause and exit', () => {
     expect(monitor.resumePaused().sort((a, b) => a - b)).toEqual([100, 105, 106]);
   });
 
-  it('never holds strayps itself, the wrappers that started it or what it runs, even under an agent it holds', async () => {
-    const { monitor } = setup(
+  it('never holds strayps itself, its wrappers, the agent that started it or what it runs, while still holding other agents in the repo', async () => {
+    // Holding the agent that spawned strayps freezes whatever owns strayps's stdin/stdout, leaving
+    // no way to resume (maintainer decision, 22.11.2026)
+    const { monitor, kills } = setup(
       [
         agent(100, REPO, { cpu: 1 }),
+        mcp(101, 100, { cwd: REPO }),
+        { pid: 105, ppid: 100, name: 'bash', cmd: 'bash -c sleep 30', cwd: REPO, etime: '00:01' },
         { pid: 140, ppid: 100, name: 'node', cmd: `node ${REPO}/node_modules/.bin/tsx src/cli.ts watch`, etime: '20:00' },
         { pid: 141, ppid: 140, name: 'node', cmd: 'node src/cli.ts watch', etime: '20:00' },
         { pid: 142, ppid: 141, name: 'lsof', cmd: 'lsof -a -d cwd -p 100', etime: '00:00' },
+        // another agent in this repo, and a sub-agent started by 100 on another branch, are still held
+        agent(160, REPO, { ppid: 100, cpu: 1 }),
+        agent(200, REPO, { cpu: 1 }),
+        mcp(201, 200, { cwd: REPO }),
       ],
       { selfPid: 141 },
     );
-    await monitor.scan(1_000);
-    expect(monitor.getPauseTargets().map((t) => t.pid)).toEqual([100]);
-    expect(monitor.pauseTargets().pids).toEqual([100]);
+    const listed = await monitor.scan(1_000);
+    // the launching agent stays visible in the list, just not a pause target
+    expect(listed.find((p) => p.pid === 100)).toMatchObject({ category: 'agent', inWatchedRepo: true, pauseTarget: false });
+    expect(monitor.getPauseTargets().map((t) => t.pid).sort((a, b) => a - b)).toEqual([160, 200, 201]);
+    expect(monitor.pauseTargets().pids.sort((a, b) => a - b)).toEqual([160, 200, 201]);
+    expect(kills.map((k) => k.pid).sort((a, b) => a - b)).toEqual([160, 200, 201]);
+    monitor.resumePaused();
+  });
+
+  it('keeps holding processes when the system wall clock jumps forward relative to monotonic ps etime', async () => {
+    // On Linux ps measures etime with a monotonic clock: a forward system-clock jump (NTP, VM sync)
+    // made expected age jump ahead of etime, so stillHeld forgot the hold and left the process stopped
+    vi.useFakeTimers();
+    let ages = new Map<number, number>([
+      [100, 602],
+      [105, 62],
+    ]);
+    const { monitor, procs } = setup(
+      [
+        agent(100, REPO, { cpu: 1 }),
+        { pid: 105, ppid: 100, name: 'bash', cmd: 'bash -c make', cwd: REPO, etime: '01:00' },
+      ],
+      { processAges: () => ages },
+    );
+    await monitor.scan();
+    const asked = monitor.getPauseTargets();
+
+    // 2 real seconds pass, but the system wall clock jumps forward by 60 seconds before the user answers
+    vi.advanceTimersByTime(2_000);
+    vi.setSystemTime(Date.now() + 60_000);
+    expect(monitor.pauseTargets(asked)).toMatchObject({ pids: [100, 105], gone: [] });
+
+    // another 2 real seconds pass and the wall clock jumps forward by another 60 seconds; ps etime only grew by 4 s
+    vi.advanceTimersByTime(2_000);
+    vi.setSystemTime(Date.now() + 60_000);
+    procs[0].etime = '10:04';
+    procs[1].etime = '01:04';
+    const list = await monitor.scan();
+    expect(monitor.getPausedPids().sort((a, b) => a - b)).toEqual([100, 105]);
+    expect(list.find((p) => p.pid === 105)).toMatchObject({ paused: true });
+
+    // and a backward wall-clock jump keeps them held too
+    vi.advanceTimersByTime(2_000);
+    vi.setSystemTime(Date.now() - 120_000);
+    procs[0].etime = '10:06';
+    procs[1].etime = '01:06';
+    await monitor.scan();
+    expect(monitor.getPausedPids().sort((a, b) => a - b)).toEqual([100, 105]);
+
+    // a real PID reuse is still detected and forgotten
+    vi.advanceTimersByTime(2_000);
+    procs[0].etime = '10:08';
+    Object.assign(procs[1], { ppid: 1, pgid: 1, name: 'cupsd', cmd: '/usr/sbin/cupsd', etime: '00:01' });
+    await monitor.scan();
+    expect(monitor.getPausedPids()).toEqual([100]);
+    expect(monitor.resumePaused()).toEqual([100]);
   });
 
   it('does not count a new process as held when the PID it held was handed on', async () => {

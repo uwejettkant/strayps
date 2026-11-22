@@ -56,7 +56,7 @@ export interface MonitoredProcess {
   memorySource: MemorySource;
   uptime: string;
   elapsedSec: number;
-  /** When it started (ms, scan clock): its age at the scan that listed it, taken from that scan's time. */
+  /** When it started (ms, monotonic clock): its age at the scan that listed it, taken from that scan's time. */
   startedAt: number;
   firstSeenAt: number;
   lastActiveAt: number;
@@ -102,8 +102,9 @@ export interface PauseTarget {
   /** For a listed process: when strayps first saw it; the same process keeps it from scan to scan. */
   firstSeenAt?: number;
   /**
-   * When it started (ms, scan clock), from its age and the time of the scan that saw it: tells
-   * the process a person confirmed from a newer one under the same PID. Undefined when unknown.
+   * When it started (ms, monotonic clock), from its age and the monotonic time of the scan that
+   * saw it: tells the process a person confirmed from a newer one under the same PID even if the
+   * system wall clock jumps. Undefined when unknown.
    */
   startedAt?: number;
   /** Its age in seconds at that scan; a process under this PID now must not be younger. */
@@ -178,6 +179,11 @@ export interface ProcessMonitorOptions {
    * Without a value for a PID its RSS is shown, marked as approximate.
    */
   memoryReader?: (pids: number[]) => Promise<Map<number, number>>;
+  /**
+   * Monotonic clock in milliseconds for process-age checks and pause budgets, so system wall-clock
+   * jumps (NTP, VM sync) never make a held process look replaced. Defaults to `performance.now`.
+   */
+  monotonicNow?: () => number;
 }
 
 export interface ProcessKilledEvent {
@@ -391,36 +397,76 @@ const APP_PROGRAM_NAMES = new Set([
   'gnome-terminal-server',
   'code',
   'code-insiders',
+  'code-server',
   'codium',
   'cursor',
   'windsurf',
   'zed',
   'antigravity',
+  'idea',
+  'webstorm',
+  'pycharm',
+  'goland',
+  'phpstorm',
+  'rubymine',
+  'clion',
+  'rustrover',
+  'datagrip',
+  'rider',
+  'fleet',
 ]);
+
+/** Short macOS helper executable names when `name` is not the full bundle path. */
+const APP_HELPER_NAME = /^(?:code|cursor|windsurf|antigravity(?: ide)?|claude) helper(?:\s*\([^)]+\))?$/i;
+
+/** Remote editor server installs (VS Code / Cursor / Windsurf / Antigravity over SSH). */
+const REMOTE_EDITOR_SERVER = /\/\.(?:vscode|cursor|windsurf|antigravity)-server\//i;
+
+const APP_BUNDLE_BODY =
+  '(?:Visual Studio Code(?: - Insiders)?|Code|VSCodium|Cursor|Windsurf|Kiro|Trae|Positron|Void|Zed(?: Preview)?|Antigravity(?: IDE)?|Claude|Xcode|Sublime Text|Nova|BBEdit|TextMate|MacVim|Emacs|Fleet|Android Studio|IntelliJ IDEA[^/]*|WebStorm|PyCharm[^/]*|GoLand|PhpStorm|RubyMine|CLion|RustRover|DataGrip|Rider|Terminal|iTerm2?|Warp|Ghostty|kitty|Alacritty|WezTerm|Hyper|Tabby|Wave|Rio)\\.app\\/Contents\\/(?:MacOS\\/|Frameworks\\/[^/]+\\.app\\/Contents\\/MacOS\\/|Resources\\/|Helpers\\/)';
 
 /**
  * The app bundles of editors, IDEs, desktop apps that run agents, and terminals, by name (a closed
- * list: an app missing here is treated like any other program): their own programs (`Contents/MacOS/`, and helper apps under `Contents/Frameworks/`). Not any program in an
- * app bundle: framework Python runs as `Python.app/Contents/MacOS/Python`, and the Chrome or the
- * Electron app an agent drives are apps too (safety review, 22.11.2026).
+ * list: an app missing here is treated like any other program): their own programs (`Contents/MacOS/`,
+ * helper apps under `Contents/Frameworks/`, bundled servers under `Contents/Resources/` and
+ * `Contents/Helpers/`). Not `Contents/Developer/` (Xcode build tools), not `Contents/jbr/` (bundled
+ * Java a build can run), and not any other app bundle: framework Python runs as
+ * `Python.app/Contents/MacOS/Python`, and the Chrome or Electron app an agent drives are apps too
+ * (safety review, 22.11.2026).
  */
-const APP_BUNDLE_PROGRAM =
-  /\/(?:Visual Studio Code(?: - Insiders)?|VSCodium|Cursor|Windsurf|Kiro|Trae|Positron|Void|Zed(?: Preview)?|Antigravity|Claude|Xcode|Sublime Text|Nova|BBEdit|TextMate|MacVim|Emacs|Fleet|Android Studio|IntelliJ IDEA[^/]*|WebStorm|PyCharm[^/]*|GoLand|PhpStorm|RubyMine|CLion|RustRover|DataGrip|Rider|Terminal|iTerm2?|Warp|Ghostty|kitty|Alacritty|WezTerm|Hyper|Tabby|Wave|Rio)\.app\/Contents\/(?:MacOS\/|Frameworks\/[^/]+\.app\/Contents\/MacOS\/)/i;
+const APP_BUNDLE_IN_NAME = new RegExp(`\\/${APP_BUNDLE_BODY}`, 'i');
+// Anchored to the executable at the start of `cmd`, so a path passed as an argument
+// (`vibe --open /Applications/Cursor.app/...`) never matches.
+const APP_BUNDLE_IN_CMD = new RegExp(`^(?:\\/[^/\\s]+)*\\/${APP_BUNDLE_BODY}`, 'i');
 
 /**
- * An editor, desktop app or terminal, which pause never holds, decided by the program file alone:
- * a program of one of APP_BUNDLE_PROGRAM's bundles, or one of APP_PROGRAM_NAMES. Not by
- * HOST_PATTERNS, which find a word anywhere in the path: in ~/WebstormProjects every tool call
- * looked like the IDE and was neither held nor named; nor by an install directory, where a build
- * can run the IDE's Java (safety review, 22.11.2026).
+ * An editor, desktop app or terminal, which is never an agent and which pause never holds, decided
+ * by the program file alone: a program of one of APP_BUNDLE_BODY's bundles, a remote editor server,
+ * a known helper name, or one of APP_PROGRAM_NAMES. Never by a word anywhere in a path: in
+ * ~/WebstormProjects an agent or tool call looked like the IDE (safety review & maintainer
+ * decision, 22.11.2026).
  */
 function isAppOrTerminal(raw: Pick<RawProcessInfo, 'name' | 'cmd'>): boolean {
-  const files = [raw.name, (raw.cmd ?? '').trim().split(/\s+/)[0] ?? ''];
-  return files.some(
-    (file) =>
-      APP_BUNDLE_PROGRAM.test(file) ||
-      APP_PROGRAM_NAMES.has(baseName(file).toLowerCase().replace(/:.*$/, '')),
-  );
+  const name = raw.name ?? '';
+  const cmd = (raw.cmd ?? '').trim();
+  const args = cmd.split(/\s+/).filter(Boolean);
+  const first = args[0] ?? '';
+
+  // Claude Code's native binary lives under .../claude-code/.../claude.app/Contents/MacOS/claude:
+  // that is the coding agent, never Claude Desktop (/Applications/Claude.app).
+  if (!/\/claude-code\//i.test(name) && APP_BUNDLE_IN_NAME.test(name)) return true;
+  if (!/\/claude-code\//i.test(first) && APP_BUNDLE_IN_CMD.test(cmd)) return true;
+
+  if (APP_HELPER_NAME.test(baseName(name))) return true;
+  for (const file of [name, first]) {
+    if (APP_PROGRAM_NAMES.has(baseName(file).replace(/:.*$/, ''))) return true;
+    if (REMOTE_EDITOR_SERVER.test(file)) return true;
+  }
+  if (INTERPRETER.test(baseName(first)) || INTERPRETER.test(baseName(name))) {
+    const script = interpreterScript(args);
+    if (script && REMOTE_EDITOR_SERVER.test(script.path)) return true;
+  }
+  return false;
 }
 
 const IGNORED_SYSTEM_PATTERNS = [
@@ -969,25 +1015,25 @@ export class ProcessMonitor extends EventEmitter {
   private processAges: (pids: number[]) => Map<number, number>;
   private processTree: () => RawProcessInfo[] | undefined;
   private cwdResolver: (pids: number[]) => Promise<Map<number, string>>;
+  private monotonicNow: () => number;
   private agentNames: Set<string> = new Set();
 
   private timer: NodeJS.Timeout | null = null;
   private tracked: Map<number, MonitoredProcess> = new Map();
   private paused: Set<number> = new Set();
-  /** For each held PID: its age and the scan time when it was held, to tell a reused PID. */
+  /** For each held PID: its age and the monotonic time when it was measured, to tell a reused PID. */
   private heldSince: Map<number, { elapsedSec: number; at: number }> = new Map();
   /** Counts every SIGSTOP; per held PID the count at its hold, to tell holds newer than a scan's list. */
   private holdCount = 0;
   private holdNumber: Map<number, number> = new Map();
   /** Unlisted processes the agents of this repository run, as of the last scan (see PauseTarget). */
   private pauseExtras: Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }> = new Map();
-  private lastScanAt = 0;
-  /** `Date.now()` when the last scan started: converts a time read now to the scan clock (tests inject one). */
-  private lastScanWallAt = 0;
-  /** Every process the last finished scan saw, and that scan's time: what pause falls back to. */
+  /** Every process the last finished scan saw, and its monotonic time: what pause falls back to. */
   private lastTree: { at: number; raws: RawProcessInfo[] } = { at: 0, raws: [] };
   /** Parent of every process of the last scan, listed or not (shells and npx are not listed). */
   private lastParentByPid: Map<number, number> = new Map();
+  /** Ancestors of strayps (wrappers, shell, launching agent) as of the last scan; never held. */
+  private lastSelfAncestors: Set<number> = new Set();
   private alertedPids: Set<number> = new Set();
   /** CPU time samples per PID, oldest first, spaced CPU_SAMPLE_SPACING_MS apart. */
   private cpuSamples: Map<number, Array<{ at: number; cpuTimeSec: number }>> = new Map();
@@ -1031,6 +1077,7 @@ export class ProcessMonitor extends EventEmitter {
     this.cwdResolver =
       options.cwdResolver ??
       (options.processLister ? async () => new Map<number, string>() : resolveProcessCwds);
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.memoryReader =
       options.memoryReader ??
       (options.processLister || process.platform !== 'darwin' ? undefined : readFootprints);
@@ -1120,18 +1167,15 @@ export class ProcessMonitor extends EventEmitter {
   }
 
   private async performScan(now: number): Promise<MonitoredProcess[]> {
-    this.lastScanAt = now;
-    const wallAtStart = Date.now();
-    this.lastScanWallAt = wallAtStart;
     // pause can answer while this scan waits for lsof or footprint, and hold processes this list
     // does not have yet: they must not be forgotten when the scan goes on (safety review, 22.11.2026)
     const holdsBeforeList = this.holdCount;
     const heldAfterList = (pid: number): boolean => (this.holdNumber.get(pid) ?? 0) > holdsBeforeList;
     const rawList = await this.processLister();
-    // When ps had read the ages, on the scan clock. Ages taken as of the scan's start made a slow ps
-    // look like a reused PID: a confirmed agent "gone", a held process forgotten while still stopped
-    // (safety review, 22.11.2026). Later is the safe side: it only lowers the age expected later.
-    const listedAt = now + (Date.now() - wallAtStart);
+    // Monotonic clock when ps had read the ages: Linux ps measures etime monotonically, so a wall
+    // clock jump (NTP, VM sync) must never make a held process look replaced and stay stopped.
+    // Reading after processLister also keeps a slow ps on the safe side (safety review, 22.11.2026).
+    const listedAt = this.monotonicNow();
     const seenPids = new Set<number>();
 
     // Map all live PIDs, parent-child links, and parent PIDs that have children
@@ -1221,7 +1265,7 @@ export class ProcessMonitor extends EventEmitter {
       // A held process stays in view until it is continued or gone, wherever it is in the tree now:
       // a held browser whose MCP server was ended moved to PID 1, left the list and the set of held
       // processes, and stayed stopped for good (review, 20.11.2026)
-      if (this.stillHeld(raw, now, heldAfterList(raw.pid))) {
+      if (this.stillHeld(raw, listedAt, heldAfterList(raw.pid))) {
         const held: Candidate = { raw, category: this.tracked.get(raw.pid)?.category ?? 'child' };
         candidates.push(held);
         candidateByPid.set(raw.pid, held);
@@ -1332,9 +1376,13 @@ export class ProcessMonitor extends EventEmitter {
       for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
         const ancestor = rawByPid.get(cur);
         if (!ancestor) return undefined;
-        const identity = programIdentity(ancestor);
-        for (const [pattern, label] of HOST_PATTERNS) {
-          if (pattern.test(identity)) return label;
+        // Only an actual editor, desktop app or terminal names a host: a script in ~/WebstormProjects
+        // must not make its MCP server look attached to JetBrains IDE.
+        if (isAppOrTerminal(ancestor)) {
+          const identity = programIdentity(ancestor);
+          for (const [pattern, label] of HOST_PATTERNS) {
+            if (pattern.test(identity)) return label;
+          }
         }
         cur = ancestor.ppid;
       }
@@ -1510,14 +1558,20 @@ export class ProcessMonitor extends EventEmitter {
       }
 
       // Pause holds the agents of this repository and what they started, nothing else:
-      // not a dev server from the user's terminal, not an editor, not another session.
+      // not a dev server from the user's terminal, not an editor, not another session, and never
+      // the agent that started strayps itself (holding it freezes whatever owns strayps's terminal
+      // or pipe and leaves no way to resume).
       const agentPid = nearestAgent(raw.pid);
       const pauseTarget =
         belongsToWatchedRepo &&
+        !selfAncestors.has(raw.pid) &&
         (category === 'agent' ||
-          (agentPid !== undefined && belongsToRepo(agentPid) && !hostOnTheWay(raw.pid, agentPid)));
+          (agentPid !== undefined &&
+            belongsToRepo(agentPid) &&
+            !selfAncestors.has(agentPid) &&
+            !hostOnTheWay(raw.pid, agentPid)));
       // A held process uses no CPU by design: that is neither stale nor frozen
-      const paused = this.paused.has(raw.pid);
+      const paused = this.stillHeld(raw, listedAt, heldAfterList(raw.pid));
       if (paused) {
         if (status === 'FROZEN' || status === 'STALE') status = 'IDLE';
         reason = 'Paused by strayps; resume continues it';
@@ -1602,6 +1656,7 @@ export class ProcessMonitor extends EventEmitter {
     }
     // With the list it belongs to: set while a scan waits, it paired a new tree with the old list
     this.lastParentByPid = parentByPid;
+    this.lastSelfAncestors = selfAncestors;
     this.lastTree = { at: listedAt, raws: rawList };
 
     const processes = this.getProcesses();
@@ -1719,7 +1774,7 @@ export class ProcessMonitor extends EventEmitter {
       // An earlier timer for this PID would escalate the new entry before its grace period ends
       const earlier = this.terminating.get(pid);
       if (earlier) clearTimeout(earlier.timer);
-      this.terminating.set(pid, { timer, process: proc, sentAt: Date.now() });
+      this.terminating.set(pid, { timer, process: proc, sentAt: this.monotonicNow() });
     }
     return true;
   }
@@ -1739,7 +1794,7 @@ export class ProcessMonitor extends EventEmitter {
     // The process may have exited on SIGTERM and the system handed its PID to a new one within the
     // grace period: a process younger than our SIGTERM is not the one that was confirmed
     const age = this.processAge(pid);
-    if (age !== undefined && age + 1 < (Date.now() - pending.sentAt) / 1000) return;
+    if (age !== undefined && age + 1 < Math.max(0, this.monotonicNow() - pending.sentAt) / 1000) return;
     // or, gone and replaced before SIGTERM, a process younger than the one that was listed
     if (age !== undefined && age + 2 < pending.process.elapsedSec) return;
     if (this.processKiller(pid, 'SIGKILL')) {
@@ -1782,13 +1837,13 @@ export class ProcessMonitor extends EventEmitter {
   }
 
   /** True when this PID is held and still names the process that was held. */
-  private stillHeld(raw: RawProcessInfo, now: number, heldAfterList = false): boolean {
+  private stillHeld(raw: RawProcessInfo, listedAt: number, heldAfterList = false): boolean {
     if (!this.paused.has(raw.pid)) return false;
     // held after this list was read: `raw` may be the process that had the PID before
     if (heldAfterList) return true;
     const since = this.heldSince.get(raw.pid);
     if (since && raw.etime !== undefined) {
-      const expected = since.elapsedSec + (now - since.at) / 1000;
+      const expected = since.elapsedSec + Math.max(0, listedAt - since.at) / 1000;
       if (parseElapsedTime(raw.etime).elapsedSec + 2 < expected) {
         // The held process is gone and the PID names another one, which was never held
         this.forgetHold(raw.pid);
@@ -1837,11 +1892,11 @@ export class ProcessMonitor extends EventEmitter {
     // The agents first, so they start nothing new while what they run is held
     targets.sort((a, b) => Number(b.category === 'agent') - Number(a.category === 'agent'));
     for (const target of targets) {
-      // the age and the time of the scan that saw it, so the next scans compare like with like
+      // the age and monotonic time of the scan that saw it, so the next scans compare like with like
       const at =
         target.startedAt !== undefined && target.elapsedSec !== undefined
           ? target.startedAt + target.elapsedSec * 1000
-          : this.lastScanAt;
+          : this.lastTree.at;
       if (this.youngerThanExpected(ages.get(target.pid), target.elapsedSec, at)) {
         gone.push(target.pid);
         continue;
@@ -1865,24 +1920,20 @@ export class ProcessMonitor extends EventEmitter {
     return { pids: held, gone, notAsked, alsoHeld };
   }
 
-  /** The scan clock now: what a time read now is in the clock the scans run on (tests inject one). */
-  private scanClockNow(): number {
-    return this.lastScanAt + (Date.now() - this.lastScanWallAt);
-  }
-
   /**
-   * True when `ps` reads the PID as younger than the process seen `elapsedSec` old at `at` (scan
-   * clock) must be by now: the PID names another process. The same test as `stillHeld`, so that
-   * nothing is held that the next scan would take for another process, forget, and leave stopped.
+   * True when `ps` reads the PID as younger than the process seen `elapsedSec` old at `at`
+   * (monotonic clock) must be by now: the PID names another process. The same test as `stillHeld`,
+   * so that nothing is held that the next scan would take for another process, forget, and leave
+   * stopped.
    */
   private youngerThanExpected(age: number | undefined, elapsedSec: number | undefined, at: number): boolean {
     if (age === undefined || elapsedSec === undefined) return false;
-    return age + 2 < elapsedSec + Math.max(0, this.scanClockNow() - at) / 1000;
+    return age + 2 < elapsedSec + Math.max(0, this.monotonicNow() - at) / 1000;
   }
 
-  /** SIGSTOP for one process, remembered with its age at `at` (scan clock) to tell a reused PID later. */
+  /** SIGSTOP for one process, remembered with its age at `at` (monotonic clock) to tell a reused PID later. */
   private hold(pid: number, elapsedSec: number | undefined, at: number): boolean {
-    if (pid === this.selfPid || !this.processKiller(pid, 'SIGSTOP')) return false;
+    if (pid === this.selfPid || this.lastSelfAncestors.has(pid) || !this.processKiller(pid, 'SIGSTOP')) return false;
     this.paused.add(pid);
     this.holdCount += 1;
     this.holdNumber.set(pid, this.holdCount);
@@ -1919,7 +1970,7 @@ export class ProcessMonitor extends EventEmitter {
     const missed = new Set<number>();
     let alive: Set<number> | undefined;
     if (agents.size === 0) return { alsoHeld, missed: [] };
-    const startedAt = Date.now();
+    const startedAt = this.monotonicNow();
     for (let look = 0; ; look++) {
       let fresh: RawProcessInfo[] | undefined;
       try {
@@ -1928,12 +1979,12 @@ export class ProcessMonitor extends EventEmitter {
         fresh = undefined;
       }
       const tree = fresh ?? this.lastTree.raws;
-      // the ages in `tree` are those of this moment, or of the last scan (scan clock)
-      const at = fresh ? this.scanClockNow() : this.lastTree.at;
+      // the ages in `tree` are those of this moment, or of the last scan (monotonic clock)
+      const at = fresh ? this.monotonicNow() : this.lastTree.at;
       if (fresh) alive = new Set(fresh.map((raw) => raw.pid));
       const { found, asked } = this.startedBy(agents, tree);
       for (const raw of asked) missed.add(raw.pid);
-      if (look >= PAUSE_LOOKS || Date.now() - startedAt > PAUSE_LOOK_BUDGET_MS) {
+      if (look >= PAUSE_LOOKS || this.monotonicNow() - startedAt > PAUSE_LOOK_BUDGET_MS) {
         for (const raw of found) missed.add(raw.pid);
         break;
       }
@@ -2100,8 +2151,9 @@ export class ProcessMonitor extends EventEmitter {
       const ancestor = rawByPid.get(cur);
       if (!ancestor) return undefined;
       const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
-      // an app that pause never holds is never an agent either (safety review, 22.11.2026)
-      if (HOST_PATTERNS.some(([pattern]) => pattern.test(programIdentity(ancestor))) || isAppOrTerminal(ancestor)) {
+      // Editors, desktop apps and terminals are judged by their program file alone, never by a
+      // word in another process's path (~/WebstormProjects) (maintainer decision, 22.11.2026)
+      if (isAppOrTerminal(ancestor)) {
         return undefined;
       }
       if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.toLowerCase().includes(pattern))) {
