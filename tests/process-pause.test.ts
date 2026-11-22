@@ -381,8 +381,9 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     // A listed process the scan no longer offers was counted as gone and as below a process being
     // ended at once (safety review, 22.11.2026; reachable through the library, where no question
     // keeps a kill from coming in between)
-    const { monitor } = setup([
+    const { monitor, alive } = setup([
       agent(100, REPO, { cpu: 1 }),
+      { pid: 101, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/tsc --watch', cwd: REPO, etime: '02:00' },
       { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: REPO, etime: '02:00' },
       { pid: 103, ppid: 102, name: 'node', cmd: 'node vite-worker.js', cwd: REPO, etime: '02:00' },
       { pid: 104, ppid: 102, name: 'bash', cmd: 'bash -c esbuild', cwd: REPO, etime: '00:01' },
@@ -390,10 +391,12 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     await monitor.scan(1_000);
     const before = monitor.getPauseTargets();
     expect(monitor.killProcess(102)).toBe(true);
+    // and one that really exits: it is still reported as gone
+    alive.delete(101);
     await monitor.scan(3_000);
     expect(monitor.pauseTargets(before)).toEqual({
       pids: [100],
-      gone: [],
+      gone: [101],
       notAsked: [],
       alsoHeld: [],
       belowEnding: [103, 104],
