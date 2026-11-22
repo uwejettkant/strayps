@@ -364,15 +364,62 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     expect(monitor.killProcess(102)).toBe(true);
 
     expect(monitor.getPauseTargets().map((t) => t.pid)).toEqual([100]);
-    // confirmed before the kill: not "gone", and not held
+    // confirmed before the kill: not held, and none of them "had exited": 102 is being ended, the
+    // others run below it
     expect(monitor.pauseTargets(before)).toEqual({
       pids: [100],
-      gone: [102],
+      gone: [],
       notAsked: [],
       alsoHeld: [],
       belowEnding: [103, 104],
     });
     expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '100:SIGSTOP']);
+    monitor.resumePaused();
+  });
+
+  it('names each process below a process being ended once, also when a scan ran before the answer', async () => {
+    // A listed process the scan no longer offers was counted as gone and as below a process being
+    // ended at once (safety review, 22.11.2026; reachable through the library, where no question
+    // keeps a kill from coming in between)
+    const { monitor } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: REPO, etime: '02:00' },
+      { pid: 103, ppid: 102, name: 'node', cmd: 'node vite-worker.js', cwd: REPO, etime: '02:00' },
+      { pid: 104, ppid: 102, name: 'bash', cmd: 'bash -c esbuild', cwd: REPO, etime: '00:01' },
+    ]);
+    await monitor.scan(1_000);
+    const before = monitor.getPauseTargets();
+    expect(monitor.killProcess(102)).toBe(true);
+    await monitor.scan(3_000);
+    expect(monitor.pauseTargets(before)).toEqual({
+      pids: [100],
+      gone: [],
+      notAsked: [],
+      alsoHeld: [],
+      belowEnding: [103, 104],
+    });
+    monitor.resumePaused();
+  });
+
+  it('does not name a process that is being ended itself as one below a process being ended', async () => {
+    // ending an agent with what it started: each of them got SIGTERM from the same person
+    const { monitor } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      agent(200, REPO, { ppid: 100, cpu: 1 }),
+      { pid: 201, ppid: 200, name: 'node', cmd: 'node node_modules/.bin/tsc --watch', cwd: REPO, etime: '02:00' },
+      { pid: 202, ppid: 201, name: 'node', cmd: 'node tsc-worker.js', cwd: REPO, etime: '02:00' },
+    ]);
+    await monitor.scan(1_000);
+    expect(monitor.killProcess(200)).toBe(true);
+    expect(monitor.killProcess(201)).toBe(true);
+    await monitor.scan(3_000);
+    expect(monitor.pauseTargets(monitor.getPauseTargets())).toEqual({
+      pids: [100],
+      gone: [],
+      notAsked: [],
+      alsoHeld: [],
+      belowEnding: [202],
+    });
     monitor.resumePaused();
   });
 

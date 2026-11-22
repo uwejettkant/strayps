@@ -1044,6 +1044,9 @@ export class ProcessMonitor extends EventEmitter {
     const belowEnding = Array.from(new Set([...sparedNow, ...spared.map((t) => t.pid)])).filter(
       (pid) => !held.includes(pid) && (alive === undefined || alive.has(pid)),
     );
+    // Being ended, or below a process being ended, is not "had exited": each is named once, or not
+    // at all when the person ended it (safety review, 22.11.2026)
+    gone = gone.filter((pid) => !belowEnding.includes(pid) && !this.terminating.has(pid));
     if (held.length > 0) this.emit('processes-paused', held);
     return { pids: held, gone, notAsked, alsoHeld, belowEnding };
   }
@@ -1207,7 +1210,7 @@ export class ProcessMonitor extends EventEmitter {
       // left to the process being ended, which may wait for it (maintainer decision, 22.11.2026)
       if (underEnding || this.terminating.has(raw.pid)) {
         ending.add(raw.pid);
-        if (underEnding && !this.paused.has(raw.pid)) belowEnding.push(raw);
+        if (underEnding && !this.paused.has(raw.pid) && !this.terminating.has(raw.pid)) belowEnding.push(raw);
         continue;
       }
       reached.add(raw.pid);
