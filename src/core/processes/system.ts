@@ -95,10 +95,19 @@ export function formatElapsedTime(sec: number): string {
 }
 
 /**
- * Turns the output of `ps -Ao pid,ppid,pgid,rss,pcpu,pmem,etime,time,args` and of `ps -Ao pid,comm`
- * into process records. `comm` comes from its own call, where it is the last column: on macOS it is
- * the full program path, which can contain spaces ("Application Support"), and in the middle of a
- * line it shifted every column after it into the wrong field.
+ * Arguments for reading the full process table. `-ww` disables column-width truncation: on Linux
+ * (`procps-ng`), `ps -Ao ...,args` truncates to 80 columns (or `$COLUMNS`) when piped, cutting off
+ * script names and `mcp` keywords in long paths. `-A -ww -o` works on both macOS BSD `ps` and
+ * Linux `procps-ng`.
+ */
+export const PS_MAIN_ARGS = ['-A', '-ww', '-o', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,args'] as const;
+export const PS_COMM_ARGS = ['-A', '-ww', '-o', 'pid,comm'] as const;
+
+/**
+ * Turns the output of `ps -A -ww -o pid,ppid,pgid,rss,pcpu,pmem,etime,time,args` and of
+ * `ps -A -ww -o pid,comm` into process records. `comm` comes from its own call, where it is the
+ * last column: on macOS it is the full program path, which can contain spaces ("Application
+ * Support"), and in the middle of a line it shifted every column after it into the wrong field.
  */
 export function parsePsOutput(main: string, comm: string): RawProcessInfo[] {
   const commByPid = new Map<number, string>();
@@ -150,8 +159,8 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   try {
     const options = { maxBuffer: 16 * 1024 * 1024, env: psEnvironment() };
     const [main, comm] = await Promise.all([
-      execFileAsync(PS_BIN, ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,args'], options),
-      execFileAsync(PS_BIN, ['-Ao', 'pid,comm'], options),
+      execFileAsync(PS_BIN, [...PS_MAIN_ARGS], options),
+      execFileAsync(PS_BIN, [...PS_COMM_ARGS], options),
     ]);
     return parsePsOutput(main.stdout, comm.stdout);
   } catch {
@@ -186,8 +195,8 @@ export function defaultProcessTree(): RawProcessInfo[] | undefined {
       stdio: ['ignore', 'pipe', 'ignore'] as Array<'ignore' | 'pipe'>,
       timeout: 1000,
     };
-    const main = execFileSync(PS_BIN, ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,args'], options);
-    const comm = execFileSync(PS_BIN, ['-Ao', 'pid,comm'], options);
+    const main = execFileSync(PS_BIN, [...PS_MAIN_ARGS], options);
+    const comm = execFileSync(PS_BIN, [...PS_COMM_ARGS], options);
     return parsePsOutput(main, comm);
   } catch {
     return undefined;

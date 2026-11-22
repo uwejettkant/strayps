@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { parseLsofCwdOutput, resolveProcessCwds } from '../src/core/processes/cwd.js';
 import { parseFootprintJson } from '../src/core/processes/memory.js';
-import { formatElapsedTime, parseCpuTime, parseElapsedTime, parsePsOutput } from '../src/core/processes/system.js';
+import {
+  formatElapsedTime,
+  parseCpuTime,
+  parseElapsedTime,
+  parsePsOutput,
+  PS_COMM_ARGS,
+  PS_MAIN_ARGS,
+} from '../src/core/processes/system.js';
 
 describe('footprint output', () => {
   it('takes phys_footprint per requested PID from the JSON, whatever the processes are called', () => {
@@ -53,6 +60,13 @@ describe('ps output', () => {
       },
       expect.objectContaining({ pid: 512, name: 'node', cpuTimeSec: 0.45, etime: '01-02:03:04', cmd: 'node /x/node_modules/.bin/mcp-server-git' }),
     ]);
+  });
+
+  it('requests unlimited column width (-ww) from ps so Linux does not truncate long command lines at 80 columns', () => {
+    expect(PS_MAIN_ARGS).toContain('-ww');
+    expect(PS_COMM_ARGS).toContain('-ww');
+    expect(PS_MAIN_ARGS[PS_MAIN_ARGS.length - 1]).toMatch(/,args$/);
+    expect(PS_COMM_ARGS[PS_COMM_ARGS.length - 1]).toMatch(/,comm$/);
   });
 });
 
