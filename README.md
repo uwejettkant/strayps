@@ -60,8 +60,8 @@ Each row shows the process, what kind it is (`agent`, `mcp` or `child`), its wor
 | :--- | :--- |
 | `ACTIVE` | It used CPU time since the last scan |
 | `IDLE` | It used none; an agent of the repository strayps was started in is only ever `ACTIVE` or `IDLE` |
-| `STANDBY` | An MCP server whose parent is alive, waiting for its next tool call. An MCP server of an editor or desktop app that is still running stays `STANDBY`, however long it waits |
-| `STALE` | Older than 6 hours, and in ten minutes of watching it started no new process (a working agent runs tools: a shell, `git`, tests) and used less than 8 seconds of CPU time: a session in another repository, or an MCP server that no running app holds |
+| `STANDBY` | An MCP server whose parent is alive, waiting for its next tool call. An MCP server of an editor or desktop app that is still running, or of an agent that is still in use, stays `STANDBY`, however long it waits |
+| `STALE` | Older than 6 hours, and in ten minutes of watching it started no new process (a working agent runs tools: a shell, `git`, tests) and used less than 8 seconds of CPU time: a session in another repository (with its idle MCP servers and child processes), or an MCP server that neither an active agent nor a running app holds |
 | `FROZEN` | Its parent is gone (an app that macOS started from the Dock or Finder does not count), it is at least 45 seconds old and used no CPU time since the last scan |
 
 These are observations, not verdicts: nothing is labeled safe to kill, and there is no bulk cleanup. An idle session at an editor window you will come back to tomorrow looks the same as a forgotten one. You end a process with `kill <pid>` in the terminal, after a confirmation: SIGTERM first, SIGKILL only if it does not exit.

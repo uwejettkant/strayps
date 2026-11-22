@@ -57,6 +57,8 @@ export interface ProcessFacts {
   silenceSec: number;
   /** Held by strayps right now. */
   paused: boolean;
+  /** Status of the nearest monitored agent above this process in this scan, if any. */
+  parentAgentStatus?: ProcessHealthStatus;
 }
 
 /** The thresholds the rules use: always the configured values, never the defaults as literals. */
@@ -113,6 +115,20 @@ export function classifyStatus(
   const heldByRunningApp =
     facts.hasLiveParentChain && facts.ppid !== 1 && host !== undefined && !NON_APP_HOSTS.has(host);
 
+  // An MCP server or child process of an agent that is still in use waits for that agent; an MCP
+  // server started directly by an open editor or desktop app (no agent in between) waits for the
+  // app. Neither is stale on its own just because it sits idle while its owner is running
+  // (22.11.2026: active Claude Desktop session's MCP server with a repo cwd was marked STALE).
+  // A sub-agent in another repository is a session of its own and is still judged on its own.
+  const heldByActiveAgent =
+    category !== 'agent' &&
+    facts.parentAgentStatus !== undefined &&
+    facts.parentAgentStatus !== 'STALE' &&
+    facts.parentAgentStatus !== 'FROZEN';
+  const heldDirectlyByRunningApp =
+    category === 'mcp' && facts.parentAgentStatus === undefined && heldByRunningApp;
+  const keptAliveByOwner = heldByActiveAgent || heldDirectlyByRunningApp;
+
   let status: ProcessHealthStatus = hasCpuActivity ? 'ACTIVE' : 'IDLE';
   // The default when no rule below says more: where the process works, never a claim that it
   // is in the watched repository when it is not
@@ -125,13 +141,13 @@ export function classifyStatus(
   if (!isOtherRepo && isDevServer) {
     status = 'ACTIVE';
     reason = `Running dev server in current repository (${formattedUptime})`;
-  } else if (isOtherRepo && isStaleByAge && quietLongEnough) {
+  } else if (isOtherRepo && isStaleByAge && !keptAliveByOwner && quietLongEnough) {
     // Age alone called sessions stale that were still in use at an open editor:
     // a session in another repository is stale only when it is old AND has used no CPU time
     // for a measured window.
     status = 'STALE';
     reason = `Session in ${displayCwd}, running for ${formattedUptime}, ${idleNote}${hostNote}`;
-  } else if (isOtherRepo && isStaleByAge) {
+  } else if (isOtherRepo && isStaleByAge && !keptAliveByOwner) {
     reason =
       cpuTimeSec === undefined
         ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; its CPU time cannot be read, so it is never called stale`
@@ -146,7 +162,7 @@ export function classifyStatus(
     isStaleByAge &&
     quietLongEnough &&
     category === 'mcp' &&
-    !heldByRunningApp
+    !keptAliveByOwner
   ) {
     // Detached MCP process without a repository cwd, older than staleSessionHours
     status = 'STALE';

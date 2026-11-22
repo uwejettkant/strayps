@@ -154,6 +154,8 @@ interface ScanContext {
   repoPids: Set<number>;
   /** True for a PID pause held after this scan read its list. */
   heldAfterList: (pid: number) => boolean;
+  /** Processes already observed in this scan: agents are observed first so their MCP servers and children see their current status. */
+  observedByPid: Map<number, MonitoredProcess>;
 }
 
 export class ProcessMonitor extends EventEmitter {
@@ -376,19 +378,27 @@ export class ProcessMonitor extends EventEmitter {
       homeDir: homeDirectory(),
       repoPids: new Set(),
       heldAfterList,
+      observedByPid: new Map(),
     };
     // PIDs whose own working directory lies in the watched repository
     for (const { raw } of candidates.list) {
       if (this.isInsideRoot(raw.cwd ?? cwdMap.get(raw.pid))) scan.repoPids.add(raw.pid);
     }
 
+    // Observe agents before their MCP servers and children so each sees its agent's status from
+    // this scan rather than lagging by one scan (or missing mcp-client agents added after servers)
+    const ordered = [
+      ...candidates.list.filter((c) => c.category === 'agent'),
+      ...candidates.list.filter((c) => c.category !== 'agent'),
+    ];
     const seenPids = new Set<number>();
-    for (const candidate of candidates.list) {
+    for (const candidate of ordered) {
       // Ended while this scan waited for working directories or memory: it must not come back
       // with a new firstSeenAt, to be ended a second time (review, 20.11.2026)
       if (this.terminating.has(candidate.raw.pid)) continue;
       seenPids.add(candidate.raw.pid);
       const monitored = this.observe(candidate, scan);
+      scan.observedByPid.set(monitored.pid, monitored);
       this.tracked.set(monitored.pid, monitored);
       this.reportStatusChange(monitored);
     }
@@ -591,6 +601,7 @@ export class ProcessMonitor extends EventEmitter {
         sinceNewChildMs: activity.lastNewChildAt === undefined ? undefined : now - activity.lastNewChildAt,
         silenceSec,
         paused,
+        parentAgentStatus: agentPid !== undefined ? scan.observedByPid.get(agentPid)?.status : undefined,
       },
       {
         staleSessionSec: this.staleSessionSec,

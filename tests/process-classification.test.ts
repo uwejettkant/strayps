@@ -261,6 +261,81 @@ describe('ProcessMonitor classification (production rules)', () => {
     expect(list.find((p) => p.pid === 93)!.reason).toContain('MCP process without a working directory');
   });
 
+  it('keeps an idle MCP server of an active agent in another repository in STANDBY, and marks it STALE once the agent is stale', async () => {
+    // Seen on 22.11.2026: an active Claude Desktop session in another repo (PID 3397) had its
+    // dataforseo MCP server (PID 3578, same repo cwd) marked STALE because rule 2 ran before
+    // STANDBY without checking the agent. Put the MCP servers before the agent in ps order so the
+    // test also proves scan order does not lag by a scan.
+    const t0 = Date.now();
+    const { monitor, procs, alive } = setup([
+      mcp(504, 503, { cwd: OTHER, etime: '1-03:00:00', cpuTimeSec: 0.4 }),
+      mcp(505, 502, { etime: '1-03:00:00', cpuTimeSec: 0.4 }),
+      { pid: 500, ppid: 1, pgid: 500, name: '/Applications/Claude.app/Contents/MacOS/Claude', cmd: '/Applications/Claude.app/Contents/MacOS/Claude', etime: '2-00:00:00' },
+      { pid: 501, ppid: 500, pgid: 501, name: '/Applications/Claude.app/Contents/Helpers/disclaimer', cmd: '/Applications/Claude.app/Contents/Helpers/disclaimer', etime: '1-03:00:00' },
+      agent(502, OTHER, { ppid: 501, pgid: 501, etime: '1-03:00:00', cpu: 1.0, cpuTimeSec: 100 }),
+      { pid: 503, ppid: 502, pgid: 501, name: 'npm', cmd: 'npm exec dataforseo-mcp-server@latest', cwd: OTHER, etime: '1-03:00:00' },
+    ]);
+    const find = (list: Awaited<ReturnType<typeof monitor.scan>>, pid: number) => list.find((p) => p.pid === pid)!;
+
+    // While the agent keeps working across 46s, 10m and 1h, both MCP servers stay STANDBY
+    for (const [step, offsetSec] of [0, 46, STALE_QUIET_SEC, STALE_QUIET_SEC + 3600].entries()) {
+      procs.find((p) => p.pid === 502)!.cpuTimeSec = 100 + step * 15;
+      const list = await monitor.scan(t0 + offsetSec * 1000);
+      expect(find(list, 502).status, `agent at +${offsetSec}s`).not.toBe('STALE');
+      expect(find(list, 504).status, `repo-cwd MCP at +${offsetSec}s`).toBe('STANDBY');
+      expect(find(list, 505).status, `root-cwd MCP at +${offsetSec}s`).toBe('STANDBY');
+    }
+
+    // Once the agent sits idle for the quiet window, agent and its idle MCP servers become STALE together
+    const staleAt = t0 + (STALE_QUIET_SEC * 2 + 3600) * 1000;
+    const staleList = await monitor.scan(staleAt);
+    expect(find(staleList, 502).status).toBe('STALE');
+    expect(find(staleList, 504).status).toBe('STALE');
+    expect(find(staleList, 505).status).toBe('STALE');
+
+    // As soon as the agent starts a tool call again, its MCP servers return to STANDBY on the same scan
+    procs.push({ pid: 509, ppid: 502, name: 'git', cmd: 'git status' });
+    alive.add(509);
+    const resumed = await monitor.scan(staleAt + 2000);
+    expect(find(resumed, 502).status).not.toBe('STALE');
+    expect(find(resumed, 504).status).toBe('STANDBY');
+    expect(find(resumed, 505).status).toBe('STANDBY');
+  });
+
+  it('keeps an idle MCP server of a running editor in STANDBY even with a working directory in another repository', async () => {
+    const t0 = Date.now();
+    const { monitor } = setup([
+      { pid: 600, ppid: 1, pgid: 600, name: '/Applications/Visual Studio Code.app/Contents/MacOS/Code', cmd: '/Applications/Visual Studio Code.app/Contents/MacOS/Code', etime: '10:07:00' },
+      { pid: 601, ppid: 600, pgid: 600, name: 'Code Helper (Plugin)', cmd: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)', etime: '10:07:00' },
+      mcp(602, 601, { pgid: 600, cwd: OTHER, etime: '10:07:00', cpuTimeSec: 0.4 }),
+      // Other direction: a terminal-held MCP server in another repo (no app, no agent) still becomes STALE
+      { pid: 610, ppid: 1, pgid: 610, name: 'tmux', cmd: 'tmux new -s work', etime: '2-00:00:00' },
+      { pid: 611, ppid: 610, pgid: 611, name: 'zsh', cmd: '-zsh', cwd: OTHER, etime: '2-00:00:00' },
+      mcp(612, 611, { pgid: 612, cwd: OTHER, etime: '10:07:00', cpuTimeSec: 0.4 }),
+    ]);
+    for (const offset of [0, 46, STALE_QUIET_SEC, STALE_QUIET_SEC + 3600]) {
+      const list = await monitor.scan(t0 + offset * 1000);
+      expect(list.find((p) => p.pid === 602)!.status, `editor MCP at +${offset}s`).toBe('STANDBY');
+    }
+    const afterQuiet = await monitor.scan(t0 + (STALE_QUIET_SEC + 3602) * 1000);
+    expect(afterQuiet.find((p) => p.pid === 612)!.status).toBe('STALE');
+  });
+
+  it('keeps an idle child of an active agent in another repo out of STALE, while a sub-agent in another repo is judged on its own', async () => {
+    const t0 = Date.now();
+    const { monitor, procs } = setup([
+      agent(700, OTHER, { etime: '08:00:00', cpu: 2.0, cpuTimeSec: 100 }),
+      { pid: 701, ppid: 700, name: 'Chromium', cmd: 'Chromium --headless', cwd: OTHER, etime: '08:00:00', cpu: 0, cpuTimeSec: 0.4 },
+      agent(702, '/work/third-repo', { ppid: 700, etime: '08:00:00', cpu: 0, cpuTimeSec: 10 }),
+    ]);
+    await monitor.scan(t0);
+    procs.find((p) => p.pid === 700)!.cpuTimeSec = 120;
+    const list = await monitor.scan(t0 + STALE_QUIET_SEC * 1000);
+    expect(list.find((p) => p.pid === 700)!.status).not.toBe('STALE');
+    expect(list.find((p) => p.pid === 701)!.status).not.toBe('STALE');
+    expect(list.find((p) => p.pid === 702)!.status).toBe('STALE');
+  });
+
   it('marks tool processes started by an agent of the watched repo as belonging to it', async () => {
     const { monitor } = setup([
       agent(100, REPO, { cpu: 2 }),

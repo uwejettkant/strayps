@@ -92,10 +92,31 @@ describe('process status rules', () => {
     );
   });
 
-  it('keeps an idle MCP server of an open editor out of STALE, but not one in a terminal', () => {
-    const server = facts({ category: 'mcp', cmd: 'node some-mcp-server', cwd: undefined, displayCwd: undefined });
-    expect(classifyStatus({ ...server, host: 'VS Code' }, limits).status).toBe('STANDBY');
-    expect(classifyStatus({ ...server, host: 'terminal' }, limits).status).toBe('STALE');
+  it('keeps an idle MCP server of an open editor out of STALE, with or without a repo cwd, but not one in a terminal', () => {
+    const noCwd = facts({ category: 'mcp', cmd: 'node some-mcp-server', cwd: undefined, displayCwd: undefined });
+    expect(classifyStatus({ ...noCwd, host: 'VS Code' }, limits).status).toBe('STANDBY');
+    expect(classifyStatus({ ...noCwd, host: 'terminal' }, limits).status).toBe('STALE');
+    const withCwd = facts({ category: 'mcp', cmd: 'node some-mcp-server', cwd: '/work/other', displayCwd: '/work/other' });
+    expect(classifyStatus({ ...withCwd, host: 'VS Code' }, limits).status).toBe('STANDBY');
+    expect(classifyStatus({ ...withCwd, host: 'terminal' }, limits).status).toBe('STALE');
+  });
+
+  it('keeps an idle MCP server or child of a non-stale agent out of STALE, while a sub-agent is judged on its own', () => {
+    const server = facts({ category: 'mcp', cmd: 'node some-mcp-server', host: 'Claude Desktop' });
+    expect(classifyStatus({ ...server, parentAgentStatus: 'ACTIVE' }, limits).status).toBe('STANDBY');
+    expect(classifyStatus({ ...server, parentAgentStatus: 'IDLE' }, limits).status).toBe('STANDBY');
+    expect(classifyStatus({ ...server, parentAgentStatus: 'STALE' }, limits).status).toBe('STALE');
+    // Same when the MCP server has no working directory of its own
+    const rootServer = { ...server, cwd: undefined, displayCwd: undefined };
+    expect(classifyStatus({ ...rootServer, parentAgentStatus: 'ACTIVE' }, limits).status).toBe('STANDBY');
+    expect(classifyStatus({ ...rootServer, parentAgentStatus: 'STALE' }, limits).status).toBe('STALE');
+
+    const child = facts({ category: 'child', cmd: 'Chromium --headless' });
+    expect(classifyStatus({ ...child, parentAgentStatus: 'ACTIVE' }, limits).status).toBe('IDLE');
+    expect(classifyStatus({ ...child, parentAgentStatus: 'STALE' }, limits).status).toBe('STALE');
+
+    // A sub-agent in another repository is a session of its own
+    expect(classifyStatus(facts({ category: 'agent', parentAgentStatus: 'ACTIVE' }), limits).status).toBe('STALE');
   });
 
   it('shows a dev server of this repository as one, also when an agent runs it, and never as quiet', () => {
