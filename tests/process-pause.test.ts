@@ -281,6 +281,25 @@ describe('ProcessMonitor pause: what a confirmed agent starts while the question
     monitor.resumePaused();
   });
 
+  it('never offers or holds a process being ended, also after a scan within its grace period', async () => {
+    // A scan in the grace period no longer listed it, and pause offered it as an unlisted process of
+    // its agent: held, it could not clean up, and the escalation ended it with SIGKILL while it was
+    // stopped (safety review, 22.11.2026)
+    const { monitor, kills } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: REPO, etime: '02:00' },
+    ]);
+    await monitor.scan(1_000);
+    expect(monitor.killProcess(102)).toBe(true);
+    await monitor.scan(3_000);
+
+    const asked = monitor.getPauseTargets();
+    expect(asked.map((t) => t.pid)).toEqual([100]);
+    expect(monitor.pauseTargets(asked)).toEqual({ pids: [100], gone: [], notAsked: [], alsoHeld: [] });
+    expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '100:SIGSTOP']);
+    monitor.resumePaused();
+  });
+
   it('never makes an editor, app or terminal an agent started a pause target, nor the tool processes in it', async () => {
     // pause held them once a question had shown them, and its hint offered them (safety review, 22.11.2026)
     const { monitor } = setup([

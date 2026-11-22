@@ -722,6 +722,9 @@ export class ProcessMonitor extends EventEmitter {
     const extras = new Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }>();
     for (const raw of tree.raws) {
       if (this.tracked.has(raw.pid) || raw.pid === this.selfPid || selfAncestors.has(raw.pid)) continue;
+      // Ended a moment ago: no scan lists it, so it looked like a call its agent made. Held, it could
+      // not clean up, and the escalation ended it with SIGKILL while stopped (safety review, 22.11.2026)
+      if (this.terminating.has(raw.pid)) continue;
       for (const cur of tree.ancestors(raw.pid)) {
         if (cur === this.selfPid) break;
         const ancestor = this.tracked.get(cur);
@@ -1008,9 +1011,14 @@ export class ProcessMonitor extends EventEmitter {
     return age + 2 < elapsedSec + Math.max(0, this.monotonicNow() - at) / 1000;
   }
 
-  /** SIGSTOP for one process, remembered with its age at `at` (monotonic clock) to tell a reused PID later. */
+  /**
+   * SIGSTOP for one process, remembered with its age at `at` (monotonic clock) to tell a reused PID
+   * later. Never strayps, the processes that started it, or a process inside its SIGTERM grace period:
+   * every SIGSTOP goes through here, so these refusals hold whatever offered the process.
+   */
   private hold(pid: number, elapsedSec: number | undefined, at: number): boolean {
-    if (pid === this.selfPid || this.lastSelfAncestors.has(pid) || !this.processKiller(pid, 'SIGSTOP')) return false;
+    if (pid === this.selfPid || this.lastSelfAncestors.has(pid) || this.terminating.has(pid)) return false;
+    if (!this.processKiller(pid, 'SIGSTOP')) return false;
     this.paused.add(pid);
     this.holdCount += 1;
     this.holdNumber.set(pid, this.holdCount);
