@@ -219,12 +219,15 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
         message: '',
         level: 'warn',
         confirm: {
-          prompt: `Pause ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents? resume continues them.`,
+          // What the agents start while the question is open is held too: said here, named after.
+          // Short, so that [y/N] stays visible at 80 columns
+          prompt: `Pause ${targets.length} process${targets.length === 1 ? '' : 'es'} of this repo's agents and what they start meanwhile?`,
           details: targets.map(describePauseTarget),
           effect: 'hold',
           run: () => {
-            // Exactly what was shown: the list can change while the question is open
-            const { pids, gone = [], notAsked } = session.pause(targets);
+            // What was shown, each still the same process, and what those agents started while the
+            // question was open; a new agent is asked about first, by the next pause
+            const { pids, gone = [], notAsked, alsoHeld = [] } = session.pause(targets);
             // A reused PID is in both lists: it counts as gone, not as new
             const fresh = (notAsked ?? []).filter((pid) => !gone.includes(pid));
             const parts = [
@@ -232,6 +235,9 @@ export function runCommand(session: MonitorSession, command: LeashCommand): Comm
                 ? `Paused ${pids.length} process${pids.length === 1 ? '' : 'es'}; type resume to continue`
                 : 'Nothing was paused',
             ];
+            if (alsoHeld.length > 0) {
+              parts.push(`PID ${alsoHeld.join(', ')}, started by the agents after the question, ${alsoHeld.length === 1 ? 'is' : 'are'} held too`);
+            }
             if (gone.length > 0) {
               parts.push(`PID ${gone.join(', ')} had exited or ${gone.length === 1 ? 'is another process' : 'are other processes'} now, not held`);
             }

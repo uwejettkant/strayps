@@ -37,8 +37,10 @@ export interface PauseResult {
   pids: number[];
   /** pause: confirmed, but gone or another process under the PID now; not held. */
   gone?: number[];
-  /** pause: targets the confirmation did not show (started since); not held. */
+  /** pause: targets the confirmation did not show and that are not held: a new agent and what it runs. */
   notAsked?: number[];
+  /** pause: what the confirmed agents started while the question was open; held too (also in `pids`). */
+  alsoHeld?: number[];
 }
 
 /**
@@ -395,7 +397,8 @@ export class MonitorSession extends EventEmitter {
    * Holds the coding agents of the current repository and the processes they started (SIGSTOP).
    * Nothing is terminated; `resume` continues them where they stopped. Dev servers, editors and
    * sessions in other repositories are not touched. With `confirmed` (what a person was shown),
-   * only those, each still the same process; without it, every current target.
+   * those, each still the same process, and what those agents started while the question was
+   * open, never a new agent; without it, every current target and what they started since.
    */
   public pause(confirmed?: PauseTarget[]): PauseResult {
     const outcome = this.processMonitor.pauseTargets(confirmed);

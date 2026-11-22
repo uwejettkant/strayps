@@ -116,8 +116,16 @@ export interface PauseOutcome {
   pids: number[];
   /** Confirmed, but gone, or the PID names another process now: not held. */
   gone: number[];
-  /** Pause targets now that the confirmation did not show (started since): not held. */
+  /**
+   * Pause targets of the last scan that the confirmation did not show and that are not held: a new
+   * agent, what a new agent runs, what an agent runs that was not confirmed.
+   */
   notAsked: number[];
+  /**
+   * Held although the confirmation did not show them: what the confirmed agents started while the
+   * question was open (also in `pids`). Never an agent.
+   */
+  alsoHeld: number[];
 }
 
 export interface ProcessMonitorOptions {
@@ -153,6 +161,13 @@ export interface ProcessMonitorOptions {
    * "unknown" when a custom `processKiller` is supplied.
    */
   processAges?: (pids: number[]) => Map<number, number>;
+  /**
+   * The whole process table, read right after pause has held the agents, to find what they started
+   * while the question was open; undefined when it cannot be read, and pause then uses the last
+   * scan. Defaults to `ps` with the built-in killer, and to undefined when a custom
+   * `processKiller` is supplied.
+   */
+  processTree?: () => RawProcessInfo[] | undefined;
   /** Time a process gets to exit after SIGTERM before SIGKILL is sent (default 3000 ms, 0 disables). */
   killGraceMs?: number;
   /** More program names to treat as coding agents (the `agents` setting); matched exactly. */
@@ -348,6 +363,65 @@ async function readFootprints(pids: number[]): Promise<Map<number, number>> {
  * a tool call end within a second or two; listed, they would flicker through the table.
  */
 const CHILD_MIN_AGE_SEC = 5;
+
+/**
+ * How often pause looks at the process table after it has held the agents. Each look can find a
+ * process that a tool call forked after the look before; a held process forks nothing more.
+ */
+const PAUSE_LOOKS = 3;
+
+/**
+ * After this long, pause stops holding what it finds and only names it: the answer to the question
+ * runs synchronously, and a slow `ps` would freeze the screen and delay signal handling.
+ */
+const PAUSE_LOOK_BUDGET_MS = 1500;
+
+/** Editors and terminals by their exact program name, where no app bundle says it (Linux, tmux, sshd). */
+const APP_PROGRAM_NAMES = new Set([
+  'tmux',
+  'sshd',
+  'kitty',
+  'alacritty',
+  'xterm',
+  'wezterm',
+  'wezterm-gui',
+  'ghostty',
+  'konsole',
+  'gnome-terminal',
+  'gnome-terminal-server',
+  'code',
+  'code-insiders',
+  'codium',
+  'cursor',
+  'windsurf',
+  'zed',
+  'antigravity',
+]);
+
+/**
+ * The app bundles of editors, IDEs, desktop apps that run agents, and terminals, by name (a closed
+ * list: an app missing here is treated like any other program): their own programs (`Contents/MacOS/`, and helper apps under `Contents/Frameworks/`). Not any program in an
+ * app bundle: framework Python runs as `Python.app/Contents/MacOS/Python`, and the Chrome or the
+ * Electron app an agent drives are apps too (safety review, 22.11.2026).
+ */
+const APP_BUNDLE_PROGRAM =
+  /\/(?:Visual Studio Code(?: - Insiders)?|VSCodium|Cursor|Windsurf|Kiro|Trae|Positron|Void|Zed(?: Preview)?|Antigravity|Claude|Xcode|Sublime Text|Nova|BBEdit|TextMate|MacVim|Emacs|Fleet|Android Studio|IntelliJ IDEA[^/]*|WebStorm|PyCharm[^/]*|GoLand|PhpStorm|RubyMine|CLion|RustRover|DataGrip|Rider|Terminal|iTerm2?|Warp|Ghostty|kitty|Alacritty|WezTerm|Hyper|Tabby|Wave|Rio)\.app\/Contents\/(?:MacOS\/|Frameworks\/[^/]+\.app\/Contents\/MacOS\/)/i;
+
+/**
+ * An editor, desktop app or terminal, which pause never holds, decided by the program file alone:
+ * a program of one of APP_BUNDLE_PROGRAM's bundles, or one of APP_PROGRAM_NAMES. Not by
+ * HOST_PATTERNS, which find a word anywhere in the path: in ~/WebstormProjects every tool call
+ * looked like the IDE and was neither held nor named; nor by an install directory, where a build
+ * can run the IDE's Java (safety review, 22.11.2026).
+ */
+function isAppOrTerminal(raw: Pick<RawProcessInfo, 'name' | 'cmd'>): boolean {
+  const files = [raw.name, (raw.cmd ?? '').trim().split(/\s+/)[0] ?? ''];
+  return files.some(
+    (file) =>
+      APP_BUNDLE_PROGRAM.test(file) ||
+      APP_PROGRAM_NAMES.has(baseName(file).toLowerCase().replace(/:.*$/, '')),
+  );
+}
 
 const IGNORED_SYSTEM_PATTERNS = [
   '/applications/claude.app/contents/macos/claude',
@@ -799,6 +873,27 @@ export async function defaultProcessLister(): Promise<RawProcessInfo[]> {
   }
 }
 
+/**
+ * The process table as `defaultProcessLister` reads it, but synchronously: pause reads it while the
+ * agents it just held wait, and the answer to the question runs synchronously in both front ends.
+ */
+export function defaultProcessTree(): RawProcessInfo[] | undefined {
+  try {
+    const options = {
+      encoding: 'utf-8' as const,
+      maxBuffer: 16 * 1024 * 1024,
+      env: psEnvironment(),
+      stdio: ['ignore', 'pipe', 'ignore'] as Array<'ignore' | 'pipe'>,
+      timeout: 1000,
+    };
+    const main = execFileSync(PS_BIN, ['-Ao', 'pid,ppid,pgid,rss,pcpu,pmem,etime,time,args'], options);
+    const comm = execFileSync(PS_BIN, ['-Ao', 'pid,comm'], options);
+    return parsePsOutput(main, comm);
+  } catch {
+    return undefined;
+  }
+}
+
 export function defaultProcessKiller(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
   try {
     process.kill(pid, signal);
@@ -872,6 +967,7 @@ export class ProcessMonitor extends EventEmitter {
   private processAlive: (pid: number) => boolean;
   private processAge: (pid: number) => number | undefined;
   private processAges: (pids: number[]) => Map<number, number>;
+  private processTree: () => RawProcessInfo[] | undefined;
   private cwdResolver: (pids: number[]) => Promise<Map<number, string>>;
   private agentNames: Set<string> = new Set();
 
@@ -880,9 +976,16 @@ export class ProcessMonitor extends EventEmitter {
   private paused: Set<number> = new Set();
   /** For each held PID: its age and the scan time when it was held, to tell a reused PID. */
   private heldSince: Map<number, { elapsedSec: number; at: number }> = new Map();
+  /** Counts every SIGSTOP; per held PID the count at its hold, to tell holds newer than a scan's list. */
+  private holdCount = 0;
+  private holdNumber: Map<number, number> = new Map();
   /** Unlisted processes the agents of this repository run, as of the last scan (see PauseTarget). */
   private pauseExtras: Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }> = new Map();
   private lastScanAt = 0;
+  /** `Date.now()` when the last scan started: converts a time read now to the scan clock (tests inject one). */
+  private lastScanWallAt = 0;
+  /** Every process the last finished scan saw, and that scan's time: what pause falls back to. */
+  private lastTree: { at: number; raws: RawProcessInfo[] } = { at: 0, raws: [] };
   /** Parent of every process of the last scan, listed or not (shells and npx are not listed). */
   private lastParentByPid: Map<number, number> = new Map();
   private alertedPids: Set<number> = new Set();
@@ -924,6 +1027,7 @@ export class ProcessMonitor extends EventEmitter {
       options.processAlive ?? (options.processKiller ? () => false : defaultProcessAlive);
     this.processAge = options.processAge ?? (options.processKiller ? () => undefined : defaultProcessAge);
     this.processAges = options.processAges ?? (options.processKiller ? () => new Map() : defaultProcessAges);
+    this.processTree = options.processTree ?? (options.processKiller ? () => undefined : defaultProcessTree);
     this.cwdResolver =
       options.cwdResolver ??
       (options.processLister ? async () => new Map<number, string>() : resolveProcessCwds);
@@ -1017,7 +1121,17 @@ export class ProcessMonitor extends EventEmitter {
 
   private async performScan(now: number): Promise<MonitoredProcess[]> {
     this.lastScanAt = now;
+    const wallAtStart = Date.now();
+    this.lastScanWallAt = wallAtStart;
+    // pause can answer while this scan waits for lsof or footprint, and hold processes this list
+    // does not have yet: they must not be forgotten when the scan goes on (safety review, 22.11.2026)
+    const holdsBeforeList = this.holdCount;
+    const heldAfterList = (pid: number): boolean => (this.holdNumber.get(pid) ?? 0) > holdsBeforeList;
     const rawList = await this.processLister();
+    // When ps had read the ages, on the scan clock. Ages taken as of the scan's start made a slow ps
+    // look like a reused PID: a confirmed agent "gone", a held process forgotten while still stopped
+    // (safety review, 22.11.2026). Later is the safe side: it only lowers the age expected later.
+    const listedAt = now + (Date.now() - wallAtStart);
     const seenPids = new Set<number>();
 
     // Map all live PIDs, parent-child links, and parent PIDs that have children
@@ -1107,7 +1221,7 @@ export class ProcessMonitor extends EventEmitter {
       // A held process stays in view until it is continued or gone, wherever it is in the tree now:
       // a held browser whose MCP server was ended moved to PID 1, left the list and the set of held
       // processes, and stayed stopped for good (review, 20.11.2026)
-      if (this.stillHeld(raw, now)) {
+      if (this.stillHeld(raw, now, heldAfterList(raw.pid))) {
         const held: Candidate = { raw, category: this.tracked.get(raw.pid)?.category ?? 'child' };
         candidates.push(held);
         candidateByPid.set(raw.pid, held);
@@ -1150,6 +1264,17 @@ export class ProcessMonitor extends EventEmitter {
         else descendantsOf.set(ancestor, [r.pid]);
       }
     }
+
+    // An editor, desktop app or terminal an agent started is never held, nor what runs in it
+    // (safety review, 22.11.2026)
+    const hostOnTheWay = (pid: number, agent: number | undefined): boolean => {
+      for (let cur: number | undefined = pid, depth = 0; cur && cur > 1 && cur !== agent && depth < 32; depth++) {
+        const raw = rawByPid.get(cur);
+        if (raw && isAppOrTerminal(raw)) return true;
+        cur = parentByPid.get(cur);
+      }
+      return false;
+    };
 
     const nearestAgent = (pid: number): number | undefined => {
       let cur = parentByPid.get(pid);
@@ -1389,7 +1514,8 @@ export class ProcessMonitor extends EventEmitter {
       const agentPid = nearestAgent(raw.pid);
       const pauseTarget =
         belongsToWatchedRepo &&
-        (category === 'agent' || (agentPid !== undefined && belongsToRepo(agentPid)));
+        (category === 'agent' ||
+          (agentPid !== undefined && belongsToRepo(agentPid) && !hostOnTheWay(raw.pid, agentPid)));
       // A held process uses no CPU by design: that is neither stale nor frozen
       const paused = this.paused.has(raw.pid);
       if (paused) {
@@ -1410,7 +1536,7 @@ export class ProcessMonitor extends EventEmitter {
         memorySource,
         uptime: formattedUptime,
         elapsedSec,
-        startedAt: now - elapsedSec * 1000,
+        startedAt: listedAt - elapsedSec * 1000,
         firstSeenAt: existing?.firstSeenAt ?? now,
         lastActiveAt,
         cpuTimeSec,
@@ -1439,8 +1565,7 @@ export class ProcessMonitor extends EventEmitter {
     for (const pid of Array.from(this.tracked.keys())) {
       if (!seenPids.has(pid)) {
         this.tracked.delete(pid);
-        this.paused.delete(pid);
-        this.heldSince.delete(pid);
+        if (!heldAfterList(pid)) this.forgetHold(pid);
         this.alertedPids.delete(pid);
         this.cpuSamples.delete(pid);
         this.children.delete(pid);
@@ -1449,10 +1574,7 @@ export class ProcessMonitor extends EventEmitter {
 
     // Held PIDs that never made it into the list and are gone now
     for (const pid of Array.from(this.paused)) {
-      if (!allLivePids.has(pid)) {
-        this.paused.delete(pid);
-        this.heldSince.delete(pid);
-      }
+      if (!allLivePids.has(pid) && !heldAfterList(pid)) this.forgetHold(pid);
     }
 
     // What the agents of this repository run beyond the list: pause holds that too. Never strayps,
@@ -1465,12 +1587,12 @@ export class ProcessMonitor extends EventEmitter {
         if (cur === this.selfPid) break;
         const ancestor = this.tracked.get(cur);
         if (ancestor?.category === 'agent') {
-          if (ancestor.pauseTarget) {
+          if (ancestor.pauseTarget && !hostOnTheWay(raw.pid, cur)) {
             const elapsedSec = raw.etime !== undefined ? parseElapsedTime(raw.etime).elapsedSec : undefined;
             this.pauseExtras.set(raw.pid, {
               raw,
               elapsedSec,
-              startedAt: elapsedSec === undefined ? undefined : now - elapsedSec * 1000,
+              startedAt: elapsedSec === undefined ? undefined : listedAt - elapsedSec * 1000,
             });
           }
           break;
@@ -1480,6 +1602,7 @@ export class ProcessMonitor extends EventEmitter {
     }
     // With the list it belongs to: set while a scan waits, it paired a new tree with the old list
     this.lastParentByPid = parentByPid;
+    this.lastTree = { at: listedAt, raws: rawList };
 
     const processes = this.getProcesses();
     this.emit('scan-complete', processes);
@@ -1578,8 +1701,8 @@ export class ProcessMonitor extends EventEmitter {
     const sent = this.processKiller(pid, signal);
     if (!sent) return false;
     // A held process only acts on SIGTERM once it runs again
-    if (this.paused.delete(pid)) this.processKiller(pid, 'SIGCONT');
-    this.heldSince.delete(pid);
+    if (this.paused.has(pid)) this.processKiller(pid, 'SIGCONT');
+    this.forgetHold(pid);
 
     this.tracked.delete(pid);
     this.alertedPids.delete(pid);
@@ -1659,15 +1782,16 @@ export class ProcessMonitor extends EventEmitter {
   }
 
   /** True when this PID is held and still names the process that was held. */
-  private stillHeld(raw: RawProcessInfo, now: number): boolean {
+  private stillHeld(raw: RawProcessInfo, now: number, heldAfterList = false): boolean {
     if (!this.paused.has(raw.pid)) return false;
+    // held after this list was read: `raw` may be the process that had the PID before
+    if (heldAfterList) return true;
     const since = this.heldSince.get(raw.pid);
     if (since && raw.etime !== undefined) {
       const expected = since.elapsedSec + (now - since.at) / 1000;
       if (parseElapsedTime(raw.etime).elapsedSec + 2 < expected) {
         // The held process is gone and the PID names another one, which was never held
-        this.paused.delete(raw.pid);
-        this.heldSince.delete(raw.pid);
+        this.forgetHold(raw.pid);
         return false;
       }
     }
@@ -1684,8 +1808,9 @@ export class ProcessMonitor extends EventEmitter {
    * continues every process where it stopped. A long autonomous run is paid work; an emergency
    * brake must not throw it away.
    *
-   * With `confirmed`, only the targets a person was shown, each still the same process: the list
-   * can change while the question is open (external audit, 21.11.2026).
+   * With `confirmed`, the targets a person was shown, each still the same process: the list can
+   * change while the question is open (external audit, 21.11.2026). Of what changed, only what the
+   * confirmed agents started in the meantime is held too, never a new agent (`alsoHeld`).
    */
   public pauseTargets(confirmed?: PauseTarget[]): PauseOutcome {
     // Listed in both: the time strayps first saw it, exact. Otherwise the start time, which is
@@ -1697,8 +1822,8 @@ export class ProcessMonitor extends EventEmitter {
       return Math.abs(a.startedAt - b.startedAt) <= 2000;
     };
     let targets = this.getPauseTargets();
-    const gone: number[] = [];
-    const notAsked: number[] = [];
+    let gone: number[] = [];
+    let notAsked: number[] = [];
     if (confirmed) {
       for (const target of targets) if (!confirmed.some((c) => same(c, target))) notAsked.push(target.pid);
       for (const c of confirmed) if (!targets.some((target) => same(c, target))) gone.push(c.pid);
@@ -1708,46 +1833,208 @@ export class ProcessMonitor extends EventEmitter {
     // scan, drop out of what strayps holds and stay stopped: its age now must fit
     const ages = this.processAges(targets.map((t) => t.pid));
     const held: number[] = [];
+    const heldAgents = new Set<number>();
     // The agents first, so they start nothing new while what they run is held
     targets.sort((a, b) => Number(b.category === 'agent') - Number(a.category === 'agent'));
     for (const target of targets) {
-      if (target.pid === this.selfPid) continue;
-      const age = ages.get(target.pid);
-      if (age !== undefined && target.elapsedSec !== undefined && age + 2 < target.elapsedSec) {
+      // the age and the time of the scan that saw it, so the next scans compare like with like
+      const at =
+        target.startedAt !== undefined && target.elapsedSec !== undefined
+          ? target.startedAt + target.elapsedSec * 1000
+          : this.lastScanAt;
+      if (this.youngerThanExpected(ages.get(target.pid), target.elapsedSec, at)) {
         gone.push(target.pid);
         continue;
       }
-      if (this.processKiller(target.pid, 'SIGSTOP')) {
-        this.paused.add(target.pid);
-        if (target.elapsedSec !== undefined) {
-          // the age and the time of the scan that saw it, so the next scans compare like with like
-          const at = target.startedAt !== undefined ? target.startedAt + target.elapsedSec * 1000 : this.lastScanAt;
-          this.heldSince.set(target.pid, { elapsedSec: target.elapsedSec, at });
-        }
-        const listed = this.tracked.get(target.pid);
-        if (listed) listed.paused = true;
+      if (this.hold(target.pid, target.elapsedSec, at)) {
         held.push(target.pid);
+        if (target.category === 'agent') heldAgents.add(target.pid);
       }
     }
-    if (held.length > 0) {
-      // Whatever ends strayps from now on (a crash, process.exit, an uncaught exception, the
-      // normal shutdown) must continue what it holds: a stopped agent stays stopped forever.
-      // Only SIGKILL skips this, and nothing can run then.
-      if (!this.exitHookInstalled) {
-        process.on('exit', this.continueOnExit);
-        this.exitHookInstalled = true;
-      }
-      this.emit('processes-paused', held);
+    // An agent at work starts its next tool call while the person reads the question; held only
+    // as far as the question went, the agent stopped and the call ran on (maintainer decision,
+    // 22.11.2026). The agents are stopped now and start nothing more.
+    const { alsoHeld, missed, alive } = this.holdWhatTheyStarted(heldAgents);
+    held.push(...alsoHeld);
+    // A PID held now is neither "not held" nor "keeps running"; one the last look missed has ended
+    gone = gone.filter((pid) => !alsoHeld.includes(pid));
+    notAsked = Array.from(new Set([...notAsked, ...missed])).filter(
+      (pid) => !held.includes(pid) && (alive === undefined || alive.has(pid)),
+    );
+    if (held.length > 0) this.emit('processes-paused', held);
+    return { pids: held, gone, notAsked, alsoHeld };
+  }
+
+  /** The scan clock now: what a time read now is in the clock the scans run on (tests inject one). */
+  private scanClockNow(): number {
+    return this.lastScanAt + (Date.now() - this.lastScanWallAt);
+  }
+
+  /**
+   * True when `ps` reads the PID as younger than the process seen `elapsedSec` old at `at` (scan
+   * clock) must be by now: the PID names another process. The same test as `stillHeld`, so that
+   * nothing is held that the next scan would take for another process, forget, and leave stopped.
+   */
+  private youngerThanExpected(age: number | undefined, elapsedSec: number | undefined, at: number): boolean {
+    if (age === undefined || elapsedSec === undefined) return false;
+    return age + 2 < elapsedSec + Math.max(0, this.scanClockNow() - at) / 1000;
+  }
+
+  /** SIGSTOP for one process, remembered with its age at `at` (scan clock) to tell a reused PID later. */
+  private hold(pid: number, elapsedSec: number | undefined, at: number): boolean {
+    if (pid === this.selfPid || !this.processKiller(pid, 'SIGSTOP')) return false;
+    this.paused.add(pid);
+    this.holdCount += 1;
+    this.holdNumber.set(pid, this.holdCount);
+    if (elapsedSec !== undefined) this.heldSince.set(pid, { elapsedSec, at });
+    else this.heldSince.delete(pid);
+    const listed = this.tracked.get(pid);
+    if (listed) listed.paused = true;
+    // Whatever ends strayps from now on (a crash, process.exit, an uncaught exception, the normal
+    // shutdown) must continue what it holds: a stopped agent stays stopped forever. Only SIGKILL
+    // skips this, and nothing can run then.
+    if (!this.exitHookInstalled) {
+      process.on('exit', this.continueOnExit);
+      this.exitHookInstalled = true;
     }
-    return { pids: held, gone, notAsked };
+    return true;
+  }
+
+  /** Forgets that a PID is held; the caller continues it, or knows that it is gone. */
+  private forgetHold(pid: number): void {
+    this.paused.delete(pid);
+    this.heldSince.delete(pid);
+    this.holdNumber.delete(pid);
+  }
+
+  /**
+   * Holds what the given agents (held just now) started and nothing holds yet, as a new look at the
+   * process table shows it; when the table cannot be read, as the last scan saw it. Looks again
+   * while a look held something: a tool call can fork between a look and its SIGSTOP. Out of looks
+   * or time, one more look only names what still runs (`missed`), as it does with every new agent
+   * below them. `alive` is every PID of the last new look, undefined without one.
+   */
+  private holdWhatTheyStarted(agents: Set<number>): { alsoHeld: number[]; missed: number[]; alive?: Set<number> } {
+    const alsoHeld: number[] = [];
+    const missed = new Set<number>();
+    let alive: Set<number> | undefined;
+    if (agents.size === 0) return { alsoHeld, missed: [] };
+    const startedAt = Date.now();
+    for (let look = 0; ; look++) {
+      let fresh: RawProcessInfo[] | undefined;
+      try {
+        fresh = this.processTree();
+      } catch {
+        fresh = undefined;
+      }
+      const tree = fresh ?? this.lastTree.raws;
+      // the ages in `tree` are those of this moment, or of the last scan (scan clock)
+      const at = fresh ? this.scanClockNow() : this.lastTree.at;
+      if (fresh) alive = new Set(fresh.map((raw) => raw.pid));
+      const { found, asked } = this.startedBy(agents, tree);
+      for (const raw of asked) missed.add(raw.pid);
+      if (look >= PAUSE_LOOKS || Date.now() - startedAt > PAUSE_LOOK_BUDGET_MS) {
+        for (const raw of found) missed.add(raw.pid);
+        break;
+      }
+      const ages = this.processAges(found.map((raw) => raw.pid));
+      let heldNow = false;
+      for (const raw of found) {
+        const elapsedSec = raw.etime !== undefined ? parseElapsedTime(raw.etime).elapsedSec : undefined;
+        if (this.youngerThanExpected(ages.get(raw.pid), elapsedSec, at)) continue;
+        if (this.hold(raw.pid, elapsedSec, at)) {
+          alsoHeld.push(raw.pid);
+          heldNow = true;
+        }
+      }
+      // The last scan shows the same each time; a new look shows more only below what was just held
+      if (!fresh || !heldNow) break;
+    }
+    return { alsoHeld, missed: Array.from(missed).filter((pid) => !alsoHeld.includes(pid)), alive };
+  }
+
+  /**
+   * What runs below the given agents in `tree`, parents first: `found` is what pause may hold and
+   * does not hold yet. Never what a person has to be asked about first, nor anything below it: a
+   * process recognized as an agent (by its name, the `agents` setting or the MCP server it
+   * started), which is named in `asked`; an editor, desktop app or terminal; strayps itself and the
+   * wrappers that started it.
+   */
+  private startedBy(agents: Set<number>, tree: RawProcessInfo[]): { found: RawProcessInfo[]; asked: RawProcessInfo[] } {
+    const byPid = new Map(tree.map((raw) => [raw.pid, raw]));
+    const childrenOf = new Map<number, RawProcessInfo[]>();
+    for (const raw of tree) {
+      if (!raw.ppid || raw.ppid === raw.pid) continue;
+      const list = childrenOf.get(raw.ppid);
+      if (list) list.push(raw);
+      else childrenOf.set(raw.ppid, [raw]);
+    }
+    const parentOf = (pid: number): number | undefined => byPid.get(pid)?.ppid ?? this.lastParentByPid.get(pid);
+    const selfChain = new Set<number>([this.selfPid]);
+    for (let cur = parentOf(this.selfPid), depth = 0; cur && cur > 1 && depth < 32; depth++) {
+      selfChain.add(cur);
+      cur = parentOf(cur);
+    }
+
+    // Everything below the agents, breadth first: parents before what they run
+    const below: RawProcessInfo[] = [];
+    const visited = new Set<number>(agents);
+    let level = Array.from(agents);
+    for (let depth = 0; level.length > 0 && depth < 32; depth++) {
+      const next: number[] = [];
+      for (const pid of level) {
+        for (const child of childrenOf.get(pid) ?? []) {
+          if (visited.has(child.pid)) continue;
+          visited.add(child.pid);
+          below.push(child);
+          next.push(child.pid);
+        }
+      }
+      level = next;
+    }
+
+    const categories = new Map<number, ProcessCategory | undefined>();
+    const categoryOf = (pid: number): ProcessCategory | undefined => {
+      if (!categories.has(pid)) {
+        const raw = byPid.get(pid);
+        categories.set(pid, raw ? this.classifyProcess(raw)?.category : undefined);
+      }
+      return categories.get(pid);
+    };
+    // The client of an MCP server is an agent, whatever it is called (agent recognition, rule 3).
+    // A client below the agents has its servers below them as well.
+    const clients = new Set<number>();
+    for (const raw of below) {
+      if (categoryOf(raw.pid) !== 'mcp') continue;
+      const client = this.findMcpClient(raw, byPid, categoryOf);
+      if (client !== undefined) clients.add(client);
+    }
+    const isAgent = (raw: RawProcessInfo): boolean =>
+      this.tracked.get(raw.pid)?.category === 'agent' || categoryOf(raw.pid) === 'agent' || clients.has(raw.pid);
+
+    // Again from the agents, without passing what has to be asked about
+    const found: RawProcessInfo[] = [];
+    const asked: RawProcessInfo[] = [];
+    const reached = new Set<number>(agents);
+    for (const raw of below) {
+      if (!reached.has(raw.ppid ?? -1) || selfChain.has(raw.pid)) continue;
+      // an agent first: it is named, whatever program runs it
+      if (isAgent(raw)) {
+        asked.push(raw);
+        continue;
+      }
+      if (isAppOrTerminal(raw)) continue;
+      reached.add(raw.pid);
+      if (!this.paused.has(raw.pid) && !this.terminating.has(raw.pid)) found.push(raw);
+    }
+    return { found, asked };
   }
 
   /** Continues every process strayps is holding (SIGCONT). */
   public resumePaused(): number[] {
     const resumed: number[] = [];
     for (const pid of Array.from(this.paused)) {
-      this.paused.delete(pid);
-      this.heldSince.delete(pid);
+      this.forgetHold(pid);
       const proc = this.tracked.get(pid);
       if (proc) proc.paused = false;
       if (this.processKiller(pid, 'SIGCONT')) resumed.push(pid);
@@ -1813,7 +2100,10 @@ export class ProcessMonitor extends EventEmitter {
       const ancestor = rawByPid.get(cur);
       if (!ancestor) return undefined;
       const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
-      if (HOST_PATTERNS.some(([pattern]) => pattern.test(programIdentity(ancestor)))) return undefined;
+      // an app that pause never holds is never an agent either (safety review, 22.11.2026)
+      if (HOST_PATTERNS.some(([pattern]) => pattern.test(programIdentity(ancestor))) || isAppOrTerminal(ancestor)) {
+        return undefined;
+      }
       if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.toLowerCase().includes(pattern))) {
         return undefined;
       }

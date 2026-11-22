@@ -106,6 +106,8 @@ export function createHarness(options: HarnessOptions = {}): Harness {
       return true;
     },
     processAlive: (pid) => procs.some((p) => p.pid === pid),
+    // what pause sees when it looks again right after holding the agents
+    processTree: () => procs.map((p) => ({ ...p })),
     // the table's RSS stands in for the footprint; RSS-only display is tested in process-control
     memoryReader: async (pids) =>
       new Map(procs.filter((p) => pids.includes(p.pid) && p.rssKb !== undefined).map((p) => [p.pid, p.rssKb! * 1024])),

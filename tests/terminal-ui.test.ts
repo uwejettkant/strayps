@@ -105,7 +105,7 @@ describe('running commands against a session', () => {
       '  claude',
     ]);
     const pause = runCommand(h.session, parseCommand('pause'));
-    expect(pause.confirm?.prompt).toBe("Pause 1 process of this repo's agents? resume continues them.");
+    expect(pause.confirm?.prompt).toBe("Pause 1 process of this repo's agents and what they start meanwhile?");
     expect(pause.confirm?.details).toEqual([`PID 100  agent  claude  ${h.dir}`]);
     // short enough that the answer keys stay visible on an 80-column terminal (scenario pass, 20.11.2026)
     for (const confirm of [kill.confirm!, pause.confirm!]) {
@@ -141,6 +141,23 @@ describe('running commands against a session', () => {
     await h.monitor.scan();
     expect(pause.confirm!.run().message).toBe('Nothing was paused; PID 100 had exited or is another process now, not held');
     expect(h.kills).toEqual([]);
+  });
+
+  it('names what pause held beyond the question: what the confirmed agents started while it was open', async () => {
+    const h = await busyHarness();
+    const pause = runCommand(h.session, parseCommand('pause'));
+    h.procs.push(
+      { pid: 110, ppid: 100, name: 'bash', cmd: 'bash -c npm test', etime: '00:01' },
+      { pid: 111, ppid: 110, name: 'node', cmd: 'node node_modules/.bin/vitest run', etime: '00:00' },
+      // a new session in this repository is asked about, never held unasked
+      { pid: 120, ppid: 1, name: 'codex', cmd: 'codex', cwd: h.dir, etime: '00:01' },
+    );
+    await h.monitor.scan();
+    expect(pause.confirm!.run().message).toBe(
+      'Paused 3 processes; type resume to continue; PID 110, 111, started by the agents after the question, are held too; PID 120 started after the question and keeps running: type pause again to hold it',
+    );
+    expect(h.kills.map((k) => k.pid)).toEqual([100, 110, 111]);
+    h.session.resume();
   });
 
   it('ends an agent session with the processes it started after one confirmation that names them', async () => {
