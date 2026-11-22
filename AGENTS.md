@@ -15,10 +15,11 @@ It is a safety tool. People install it so that less goes wrong. Every change is 
 
 ## 2. Non-negotiable rules
 
-1. **Never aim the real kill path at the real process table.** strayps terminates processes; while you develop it, the processes on this machine are the user's live agent sessions, including yours.
-   - Tests and experiments use a fake process table: `createHarness()` in `tests/helpers/harness.ts`, or `--demo`.
-   - Never send `kill` or `pause` to an instance that runs without `--demo`. Builds up to the tag `v0.1-full-guard` also answer `POST /api/kill/*` and `/api/pause`: never call those either.
+1. **Never aim the real kill or pause path at the real process table during development.** strayps terminates and pauses processes; while you develop or test it, the processes on this machine are the user's live agent sessions, including yours.
+   - Tests, scenario runs and experiments always use a fake process table: `createHarness()` in `tests/helpers/harness.ts`, or `--demo`. Never send `kill` or `pause` to an instance without `--demo` to test or verify code.
+   - Builds up to the tag `v0.1-full-guard` also answer `POST /api/kill/*` and `/api/pause`: never call those.
    - `strayps status` is read-only and fine against the real machine.
+   - **Acting on real processes as a user tool:** only when the user explicitly asks you to end or pause real processes, never on your own initiative. List the processes from `strayps status` (including any MCP servers or children that belong to an agent's session), get the user's confirmation for the exact PIDs first, and never target your own running session.
    - Safety net, not an excuse: `tests/setup.ts` blocks `process.kill` inside the test suite.
 2. **Do not run an older build on a repository someone is working in.** Builds up to the tag `v0.1-full-guard` watch files and roll one back on a confirmed `revert`. The current build reads no file but `.strayps.json`. Scenario runs that need a config file to edit go to a sandbox (`scripts/scenarios/make-sandbox.sh`).
 3. **Product safety invariants.** Each one has tests. If a change breaks one of those tests, the change is wrong, not the test.
