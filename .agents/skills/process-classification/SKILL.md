@@ -1,6 +1,6 @@
 ---
 name: process-classification
-description: Rules and procedure for changing how strayps recognizes coding agents, classifies processes (ACTIVE, IDLE, STANDBY, STALE, FROZEN) and decides what pause holds. Use before touching src/core/process-monitor.ts (agent recognition, the keyword, launcher and host lists, the stale or silence thresholds, pause targets) or the wording of process labels.
+description: Rules and procedure for changing how strayps recognizes coding agents, classifies processes (ACTIVE, IDLE, STANDBY, STALE, FROZEN) and decides what pause holds. Use before touching src/core/process-monitor.ts or src/core/processes/ (agent recognition, the keyword, launcher and host lists, the stale or silence thresholds, the status rules, pause targets) or the wording of process labels.
 ---
 
 # Changing process recognition and classification
@@ -9,7 +9,7 @@ A wrong label here once ended with a user clicking "Clean up" and losing a sessi
 
 ## 1. Which processes are agents
 
-strayps keeps no list of AI products. A process is a coding agent when one of these holds, in this order:
+strayps keeps no list of AI products. A process is a coding agent when one of these holds, in this order (`recognizeProcess` and `findMcpClient` in `src/core/processes/recognition.ts`, next to the lists they use):
 
 | # | How | `detectedBy` |
 | :--- | :--- | :--- |
@@ -33,7 +33,7 @@ A child has an `agentPid`, so it ends with its agent's session and is held by `p
 
 ## 2. Classification
 
-`ProcessMonitor.performScan` decides in this order; the first match wins:
+`classifyStatus` (`src/core/processes/classify.ts`) decides in this order, from what `ProcessMonitor.performScan` observed about the process; the first match wins. Its tests, rule by rule: `tests/process-status.test.ts`.
 
 | # | Condition | Result |
 | :--- | :--- | :--- |

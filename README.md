@@ -6,7 +6,7 @@
 
 **See every AI coding agent and MCP server running on your machine, find the ones left behind, and end them one session at a time. Local only: no account, no telemetry.**
 
-![package size](https://img.shields.io/badge/package-71.0%20kB-5BE49B?style=flat-square&labelColor=0D120F)
+![package size](https://img.shields.io/badge/package-73.3%20kB-5BE49B?style=flat-square&labelColor=0D120F)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-5BE49B?style=flat-square&logo=typescript&labelColor=0D120F)](./tsconfig.json)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20%20LTS-5BE49B?style=flat-square&logo=node.js&labelColor=0D120F)](./package.json)
 [![Local](https://img.shields.io/badge/privacy-local%20only%20%C2%B7%20no%20account%20%C2%B7%20no%20telemetry-5BE49B?style=flat-square&labelColor=0D120F)](#security-model)
@@ -222,7 +222,8 @@ strayps/
 │   ├── core/
 │   │   ├── session.ts       # One snapshot and one set of actions for every front end
 │   │   ├── events.ts        # What can appear in the activity log
-│   │   ├── process-monitor.ts # Process list, classification & graceful termination
+│   │   ├── process-monitor.ts # Process state: scans, graceful termination, pause
+│   │   ├── processes/       # Process tree, agent recognition, status rules, ps, lsof, footprint
 │   │   └── config.ts  # .strayps.json: defaults, validation, live reload
 │   └── ui/
 │       ├── terminal.ts      # Full-screen terminal view with command line
@@ -244,7 +245,7 @@ git clone https://github.com/uwejettkant/strayps.git
 cd strayps
 npm install
 
-npm run check     # Typecheck, 224 automated tests (Vitest), build — the gate before every commit
+npm run check     # Typecheck, 239 automated tests (Vitest), build — the gate before every commit
 npm test          # Tests only
 npm run build     # Bundle library, binary and .d.ts types via tsup
 npm run demo      # Simulated session, ends and pauses nothing real
