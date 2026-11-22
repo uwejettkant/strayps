@@ -151,6 +151,25 @@ describe('strayps CLI', () => {
     expect(run.output()).not.toContain('Continued the');
   });
 
+  it('keeps holding the demo processes across scans, so resume continues them later', async () => {
+    // The demo's processes had a fixed age: two seconds after pause they looked like new processes
+    // under the same PIDs, pause forgot them, and resume said "Nothing is paused"
+    const dir = makeTmpDir();
+    const run = runCli(['watch', dir, '--demo', '--no-dashboard']);
+    await run.waitFor(READY);
+    run.child.stdin.write('pause\n');
+    await run.waitFor("Pause 3 processes of this repo's agents");
+    run.child.stdin.write('yes\n');
+    await run.waitFor('Paused 3 processes; type resume to continue');
+    // two scans (every 2 s) after the hold
+    await new Promise((resolve) => setTimeout(resolve, 4_500));
+    run.child.stdin.write('resume\n');
+    await run.waitFor('Resumed 3 processes');
+    expect(run.output()).not.toContain('Nothing is paused');
+    run.child.stdin.write('exit\n');
+    expect((await run.exit).code).toBe(0);
+  }, 30_000);
+
   it('says on exit that it continued what it held', async () => {
     const dir = makeTmpDir();
     const run = runCli(['watch', dir, '--demo', '--no-dashboard']);

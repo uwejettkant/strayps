@@ -17,7 +17,7 @@ import {
 } from './core/config.js';
 import type { ActivityEventType } from './core/events.js';
 import { ProcessMonitor } from './core/process-monitor.js';
-import { PS_BIN } from './core/processes/system.js';
+import { formatElapsedTime, parseElapsedTime, PS_BIN } from './core/processes/system.js';
 import type { RawProcessInfo } from './core/processes/types.js';
 import { MonitorSession } from './core/session.js';
 import { DEFAULT_PORT, listenDashboardServer, type RunningDashboardServer } from './server.js';
@@ -199,6 +199,16 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
   const legacyNotice = demo ? null : legacyConfigNotice(rootDir);
 
   let demoProcesses = demo ? createDemoProcesses(rootDir) : [];
+  // The demo's processes age like real ones, on the monitor's clock: with a fixed age, a held
+  // process looked like a new one under the same PID after two seconds, pause forgot it, and
+  // resume said "Nothing is paused"
+  const demoStartedAt = performance.now();
+  const agedDemoProcesses = (): RawProcessInfo[] => {
+    const sec = Math.floor((performance.now() - demoStartedAt) / 1000);
+    return demoProcesses.map((p) =>
+      p.etime === undefined ? p : { ...p, etime: formatElapsedTime(parseElapsedTime(p.etime).elapsedSec + sec) },
+    );
+  };
   const processMonitor = new ProcessMonitor({
     rootDir,
     mcpSilenceTimeoutSec: cfg.limits.mcpSilenceTimeoutSec,
@@ -207,7 +217,7 @@ async function runWatch(dir: string, options: WatchOptions): Promise<void> {
     pollIntervalMs: 2000,
     ...(demo
       ? {
-          processLister: async () => demoProcesses,
+          processLister: async () => agedDemoProcesses(),
           processKiller: (pid: number, signal?: NodeJS.Signals) => {
             // pause and resume only hold and continue; the demo process stays in the list
             if (signal === 'SIGSTOP' || signal === 'SIGCONT') {

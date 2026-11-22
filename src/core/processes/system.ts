@@ -81,6 +81,19 @@ export function parseElapsedTime(etime?: string): { elapsedSec: number; formatte
   return { elapsedSec, formattedUptime };
 }
 
+/** The age of a process as `ps -o etime` prints it (`[[dd-]hh:]mm:ss`): the inverse of `parseElapsedTime`. */
+export function formatElapsedTime(sec: number): string {
+  const whole = Math.max(0, Math.floor(sec));
+  const days = Math.floor(whole / 86400);
+  const hours = Math.floor((whole % 86400) / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const seconds = whole % 60;
+  const two = (n: number): string => String(n).padStart(2, '0');
+  if (days > 0) return `${days}-${two(hours)}:${two(minutes)}:${two(seconds)}`;
+  if (hours > 0) return `${two(hours)}:${two(minutes)}:${two(seconds)}`;
+  return `${two(minutes)}:${two(seconds)}`;
+}
+
 /**
  * Turns the output of `ps -Ao pid,ppid,pgid,rss,pcpu,pmem,etime,time,args` and of `ps -Ao pid,comm`
  * into process records. `comm` comes from its own call, where it is the last column: on macOS it is

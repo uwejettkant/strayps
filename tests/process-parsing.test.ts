@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseLsofCwdOutput, resolveProcessCwds } from '../src/core/processes/cwd.js';
 import { parseFootprintJson } from '../src/core/processes/memory.js';
-import { parseCpuTime, parsePsOutput } from '../src/core/processes/system.js';
+import { formatElapsedTime, parseCpuTime, parseElapsedTime, parsePsOutput } from '../src/core/processes/system.js';
 
 describe('footprint output', () => {
   it('takes phys_footprint per requested PID from the JSON, whatever the processes are called', () => {
@@ -65,6 +65,19 @@ describe('CPU time from ps', () => {
     expect(parseCpuTime('')).toBeUndefined();
     expect(parseCpuTime('-')).toBeUndefined();
     expect(parseCpuTime('abc')).toBeUndefined();
+  });
+});
+
+describe('elapsed time as ps prints it', () => {
+  it('writes an age the way ps does, so that reading it back gives the same seconds', () => {
+    expect(formatElapsedTime(0)).toBe('00:00');
+    expect(formatElapsedTime(751)).toBe('12:31');
+    expect(formatElapsedTime(3600)).toBe('01:00:00');
+    expect(formatElapsedTime(11 * 86400 + 19 * 3600 + 42 * 60 + 10)).toBe('11-19:42:10');
+    expect(formatElapsedTime(-5)).toBe('00:00');
+    for (const sec of [0, 59, 60, 3599, 3600, 86399, 86400, 1_000_000]) {
+      expect(parseElapsedTime(formatElapsedTime(sec)).elapsedSec).toBe(sec);
+    }
   });
 });
 
