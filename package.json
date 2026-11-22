@@ -4,6 +4,14 @@
   "description": "See every AI coding agent and MCP server on your machine, find the ones left behind, and end them one session at a time",
   "license": "MIT",
   "author": "Uwe Jettkant",
+  "homepage": "https://github.com/uwejettkant/strayps#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/uwejettkant/strayps.git"
+  },
+  "bugs": {
+    "url": "https://github.com/uwejettkant/strayps/issues"
+  },
   "keywords": [
     "ai-agent",
     "mcp",
