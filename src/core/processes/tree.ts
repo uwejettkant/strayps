@@ -1,7 +1,8 @@
-// One reading of the process table as a tree. Every walk up or down the tree goes through here, so
-// the places that must agree on what lies above or below a process (what an agent started, what
-// pause holds, what runs under strayps itself) read the same chain. Where a walk stops differs on
-// purpose and stays visible where it is called.
+// One reading of the process table as a tree. Every walk of the monitor up or down the tree goes
+// through here, so the places that must agree on what lies above or below a process (what an agent
+// started, what pause holds, what runs under strayps itself) read the same chain. Where a walk
+// stops differs on purpose and stays visible where it is called. The session's kill plan walks the
+// last scan's parents through `ProcessMonitor.parentOf`, with its own stop rules.
 
 import type { RawProcessInfo } from './types.js';
 

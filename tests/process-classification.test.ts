@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ProcessMonitor, STALE_QUIET_SEC } from '../src/core/process-monitor.js';
+import { ProcessMonitor } from '../src/core/process-monitor.js';
+import { STALE_QUIET_SEC } from '../src/core/processes/classify.js';
 import type { RawProcessInfo } from '../src/core/processes/types.js';
 import { agent, mcp, OTHER, REPO, setup } from './helpers/processes.js';
 

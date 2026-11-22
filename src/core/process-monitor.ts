@@ -1,18 +1,19 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import { classifyStatus, STALE_QUIET_SEC } from './processes/classify.js';
 import { formatReadableCmd } from './processes/command-line.js';
 import { homeDirectory, resolveProcessCwds } from './processes/cwd.js';
 import { MEMORY_READ_INTERVAL_MS, readFootprints } from './processes/memory.js';
-import { programIdentity, programNames } from './processes/program-names.js';
+import { programNames } from './processes/program-names.js';
 import {
-  BUILT_IN_AGENT_NAMES,
-  HOST_PATTERNS,
+  detectHost,
+  findMcpClient,
+  hostOnTheWay,
   IGNORED_SYSTEM_PATTERNS,
   isAppOrTerminal,
   LAUNCHER_NAMES,
-  MCP_KEYWORDS,
-  NON_APP_HOSTS,
+  recognizeProcess,
 } from './processes/recognition.js';
 import {
   defaultProcessAge,
@@ -114,31 +115,37 @@ const PAUSE_LOOK_BUDGET_MS = 1500;
 /** CPU time below this between two scans is measurement noise, not work. */
 const CPU_TIME_TICK_SEC = 0.005;
 
-/**
- * A session in another repository is called stale only after strayps has watched it for this
- * long, it started no new process in that window, and it used less than STALE_CPU_BUDGET_SEC of
- * CPU time in it. A freshly started strayps therefore calls nothing stale for this long.
- */
-export const STALE_QUIET_SEC = 10 * 60;
-/**
- * Idle is not zero. Measured on 20.11.2026 over 25 minutes, per 10 minutes: idle agy 0.8 to
- * 1.0 s, idle claude in a terminal 1.4 to 5.5 s, idle claude in Claude Desktop 4.6 to 6.5 s; working
- * claude 4.2 to 19.5 s. CPU time alone overlaps, so the main sign of work is a new child process
- * (a tool call: a shell, git, rg, tests), which no idle session started; this budget only catches
- * an agent that works for 10 minutes without starting anything.
- */
-export const STALE_CPU_BUDGET_SEC = 8;
 /** Spacing of the CPU time samples kept per process for the window. */
 const CPU_SAMPLE_SPACING_MS = 30_000;
 
-function formatCpu(sec: number): string {
-  return `${sec.toFixed(2)} s`;
+/** A process a scan lists, and why. */
+interface Candidate {
+  raw: RawProcessInfo;
+  category: ProcessCategory;
+  detectedBy?: AgentDetection;
 }
 
-function formatDuration(sec: number): string {
-  if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
-  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+/** What a scan lists, in the order it found it. */
+interface Candidates {
+  list: Candidate[];
+  byPid: Map<number, Candidate>;
+}
+
+/** What one scan knows beyond a single process, built once per scan. */
+interface ScanContext {
+  now: number;
+  /** Monotonic time when `ps` read the ages of this scan. */
+  listedAt: number;
+  tree: ProcessTree;
+  selfAncestors: Set<number>;
+  candidateByPid: Map<number, Candidate>;
+  descendantsOf: Map<number, number[]>;
+  cwdMap: Map<number, string>;
+  homeDir: string;
+  /** PIDs whose own working directory lies in the watched repository. */
+  repoPids: Set<number>;
+  /** True for a PID pause held after this scan read its list. */
+  heldAfterList: (pid: number) => boolean;
 }
 
 export class ProcessMonitor extends EventEmitter {
@@ -309,6 +316,11 @@ export class ProcessMonitor extends EventEmitter {
     return this.scanInFlight;
   }
 
+  /**
+   * One scan, in phases: read the table; find what to list; read working directories and memory;
+   * observe each listed process; forget what is gone; note what pause would hold beyond the list.
+   * The three awaits are where pause can run in between: a hold made then is newer than this list.
+   */
   private async performScan(now: number): Promise<MonitoredProcess[]> {
     // pause can answer while this scan waits for lsof or footprint, and hold processes this list
     // does not have yet: they must not be forgotten when the scan goes on (safety review, 22.11.2026)
@@ -319,20 +331,75 @@ export class ProcessMonitor extends EventEmitter {
     // clock jump (NTP, VM sync) must never make a held process look replaced and stay stopped.
     // Reading after processLister also keeps a slow ps on the safe side (safety review, 22.11.2026).
     const listedAt = this.monotonicNow();
-    const seenPids = new Set<number>();
-
     const tree = new ProcessTree(rawList);
-
     // The chain of processes that launched strayps (npm, tsx, npx wrappers, the shell).
     const selfAncestors = new Set(tree.ancestors(this.selfPid));
 
-    interface Candidate {
-      raw: RawProcessInfo;
-      category: ProcessCategory;
-      detectedBy?: AgentDetection;
+    const candidates = this.listedByOwnCommandLine(tree, selfAncestors);
+    this.addMcpClients(tree, candidates);
+    this.addWhatAgentsStarted(tree, candidates, selfAncestors, listedAt, heldAfterList);
+    const pids = candidates.list.map((c) => c.raw.pid);
+
+    const cwdMap = await this.cwdResolver(pids);
+
+    // A value of a PID that is not listed any more must not end up on a new process with that PID
+    for (const pid of this.footprints.keys()) {
+      if (!candidates.byPid.has(pid)) this.footprints.delete(pid);
     }
-    const candidates: Candidate[] = [];
-    for (const raw of rawList) {
+    if (this.memoryReader && now - this.lastMemoryReadAt >= MEMORY_READ_INTERVAL_MS) {
+      this.lastMemoryReadAt = now;
+      try {
+        this.footprints = await this.memoryReader(pids);
+      } catch (err) {
+        // No footprint tool on this system: RSS from now on. Any other failure: RSS until the next read.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') this.memoryReader = undefined;
+        this.footprints = new Map();
+      }
+    }
+
+    const scan: ScanContext = {
+      now,
+      listedAt,
+      tree,
+      selfAncestors,
+      candidateByPid: candidates.byPid,
+      descendantsOf: this.descendantsOf(tree, candidates.byPid),
+      cwdMap,
+      homeDir: homeDirectory(),
+      repoPids: new Set(),
+      heldAfterList,
+    };
+    // PIDs whose own working directory lies in the watched repository
+    for (const { raw } of candidates.list) {
+      if (this.isInsideRoot(raw.cwd ?? cwdMap.get(raw.pid))) scan.repoPids.add(raw.pid);
+    }
+
+    const seenPids = new Set<number>();
+    for (const candidate of candidates.list) {
+      // Ended while this scan waited for working directories or memory: it must not come back
+      // with a new firstSeenAt, to be ended a second time (review, 20.11.2026)
+      if (this.terminating.has(candidate.raw.pid)) continue;
+      seenPids.add(candidate.raw.pid);
+      const monitored = this.observe(candidate, scan);
+      this.tracked.set(monitored.pid, monitored);
+      this.reportStatusChange(monitored);
+    }
+
+    this.forgetWhatIsGone(seenPids, tree, heldAfterList);
+    this.pauseExtras = this.unlistedPauseTargets(tree, selfAncestors, listedAt);
+    // With the list it belongs to: set while a scan waits, it paired a new tree with the old list
+    this.lastScan = { at: listedAt, tree };
+    this.lastSelfAncestors = selfAncestors;
+
+    const processes = this.getProcesses();
+    this.emit('scan-complete', processes);
+    return processes;
+  }
+
+  /** Coding agents and MCP servers, recognized by their own command line. */
+  private listedByOwnCommandLine(tree: ProcessTree, selfAncestors: Set<number>): Candidates {
+    const list: Candidate[] = [];
+    for (const raw of tree.raws) {
       if (raw.pid === this.selfPid) continue;
       if (this.terminating.has(raw.pid)) continue;
       const cmdLower = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
@@ -340,22 +407,26 @@ export class ProcessMonitor extends EventEmitter {
       if (cmdLower.includes('npm exec ') && tree.hasChildren(raw.pid)) {
         continue;
       }
-      const classified = this.classifyProcess(raw);
-      if (!classified) continue;
+      const recognized = recognizeProcess(raw, this.agentNames);
+      if (!recognized) continue;
       // Wrappers that started strayps itself are not agent work; killing them would kill us.
-      if (selfAncestors.has(raw.pid) && classified.category !== 'agent') continue;
-      candidates.push({ raw, ...classified });
+      if (selfAncestors.has(raw.pid) && recognized.category !== 'agent') continue;
+      list.push({ raw, ...recognized });
     }
+    return { list, byPid: new Map(list.map((c) => [c.raw.pid, c])) };
+  }
 
-    // Every MCP server is started by a client. A client that is not an editor, a desktop app or a
-    // terminal is a coding agent, whatever it is called, so no list of agent products is needed.
-    const candidateByPid = new Map(candidates.map((c) => [c.raw.pid, c]));
-    for (const server of candidates.filter((c) => c.category === 'mcp')) {
-      const clientPid = this.findMcpClient(server.raw, tree, (pid) => candidateByPid.get(pid)?.category);
+  /**
+   * Every MCP server is started by a client. A client that is not an editor, a desktop app or a
+   * terminal is a coding agent, whatever it is called, so no list of agent products is needed.
+   */
+  private addMcpClients(tree: ProcessTree, candidates: Candidates): void {
+    for (const server of candidates.list.filter((c) => c.category === 'mcp')) {
+      const clientPid = findMcpClient(server.raw, tree, (pid) => candidates.byPid.get(pid)?.category);
       if (clientPid === undefined || clientPid === this.selfPid || this.terminating.has(clientPid)) {
         continue;
       }
-      const known = candidateByPid.get(clientPid);
+      const known = candidates.byPid.get(clientPid);
       if (known) {
         if (known.category !== 'agent') {
           known.category = 'agent';
@@ -364,23 +435,34 @@ export class ProcessMonitor extends EventEmitter {
         continue;
       }
       const client: Candidate = { raw: tree.get(clientPid)!, category: 'agent', detectedBy: 'mcp-client' };
-      candidates.push(client);
-      candidateByPid.set(clientPid, client);
+      candidates.list.push(client);
+      candidates.byPid.set(clientPid, client);
     }
+  }
 
-    // What an agent started and is still running: a dev server, a test watcher, a browser its MCP
-    // server opened. Decided by the process tree alone: "node", "chromium" or "playwright" in a
-    // command line listed the user's own servers and apps as well (cut on 20.11.2026).
+  /**
+   * What an agent started and is still running: a dev server, a test watcher, a browser its MCP
+   * server opened. Decided by the process tree alone: "node", "chromium" or "playwright" in a
+   * command line listed the user's own servers and apps as well (cut on 20.11.2026). Also every
+   * process strayps holds, wherever it is in the tree now.
+   */
+  private addWhatAgentsStarted(
+    tree: ProcessTree,
+    candidates: Candidates,
+    selfAncestors: Set<number>,
+    listedAt: number,
+    heldAfterList: (pid: number) => boolean,
+  ): void {
     const agentAbove = (pid: number): boolean => {
       for (const cur of tree.ancestors(pid)) {
         // its own subtree: what it runs is no work of the agent that started it
         if (cur === this.selfPid) return false;
-        if (candidateByPid.get(cur)?.category === 'agent') return true;
+        if (candidates.byPid.get(cur)?.category === 'agent') return true;
       }
       return false;
     };
-    for (const raw of rawList) {
-      if (candidateByPid.has(raw.pid) || raw.pid === this.selfPid || this.terminating.has(raw.pid)) continue;
+    for (const raw of tree.raws) {
+      if (candidates.byPid.has(raw.pid) || raw.pid === this.selfPid || this.terminating.has(raw.pid)) continue;
       // The wrappers that started strayps: ending the agent's session must not end strayps
       if (selfAncestors.has(raw.pid)) continue;
       // A held process stays in view until it is continued or gone, wherever it is in the tree now:
@@ -388,8 +470,8 @@ export class ProcessMonitor extends EventEmitter {
       // processes, and stayed stopped for good (review, 20.11.2026)
       if (this.stillHeld(raw, listedAt, heldAfterList(raw.pid))) {
         const held: Candidate = { raw, category: this.tracked.get(raw.pid)?.category ?? 'child' };
-        candidates.push(held);
-        candidateByPid.set(raw.pid, held);
+        candidates.list.push(held);
+        candidates.byPid.set(raw.pid, held);
         continue;
       }
       if (!agentAbove(raw.pid)) continue;
@@ -402,314 +484,216 @@ export class ProcessMonitor extends EventEmitter {
         continue;
       }
       const child: Candidate = { raw, category: 'child' };
-      candidates.push(child);
-      candidateByPid.set(raw.pid, child);
+      candidates.list.push(child);
+      candidates.byPid.set(raw.pid, child);
     }
+  }
 
-    // Descendants of every candidate, for "did it start a process?". its own subtree is
-    // left out: its ps calls would make the agent that started it look busy forever.
+  /**
+   * Descendants of every listed process, for "did it start a process?". strayps's own subtree is
+   * left out: its ps calls would make the agent that started it look busy forever.
+   */
+  private descendantsOf(tree: ProcessTree, listed: Map<number, Candidate>): Map<number, number[]> {
     const descendantsOf = new Map<number, number[]>();
-    for (const r of rawList) {
+    for (const r of tree.raws) {
       if (r.pid === this.selfPid) continue;
       const chain = tree.ancestors(r.pid);
       if (chain.includes(this.selfPid)) continue;
       for (const ancestor of chain) {
-        if (!candidateByPid.has(ancestor)) continue;
+        if (!listed.has(ancestor)) continue;
         const list = descendantsOf.get(ancestor);
         if (list) list.push(r.pid);
         else descendantsOf.set(ancestor, [r.pid]);
       }
     }
+    return descendantsOf;
+  }
 
-    // An editor, desktop app or terminal an agent started is never held, nor what runs in it
-    // (safety review, 22.11.2026)
-    const hostOnTheWay = (pid: number, agent: number | undefined): boolean => {
-      for (const cur of tree.selfAndAncestors(pid)) {
-        if (cur === agent) return false;
-        const raw = tree.get(cur);
-        if (raw && isAppOrTerminal(raw)) return true;
-      }
-      return false;
-    };
+  private isInsideRoot(cwd: string | undefined): boolean {
+    if (typeof cwd !== 'string' || cwd.length === 0) return false;
+    const resolved = path.resolve(cwd);
+    return resolved === this.rootDir || resolved.startsWith(this.rootDir + path.sep);
+  }
 
-    const nearestAgent = (pid: number): number | undefined =>
-      tree.ancestors(pid).find((cur) => candidateByPid.get(cur)?.category === 'agent');
+  /** One listed process as this scan sees it: measured, placed, classified, and whether pause holds it. */
+  private observe({ raw, category, detectedBy }: Candidate, scan: ScanContext): MonitoredProcess {
+    const { now, listedAt, tree, selfAncestors } = scan;
+    const activity = this.measure(raw, now, scan.descendantsOf.get(raw.pid) ?? []);
+    const { silenceSec } = activity;
+    const { elapsedSec, formattedUptime } = raw.etime
+      ? parseElapsedTime(raw.etime)
+      : { elapsedSec: silenceSec, formattedUptime: `${silenceSec}s` };
 
-    const cwdMap = await this.cwdResolver(candidates.map((c) => c.raw.pid));
+    const rawCwd = raw.cwd ?? scan.cwdMap.get(raw.pid);
+    const homeDir = scan.homeDir;
+    // Only the home directory and what is inside it: /Users/uj-backup is not ~-backup
+    const displayCwd = rawCwd
+      ? homeDir.length > 1 && (rawCwd === homeDir || rawCwd.startsWith(`${homeDir}/`))
+        ? `~${rawCwd.slice(homeDir.length)}`
+        : rawCwd
+      : undefined;
 
-    // A value of a PID that is not listed any more must not end up on a new process with that PID
-    for (const pid of this.footprints.keys()) {
-      if (!candidateByPid.has(pid)) this.footprints.delete(pid);
-    }
-    if (this.memoryReader && now - this.lastMemoryReadAt >= MEMORY_READ_INTERVAL_MS) {
-      this.lastMemoryReadAt = now;
-      try {
-        this.footprints = await this.memoryReader(candidates.map((c) => c.raw.pid));
-      } catch (err) {
-        // No footprint tool on this system: RSS from now on. Any other failure: RSS until the next read.
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') this.memoryReader = undefined;
-        this.footprints = new Map();
-      }
-    }
-    const homeDir = homeDirectory();
+    const hasRepoAncestor = (pid: number): boolean => tree.ancestors(pid).some((cur) => scan.repoPids.has(cur));
+    // A tool process started by an agent of the watched repo belongs to that session,
+    // wherever its own working directory is (many MCP servers run in "/" or their install dir).
+    const belongsToWatchedRepo = this.isInsideRoot(rawCwd) || hasRepoAncestor(raw.pid);
 
-    const isInsideRoot = (cwd: string | undefined): boolean => {
-      if (typeof cwd !== 'string' || cwd.length === 0) return false;
-      const resolved = path.resolve(cwd);
-      return resolved === this.rootDir || resolved.startsWith(this.rootDir + path.sep);
-    };
+    const host = detectHost(raw, tree);
 
-    // PIDs whose own working directory lies in the watched repository
-    const repoPids = new Set<number>();
-    for (const { raw } of candidates) {
-      if (isInsideRoot(raw.cwd ?? cwdMap.get(raw.pid))) repoPids.add(raw.pid);
-    }
+    // Check whether this process (or its parent wrapper) has a living parent agent
+    const grandparent = raw.ppid ? tree.parentOf(raw.ppid) : undefined;
+    const hasLiveParentChain = Boolean(
+      raw.ppid && tree.has(raw.ppid) && (!grandparent || grandparent === 1 || tree.has(grandparent)),
+    );
 
-    const hasRepoAncestor = (pid: number): boolean => tree.ancestors(pid).some((cur) => repoPids.has(cur));
-    const belongsToRepo = (pid: number): boolean => repoPids.has(pid) || hasRepoAncestor(pid);
+    // Pause holds the agents of this repository and what they started, nothing else:
+    // not a dev server from the user's terminal, not an editor, not another session, and never
+    // the agent that started strayps itself (holding it freezes whatever owns strayps's terminal
+    // or pipe and leaves no way to resume).
+    const agentPid = tree.ancestors(raw.pid).find((cur) => scan.candidateByPid.get(cur)?.category === 'agent');
+    const pauseTarget =
+      belongsToWatchedRepo &&
+      !selfAncestors.has(raw.pid) &&
+      (category === 'agent' ||
+        (agentPid !== undefined &&
+          (scan.repoPids.has(agentPid) || hasRepoAncestor(agentPid)) &&
+          !selfAncestors.has(agentPid) &&
+          !hostOnTheWay(tree, raw.pid, agentPid)));
+    const paused = this.stillHeld(raw, listedAt, scan.heldAfterList(raw.pid));
 
-    const detectHost = (raw: RawProcessInfo): string | undefined => {
-      if (!raw.ppid) return undefined;
-      if (raw.ppid === 1) return 'detached';
-      for (const cur of tree.ancestors(raw.pid)) {
-        const ancestor = tree.get(cur);
-        if (!ancestor) return undefined;
-        // Only an actual editor, desktop app or terminal names a host: a script in ~/WebstormProjects
-        // must not make its MCP server look attached to JetBrains IDE.
-        if (isAppOrTerminal(ancestor)) {
-          const identity = programIdentity(ancestor);
-          for (const [pattern, label] of HOST_PATTERNS) {
-            if (pattern.test(identity)) return label;
-          }
-        }
-      }
-      return undefined;
-    };
-
-    for (const { raw, category, detectedBy } of candidates) {
-      // Ended while this scan waited for working directories or memory: it must not come back
-      // with a new firstSeenAt, to be ended a second time (review, 20.11.2026)
-      if (this.terminating.has(raw.pid)) continue;
-      seenPids.add(raw.pid);
-      const cpu = Number(raw.cpu ?? 0);
-      const memory = Number(raw.memory ?? 0);
-
-      // A PID the system handed to a new process since the last scan: the new one is younger than
-      // the old one was. Its history (first seen, CPU samples) must not carry over, or a confirmation
-      // given for the old process would match the new one.
-      const previous = this.tracked.get(raw.pid);
-      const reusedPid =
-        previous !== undefined && raw.etime !== undefined && parseElapsedTime(raw.etime).elapsedSec + 2 < previous.elapsedSec;
-      if (reusedPid) {
-        this.cpuSamples.delete(raw.pid);
-        // A footprint read in this scan is the new process's own; an older one is not
-        if (this.lastMemoryReadAt !== now) this.footprints.delete(raw.pid);
-      }
-
-      const footprintBytes = this.footprints.get(raw.pid);
-      const memorySource: MemorySource = footprintBytes !== undefined ? 'footprint' : 'rss';
-      const memoryMb =
-        footprintBytes !== undefined
-          ? Number((footprintBytes / (1024 * 1024)).toFixed(1))
-          : typeof raw.rssKb === 'number'
-            ? Number((raw.rssKb / 1024).toFixed(1))
-            : Number((memory * 16).toFixed(1));
-      const existing = reusedPid ? undefined : previous;
-      // Measured activity: did the process use CPU time since the last scan? `ps %cpu` is a
-      // decaying average on macOS and the lifetime average on Linux, so it says little about now.
-      // It is the fallback only for the first scan and for a lister without CPU time.
-      const cpuTimeSec = raw.cpuTimeSec;
-      const usedCpuSinceLastScan =
-        cpuTimeSec !== undefined && existing?.cpuTimeSec !== undefined
-          ? cpuTimeSec - existing.cpuTimeSec > CPU_TIME_TICK_SEC
-          : undefined;
-      const hasCpuActivity = usedCpuSinceLastScan ?? cpu > 0;
-      // CPU time used over the last STALE_QUIET_SEC, as far as this monitor has seen it.
-      // Undefined when the CPU time is unknown or the process has not been watched that long:
-      // then there is no evidence of inactivity at all.
-      const usedInWindowSec = this.cpuUsedInWindow(raw.pid, cpuTimeSec, now);
-      const lastNewChildAt = this.trackChildren(raw.pid, descendantsOf.get(raw.pid) ?? [], now, reusedPid);
-      const startedProcessRecently =
-        lastNewChildAt !== undefined && now - lastNewChildAt < this.staleQuietSec * 1000;
-      const quietLongEnough =
-        usedInWindowSec !== undefined && usedInWindowSec < STALE_CPU_BUDGET_SEC && !startedProcessRecently;
-      const idleNote = `idle: no new process and ${formatCpu(usedInWindowSec ?? 0)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
-      const lastActiveAt = existing && !hasCpuActivity ? existing.lastActiveAt : now;
-
-      const silenceSec = Math.max(0, Math.floor((now - lastActiveAt) / 1000));
-      const { elapsedSec, formattedUptime } = raw.etime
-        ? parseElapsedTime(raw.etime)
-        : { elapsedSec: silenceSec, formattedUptime: `${silenceSec}s` };
-
-      const rawCwd = raw.cwd ?? cwdMap.get(raw.pid);
-      // Only the home directory and what is inside it: /Users/uj-backup is not ~-backup
-      const displayCwd = rawCwd
-        ? homeDir.length > 1 && (rawCwd === homeDir || rawCwd.startsWith(`${homeDir}/`))
-          ? `~${rawCwd.slice(homeDir.length)}`
-          : rawCwd
-        : undefined;
-
-      const isInWatchedRepo = isInsideRoot(rawCwd);
-      // A tool process started by an agent of the watched repo belongs to that session,
-      // wherever its own working directory is (many MCP servers run in "/" or their install dir).
-      const belongsToWatchedRepo = isInWatchedRepo || hasRepoAncestor(raw.pid);
-
-      const isOtherRepo =
-        typeof rawCwd === 'string' && rawCwd.length > 0 && !belongsToWatchedRepo;
-
-      const host = detectHost(raw);
-      const hostNote = host && host !== 'detached' ? `, attached to ${host}` : '';
-
-      const isStaleByAge = elapsedSec >= this.staleSessionSec;
-      // PPID 1 alone does not mean the parent is gone: on macOS launchd is the parent of every app
-      // started from the Dock or Finder, and makes each one the leader of its own process group.
-      // A process whose parent died keeps the group it was started in. Without a known group
-      // there is no evidence, so nothing is called orphaned.
-      const isOrphaned =
-        raw.ppid === 1 && raw.pgid !== undefined && raw.pgid !== raw.pid && category !== 'agent';
-      const rawCmdLower = (raw.cmd ?? '').toLowerCase();
-      const isDevServer =
-        rawCmdLower.includes('next dev') ||
-        rawCmdLower.includes('turbopack') ||
-        rawCmdLower.includes('vite') ||
-        rawCmdLower.includes('cli.js test-server');
-
-      // Check whether this process (or its parent wrapper) has a living parent agent
-      const grandparent = raw.ppid ? tree.parentOf(raw.ppid) : undefined;
-      const hasLiveParentChain = Boolean(
-        raw.ppid && tree.has(raw.ppid) && (!grandparent || grandparent === 1 || tree.has(grandparent)),
-      );
-
-      // An idle MCP server of an open editor or desktop app waits for its next tool call; it was
-      // called STALE after 10 idle minutes although the app was in use (20.11.2026). A terminal,
-      // tmux or SSH session says nothing about whether anyone still uses what runs in it.
-      const heldByRunningApp =
-        hasLiveParentChain && raw.ppid !== 1 && host !== undefined && !NON_APP_HOSTS.has(host);
-
-      // STALE and FROZEN describe what is observed. They are never presented as "safe to kill":
-      // age and silence alone have been wrong about sessions that were still in use.
-      let status: ProcessHealthStatus = hasCpuActivity ? 'ACTIVE' : 'IDLE';
-      // The default when no rule below says more: where the process works, never a claim that it
-      // is in the watched repository when it is not
-      let reason = isOtherRepo
-        ? `Session in ${displayCwd} (open for ${formattedUptime})${hostNote}`
-        : belongsToWatchedRepo
-          ? 'Active in current repository'
-          : `Running for ${formattedUptime}${hostNote}`;
-
-      if (!isOtherRepo && isDevServer) {
-        status = 'ACTIVE';
-        reason = `Running dev server in current repository (${formattedUptime})`;
-      } else if (isOtherRepo && isStaleByAge && quietLongEnough) {
-        // Age alone called sessions stale that were still in use at an open editor:
-        // a session in another repository is stale only when it is old AND has used no CPU time
-        // for a measured window.
-        status = 'STALE';
-        reason = `Session in ${displayCwd}, running for ${formattedUptime}, ${idleNote}${hostNote}`;
-      } else if (isOtherRepo && isStaleByAge) {
-        reason =
-          cpuTimeSec === undefined
-            ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; its CPU time cannot be read, so it is never called stale`
-            : usedInWindowSec === undefined
-              ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; watching for ${formatDuration(this.staleQuietSec)} whether it is still in use`
-              : startedProcessRecently
-                ? `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; in use: started a process ${formatDuration(Math.floor((now - lastNewChildAt!) / 1000))} ago`
-                : `Session in ${displayCwd}, running for ${formattedUptime}${hostNote}; in use: ${formatCpu(usedInWindowSec)} CPU time in the last ${formatDuration(this.staleQuietSec)}`;
-      } else if (
-        !belongsToWatchedRepo &&
-        !rawCwd &&
-        isStaleByAge &&
-        quietLongEnough &&
-        category === 'mcp' &&
-        !heldByRunningApp
-      ) {
-        // Detached MCP process without a repository cwd, older than staleSessionHours
-        status = 'STALE';
-        reason = `MCP process without a working directory, running for ${formattedUptime}, ${idleNote}${hostNote}`;
-      } else if (isOrphaned && !hasCpuActivity && elapsedSec >= this.mcpSilenceTimeoutSec) {
-        status = 'FROZEN';
-        reason = `Orphaned: its parent is gone (PPID 1), running for ${formattedUptime}`;
-      } else if (category === 'mcp' && !hasCpuActivity && hasLiveParentChain) {
-        // MCP child server whose parent is alive: 0% CPU is normal standby behavior
-        // while it waits for stdin tool requests, regardless of session age.
-        status = 'STANDBY';
-        reason = `Standby MCP child (PPID ${raw.ppid} alive, age ${formattedUptime}) — waiting for tool call`;
-      } else if (belongsToWatchedRepo && category === 'agent') {
-        // An agent session in the currently watched repository is NEVER marked stale or frozen
-        // just because the developer has been working in the repo for hours or is thinking.
-        status = hasCpuActivity ? 'ACTIVE' : 'IDLE';
-        reason = `Agent session in current repository (open for ${formattedUptime})`;
-      } else if (this.agentActive && silenceSec >= this.mcpSilenceTimeoutSec && !isDevServer) {
-        // Quiet is not frozen: a resting watch server, a browser or a session in another repo
-        // waiting for its user were all called FROZEN after 45 s. Only a process
-        // whose parent is gone (rule above) is called frozen.
-        reason = `Quiet: no CPU activity for ${silenceSec}s`;
-      } else if (category === 'mcp' && !hasCpuActivity) {
-        reason = 'Idle MCP process waiting for requests';
-      }
-      if (detectedBy === 'mcp-client') {
-        reason += ' · recognized as an agent by the MCP server it started';
-      }
-
-      // Pause holds the agents of this repository and what they started, nothing else:
-      // not a dev server from the user's terminal, not an editor, not another session, and never
-      // the agent that started strayps itself (holding it freezes whatever owns strayps's terminal
-      // or pipe and leaves no way to resume).
-      const agentPid = nearestAgent(raw.pid);
-      const pauseTarget =
-        belongsToWatchedRepo &&
-        !selfAncestors.has(raw.pid) &&
-        (category === 'agent' ||
-          (agentPid !== undefined &&
-            belongsToRepo(agentPid) &&
-            !selfAncestors.has(agentPid) &&
-            !hostOnTheWay(raw.pid, agentPid)));
-      // A held process uses no CPU by design: that is neither stale nor frozen
-      const paused = this.stillHeld(raw, listedAt, heldAfterList(raw.pid));
-      if (paused) {
-        if (status === 'FROZEN' || status === 'STALE') status = 'IDLE';
-        reason = 'Paused by strayps; resume continues it';
-      }
-
-      const monitored: MonitoredProcess = {
+    const { status, reason } = classifyStatus(
+      {
         pid: raw.pid,
         ppid: raw.ppid,
-        name: raw.name,
-        cmd: formatReadableCmd(raw.name, raw.cmd ?? raw.name),
-        cwd: displayCwd,
+        pgid: raw.pgid,
+        cmd: raw.cmd,
         category,
-        cpu,
-        memory,
-        memoryMb,
-        memorySource,
-        uptime: formattedUptime,
-        elapsedSec,
-        startedAt: listedAt - elapsedSec * 1000,
-        firstSeenAt: existing?.firstSeenAt ?? now,
-        lastActiveAt,
-        cpuTimeSec,
-        silenceSec,
-        status,
-        reason,
-        inWatchedRepo: belongsToWatchedRepo,
-        pauseTarget,
-        paused,
+        detectedBy,
+        cwd: rawCwd,
+        displayCwd,
+        belongsToWatchedRepo,
         host,
-        ...(category === 'agent' ? { detectedBy: detectedBy ?? 'name' } : {}),
-        agentPid,
-      };
+        hasLiveParentChain,
+        elapsedSec,
+        formattedUptime,
+        hasCpuActivity: activity.hasCpuActivity,
+        cpuTimeSec: activity.cpuTimeSec,
+        usedInWindowSec: activity.usedInWindowSec,
+        sinceNewChildMs: activity.lastNewChildAt === undefined ? undefined : now - activity.lastNewChildAt,
+        silenceSec,
+        paused,
+      },
+      {
+        staleSessionSec: this.staleSessionSec,
+        staleQuietSec: this.staleQuietSec,
+        mcpSilenceTimeoutSec: this.mcpSilenceTimeoutSec,
+        agentActive: this.agentActive,
+      },
+    );
 
-      this.tracked.set(raw.pid, monitored);
+    return {
+      pid: raw.pid,
+      ppid: raw.ppid,
+      name: raw.name,
+      cmd: formatReadableCmd(raw.name, raw.cmd ?? raw.name),
+      cwd: displayCwd,
+      category,
+      cpu: activity.cpu,
+      memory: activity.memory,
+      memoryMb: activity.memoryMb,
+      memorySource: activity.memorySource,
+      uptime: formattedUptime,
+      elapsedSec,
+      startedAt: listedAt - elapsedSec * 1000,
+      firstSeenAt: activity.existing?.firstSeenAt ?? now,
+      lastActiveAt: activity.lastActiveAt,
+      cpuTimeSec: activity.cpuTimeSec,
+      silenceSec,
+      status,
+      reason,
+      inWatchedRepo: belongsToWatchedRepo,
+      pauseTarget,
+      paused,
+      host,
+      ...(category === 'agent' ? { detectedBy: detectedBy ?? 'name' } : {}),
+      agentPid,
+    };
+  }
 
-      if ((status === 'FROZEN' || status === 'STALE') && !this.alertedPids.has(raw.pid)) {
-        this.alertedPids.add(raw.pid);
-        this.emit('process-frozen', monitored);
-      } else if (status !== 'FROZEN' && status !== 'STALE' && this.alertedPids.has(raw.pid)) {
-        this.alertedPids.delete(raw.pid);
-        this.emit('process-recovered', monitored);
-      }
+  /**
+   * What a listed process did since the last scan: memory, CPU time, new processes. The history
+   * per PID starts over when the system gave the PID to a new process.
+   */
+  private measure(raw: RawProcessInfo, now: number, descendants: number[]) {
+    const cpu = Number(raw.cpu ?? 0);
+    const memory = Number(raw.memory ?? 0);
+
+    // A PID the system handed to a new process since the last scan: the new one is younger than
+    // the old one was. Its history (first seen, CPU samples) must not carry over, or a confirmation
+    // given for the old process would match the new one.
+    const previous = this.tracked.get(raw.pid);
+    const reusedPid =
+      previous !== undefined && raw.etime !== undefined && parseElapsedTime(raw.etime).elapsedSec + 2 < previous.elapsedSec;
+    if (reusedPid) {
+      this.cpuSamples.delete(raw.pid);
+      // A footprint read in this scan is the new process's own; an older one is not
+      if (this.lastMemoryReadAt !== now) this.footprints.delete(raw.pid);
     }
 
+    const footprintBytes = this.footprints.get(raw.pid);
+    const memorySource: MemorySource = footprintBytes !== undefined ? 'footprint' : 'rss';
+    const memoryMb =
+      footprintBytes !== undefined
+        ? Number((footprintBytes / (1024 * 1024)).toFixed(1))
+        : typeof raw.rssKb === 'number'
+          ? Number((raw.rssKb / 1024).toFixed(1))
+          : Number((memory * 16).toFixed(1));
+    const existing = reusedPid ? undefined : previous;
+    // Measured activity: did the process use CPU time since the last scan? `ps %cpu` is a
+    // decaying average on macOS and the lifetime average on Linux, so it says little about now.
+    // It is the fallback only for the first scan and for a lister without CPU time.
+    const cpuTimeSec = raw.cpuTimeSec;
+    const usedCpuSinceLastScan =
+      cpuTimeSec !== undefined && existing?.cpuTimeSec !== undefined
+        ? cpuTimeSec - existing.cpuTimeSec > CPU_TIME_TICK_SEC
+        : undefined;
+    const hasCpuActivity = usedCpuSinceLastScan ?? cpu > 0;
+    // CPU time used over the last STALE_QUIET_SEC, as far as this monitor has seen it.
+    // Undefined when the CPU time is unknown or the process has not been watched that long:
+    // then there is no evidence of inactivity at all.
+    const usedInWindowSec = this.cpuUsedInWindow(raw.pid, cpuTimeSec, now);
+    const lastNewChildAt = this.trackChildren(raw.pid, descendants, now, reusedPid);
+    const lastActiveAt = existing && !hasCpuActivity ? existing.lastActiveAt : now;
+    const silenceSec = Math.max(0, Math.floor((now - lastActiveAt) / 1000));
+    return {
+      cpu,
+      memory,
+      memoryMb,
+      memorySource,
+      existing,
+      cpuTimeSec,
+      hasCpuActivity,
+      usedInWindowSec,
+      lastNewChildAt,
+      lastActiveAt,
+      silenceSec,
+    };
+  }
+
+  /** Tells the front ends when a process turns STALE or FROZEN, and when it no longer is. */
+  private reportStatusChange(monitored: MonitoredProcess): void {
+    const { pid, status } = monitored;
+    if ((status === 'FROZEN' || status === 'STALE') && !this.alertedPids.has(pid)) {
+      this.alertedPids.add(pid);
+      this.emit('process-frozen', monitored);
+    } else if (status !== 'FROZEN' && status !== 'STALE' && this.alertedPids.has(pid)) {
+      this.alertedPids.delete(pid);
+      this.emit('process-recovered', monitored);
+    }
+  }
+
+  /** Drops the history of what this scan no longer lists, and the holds of what is gone. */
+  private forgetWhatIsGone(seenPids: Set<number>, tree: ProcessTree, heldAfterList: (pid: number) => boolean): void {
     for (const pid of Array.from(this.tracked.keys())) {
       if (!seenPids.has(pid)) {
         this.tracked.delete(pid);
@@ -724,19 +708,27 @@ export class ProcessMonitor extends EventEmitter {
     for (const pid of Array.from(this.paused)) {
       if (!tree.has(pid) && !heldAfterList(pid)) this.forgetHold(pid);
     }
+  }
 
-    // What the agents of this repository run beyond the list: pause holds that too. Never strayps,
-    // its wrappers or what it runs: holding those would stop the brake itself.
-    this.pauseExtras = new Map();
-    for (const raw of rawList) {
+  /**
+   * What the agents of this repository run beyond the list: pause holds that too. Never strayps,
+   * its wrappers or what it runs: holding those would stop the brake itself.
+   */
+  private unlistedPauseTargets(
+    tree: ProcessTree,
+    selfAncestors: Set<number>,
+    listedAt: number,
+  ): Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }> {
+    const extras = new Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }>();
+    for (const raw of tree.raws) {
       if (this.tracked.has(raw.pid) || raw.pid === this.selfPid || selfAncestors.has(raw.pid)) continue;
       for (const cur of tree.ancestors(raw.pid)) {
         if (cur === this.selfPid) break;
         const ancestor = this.tracked.get(cur);
         if (ancestor?.category === 'agent') {
-          if (ancestor.pauseTarget && !hostOnTheWay(raw.pid, cur)) {
+          if (ancestor.pauseTarget && !hostOnTheWay(tree, raw.pid, cur)) {
             const elapsedSec = raw.etime !== undefined ? parseElapsedTime(raw.etime).elapsedSec : undefined;
-            this.pauseExtras.set(raw.pid, {
+            extras.set(raw.pid, {
               raw,
               elapsedSec,
               startedAt: elapsedSec === undefined ? undefined : listedAt - elapsedSec * 1000,
@@ -746,13 +738,7 @@ export class ProcessMonitor extends EventEmitter {
         }
       }
     }
-    // With the list it belongs to: set while a scan waits, it paired a new tree with the old list
-    this.lastScan = { at: listedAt, tree };
-    this.lastSelfAncestors = selfAncestors;
-
-    const processes = this.getProcesses();
-    this.emit('scan-complete', processes);
-    return processes;
+    return extras;
   }
 
   /**
@@ -1112,7 +1098,7 @@ export class ProcessMonitor extends EventEmitter {
     const categoryOf = (pid: number): ProcessCategory | undefined => {
       if (!categories.has(pid)) {
         const raw = tree.get(pid);
-        categories.set(pid, raw ? this.classifyProcess(raw)?.category : undefined);
+        categories.set(pid, raw ? recognizeProcess(raw, this.agentNames)?.category : undefined);
       }
       return categories.get(pid);
     };
@@ -1121,7 +1107,7 @@ export class ProcessMonitor extends EventEmitter {
     const clients = new Set<number>();
     for (const raw of below) {
       if (categoryOf(raw.pid) !== 'mcp') continue;
-      const client = this.findMcpClient(raw, tree, categoryOf);
+      const client = findMcpClient(raw, tree, categoryOf);
       if (client !== undefined) clients.add(client);
     }
     const isAgent = (raw: RawProcessInfo): boolean =>
@@ -1162,69 +1148,4 @@ export class ProcessMonitor extends EventEmitter {
     return resumed;
   }
 
-
-  private classifyProcess(
-    raw: RawProcessInfo,
-  ): { category: ProcessCategory; detectedBy?: AgentDetection } | null {
-    const haystack = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
-
-    if (IGNORED_SYSTEM_PATTERNS.some((pat) => haystack.includes(pat))) {
-      return null;
-    }
-
-    const detectedBy = this.agentByName(raw, haystack);
-    if (detectedBy) {
-      return { category: 'agent', detectedBy };
-    }
-
-    if (MCP_KEYWORDS.some((kw) => haystack.includes(kw))) {
-      return { category: 'mcp' };
-    }
-    // Everything else is listed only when an agent started it (the process tree, in performScan)
-    return null;
-  }
-
-  /** An agent recognized by its program name: a built-in name, or one from the `agents` setting. */
-  private agentByName(raw: RawProcessInfo, haystack: string): AgentDetection | null {
-    // Claude Code also runs as `node …/claude-code/cli.js` from npm or an editor extension
-    if (
-      haystack.includes('/claude-code/') ||
-      haystack.includes('anthropic.claude-code') ||
-      haystack.includes('/native-binary/claude')
-    ) {
-      return 'name';
-    }
-    const names = programNames(raw);
-    if (names.some((name) => BUILT_IN_AGENT_NAMES.includes(name))) return 'name';
-    if (names.some((name) => this.agentNames.has(name))) return 'setting';
-    return null;
-  }
-
-  /**
-   * The client that started an MCP server: its first ancestor that is not a launcher (shell, npm,
-   * npx, uvx, ...) and not another MCP process. Undefined when that ancestor is an editor, a
-   * desktop app or a terminal (never treated as an agent) or when the chain ends.
-   */
-  private findMcpClient(
-    server: RawProcessInfo,
-    tree: ProcessTree,
-    categoryOf: (pid: number) => ProcessCategory | undefined,
-  ): number | undefined {
-    for (const cur of tree.ancestors(server.pid)) {
-      const ancestor = tree.get(cur);
-      if (!ancestor) return undefined;
-      const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
-      // Editors, desktop apps and terminals are judged by their program file alone, never by a
-      // word in another process's path (~/WebstormProjects) (maintainer decision, 22.11.2026)
-      if (isAppOrTerminal(ancestor)) {
-        return undefined;
-      }
-      if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.toLowerCase().includes(pattern))) {
-        return undefined;
-      }
-      const launcher = programNames(ancestor).some((name) => LAUNCHER_NAMES.has(name));
-      if (!launcher && categoryOf(cur) !== 'mcp') return cur;
-    }
-    return undefined;
-  }
 }

@@ -2,8 +2,9 @@
 // decide what can be listed, paused and ended: see the skill process-classification before
 // changing one.
 
-import { baseName, INTERPRETER, interpreterScript } from './program-names.js';
-import type { RawProcessInfo } from './types.js';
+import { baseName, INTERPRETER, interpreterScript, programIdentity, programNames } from './program-names.js';
+import type { ProcessTree } from './tree.js';
+import type { AgentDetection, ProcessCategory, RawProcessInfo } from './types.js';
 
 /**
  * Agents recognized by the name of their program alone. Deliberately short, and it does not grow
@@ -141,3 +142,108 @@ export const HOST_PATTERNS: Array<[RegExp, string]> = [
 
 /** Hosts that keep a process running without saying anyone still uses it. */
 export const NON_APP_HOSTS = new Set(['detached', 'tmux', 'SSH session', 'terminal']);
+
+/**
+ * What a process is by its own command line: a coding agent (by a built-in name or a name from the
+ * `agents` setting) or an MCP server. Null for everything else: that is listed only when an agent
+ * started it, which the process tree decides.
+ */
+export function recognizeProcess(
+  raw: RawProcessInfo,
+  agentNames: ReadonlySet<string>,
+): { category: ProcessCategory; detectedBy?: AgentDetection } | null {
+  const haystack = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
+
+  if (IGNORED_SYSTEM_PATTERNS.some((pat) => haystack.includes(pat))) {
+    return null;
+  }
+
+  const detectedBy = agentByName(raw, haystack, agentNames);
+  if (detectedBy) {
+    return { category: 'agent', detectedBy };
+  }
+
+  if (MCP_KEYWORDS.some((kw) => haystack.includes(kw))) {
+    return { category: 'mcp' };
+  }
+  return null;
+}
+
+/** An agent recognized by its program name: a built-in name, or one from the `agents` setting. */
+function agentByName(raw: RawProcessInfo, haystack: string, agentNames: ReadonlySet<string>): AgentDetection | null {
+  // Claude Code also runs as `node …/claude-code/cli.js` from npm or an editor extension
+  if (
+    haystack.includes('/claude-code/') ||
+    haystack.includes('anthropic.claude-code') ||
+    haystack.includes('/native-binary/claude')
+  ) {
+    return 'name';
+  }
+  const names = programNames(raw);
+  if (names.some((name) => BUILT_IN_AGENT_NAMES.includes(name))) return 'name';
+  if (names.some((name) => agentNames.has(name))) return 'setting';
+  return null;
+}
+
+/**
+ * The client that started an MCP server: its first ancestor that is not a launcher (shell, npm,
+ * npx, uvx, ...) and not another MCP process. Undefined when that ancestor is an editor, a
+ * desktop app or a terminal (never treated as an agent) or when the chain ends.
+ */
+export function findMcpClient(
+  server: RawProcessInfo,
+  tree: ProcessTree,
+  categoryOf: (pid: number) => ProcessCategory | undefined,
+): number | undefined {
+  for (const cur of tree.ancestors(server.pid)) {
+    const ancestor = tree.get(cur);
+    if (!ancestor) return undefined;
+    const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
+    // Editors, desktop apps and terminals are judged by their program file alone, never by a
+    // word in another process's path (~/WebstormProjects) (maintainer decision, 22.11.2026)
+    if (isAppOrTerminal(ancestor)) {
+      return undefined;
+    }
+    if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.toLowerCase().includes(pattern))) {
+      return undefined;
+    }
+    const launcher = programNames(ancestor).some((name) => LAUNCHER_NAMES.has(name));
+    if (!launcher && categoryOf(cur) !== 'mcp') return cur;
+  }
+  return undefined;
+}
+
+/**
+ * The application a process tree hangs off (VS Code, Claude Desktop, a terminal, ...), from the
+ * nearest ancestor that is one; 'detached' for a process whose parent is PID 1.
+ */
+export function detectHost(raw: RawProcessInfo, tree: ProcessTree): string | undefined {
+  if (!raw.ppid) return undefined;
+  if (raw.ppid === 1) return 'detached';
+  for (const cur of tree.ancestors(raw.pid)) {
+    const ancestor = tree.get(cur);
+    if (!ancestor) return undefined;
+    // Only an actual editor, desktop app or terminal names a host: a script in ~/WebstormProjects
+    // must not make its MCP server look attached to JetBrains IDE.
+    if (isAppOrTerminal(ancestor)) {
+      const identity = programIdentity(ancestor);
+      for (const [pattern, label] of HOST_PATTERNS) {
+        if (pattern.test(identity)) return label;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * True when an editor, desktop app or terminal lies between `pid` (itself included) and `agent`:
+ * an editor an agent started is never held, nor what runs in it (safety review, 22.11.2026).
+ */
+export function hostOnTheWay(tree: ProcessTree, pid: number, agent: number | undefined): boolean {
+  for (const cur of tree.selfAndAncestors(pid)) {
+    if (cur === agent) return false;
+    const raw = tree.get(cur);
+    if (raw && isAppOrTerminal(raw)) return true;
+  }
+  return false;
+}
