@@ -200,6 +200,28 @@ describe('ProcessMonitor termination', () => {
     expect(monitor.getPausedPids()).toEqual([]);
   });
 
+  it('continues only the held process it ends, never what pause held below it', async () => {
+    // Continuing the held children would let work run again that the person had stopped, by a
+    // kill they confirmed for another process (maintainer decision, 22.11.2026). They stay held and
+    // listed until resume, or until they are ended themselves.
+    const { monitor, kills } = setup([
+      agent(100, REPO, { cpu: 1 }),
+      { pid: 102, ppid: 100, name: 'node', cmd: 'node node_modules/.bin/vite', cwd: REPO, etime: '02:00' },
+      { pid: 103, ppid: 102, name: 'node', cmd: 'node vite-worker.js', cwd: REPO, etime: '02:00' },
+      { pid: 104, ppid: 102, name: 'bash', cmd: 'bash -c esbuild', cwd: REPO, etime: '00:01' },
+    ]);
+    await monitor.scan(1_000);
+    expect(monitor.pauseTargets(monitor.getPauseTargets()).pids.sort()).toEqual([100, 102, 103, 104]);
+    kills.length = 0;
+
+    expect(monitor.killProcess(102)).toBe(true);
+    expect(kills.map((k) => `${k.pid}:${k.signal}`)).toEqual(['102:SIGTERM', '102:SIGCONT']);
+    expect(monitor.getPausedPids().sort()).toEqual([100, 103, 104]);
+    await monitor.scan(3_000);
+    expect(monitor.getProcesses().filter((p) => p.paused).map((p) => p.pid).sort()).toEqual([100, 103, 104]);
+    monitor.resumePaused();
+  });
+
   it('never leaves an agent held when strayps stops', async () => {
     const { monitor, kills } = setup([agent(100, REPO, { cpu: 1 })]);
     await monitor.scan(1_000);
