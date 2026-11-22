@@ -74,7 +74,22 @@ describe('process status rules', () => {
     expect(classifyStatus({ ...orphan, pgid: orphan.pid }, limits).status).not.toBe('FROZEN');
     expect(classifyStatus({ ...orphan, pgid: undefined }, limits).status).not.toBe('FROZEN');
     expect(classifyStatus({ ...orphan, category: 'agent' }, limits).status).not.toBe('FROZEN');
-    expect(classifyStatus({ ...orphan, elapsedSec: 44 }, limits).status).not.toBe('FROZEN');
+    expect(classifyStatus({ ...orphan, elapsedSec: limits.mcpSilenceTimeoutSec }, limits).status).toBe('FROZEN');
+    expect(classifyStatus({ ...orphan, elapsedSec: limits.mcpSilenceTimeoutSec - 1 }, limits).status).not.toBe('FROZEN');
+  });
+
+  it('calls a process quiet from the silence timeout on, and quiet is not frozen', () => {
+    const tool = facts({ category: 'child', cwd: '/work/repo', belongsToWatchedRepo: true, elapsedSec: 600 });
+    expect(classifyStatus({ ...tool, silenceSec: limits.mcpSilenceTimeoutSec }, limits)).toEqual({
+      status: 'IDLE',
+      reason: 'Quiet: no CPU activity for 45s',
+    });
+    expect(classifyStatus({ ...tool, silenceSec: limits.mcpSilenceTimeoutSec - 1 }, limits).reason).toBe(
+      'Active in current repository',
+    );
+    expect(classifyStatus({ ...tool, silenceSec: 600 }, { ...limits, agentActive: false }).reason).toBe(
+      'Active in current repository',
+    );
   });
 
   it('keeps an idle MCP server of an open editor out of STALE, but not one in a terminal', () => {

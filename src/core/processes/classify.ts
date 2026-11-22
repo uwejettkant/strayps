@@ -33,14 +33,20 @@ export interface ProcessFacts {
   cwd?: string;
   /** The same as shown: the home directory as ~. */
   displayCwd?: string;
-  /** It works inside the watched repository, or descends from a process that does. */
+  /** It works inside the watched repository, or descends from a listed process that does. */
   belongsToWatchedRepo: boolean;
   host?: string;
-  /** Its parent is listed, and so is the parent's parent unless that is PID 1 or unknown. */
+  /**
+   * Its parent is in the process table, and so is the parent's parent unless that is PID 1 or
+   * unknown (the table as `ps` read it, not only what strayps lists).
+   */
   hasLiveParentChain: boolean;
   elapsedSec: number;
   formattedUptime: string;
-  /** It used CPU time since the last scan (`ps %cpu` on the first scan). */
+  /**
+   * It used CPU time since the last scan. `ps %cpu` stands in where that cannot be compared: the
+   * first scan, a PID the system gave to a new process, a lister without CPU time.
+   */
   hasCpuActivity: boolean;
   /** CPU time used since it started; undefined when the lister cannot read it. */
   cpuTimeSec?: number;
