@@ -23,6 +23,7 @@ import {
   defaultProcessTree,
   parseElapsedTime,
 } from './processes/system.js';
+import { ProcessTree } from './processes/tree.js';
 import type {
   AgentDetection,
   MemorySource,
@@ -169,10 +170,11 @@ export class ProcessMonitor extends EventEmitter {
   private holdNumber: Map<number, number> = new Map();
   /** Unlisted processes the agents of this repository run, as of the last scan (see PauseTarget). */
   private pauseExtras: Map<number, { raw: RawProcessInfo; elapsedSec?: number; startedAt?: number }> = new Map();
-  /** Every process the last finished scan saw, and its monotonic time: what pause falls back to. */
-  private lastTree: { at: number; raws: RawProcessInfo[] } = { at: 0, raws: [] };
-  /** Parent of every process of the last scan, listed or not (shells and npx are not listed). */
-  private lastParentByPid: Map<number, number> = new Map();
+  /**
+   * Every process the last finished scan saw, listed or not (shells and npx are not listed), and
+   * its monotonic time: what pause falls back to, and where `parentOf` looks.
+   */
+  private lastScan: { at: number; tree: ProcessTree } = { at: 0, tree: new ProcessTree([]) };
   /** Ancestors of strayps (wrappers, shell, launching agent) as of the last scan; never held. */
   private lastSelfAncestors: Set<number> = new Set();
   private alertedPids: Set<number> = new Set();
@@ -319,26 +321,10 @@ export class ProcessMonitor extends EventEmitter {
     const listedAt = this.monotonicNow();
     const seenPids = new Set<number>();
 
-    // Map all live PIDs, parent-child links, and parent PIDs that have children
-    const allLivePids = new Set<number>();
-    const rawByPid = new Map<number, RawProcessInfo>();
-    const parentByPid = new Map<number, number>();
-    const parentPidsWithChildren = new Set<number>();
-    for (const r of rawList) {
-      allLivePids.add(r.pid);
-      rawByPid.set(r.pid, r);
-      if (r.ppid) {
-        parentByPid.set(r.pid, r.ppid);
-        parentPidsWithChildren.add(r.ppid);
-      }
-    }
+    const tree = new ProcessTree(rawList);
 
     // The chain of processes that launched strayps (npm, tsx, npx wrappers, the shell).
-    const selfAncestors = new Set<number>();
-    for (let cur = parentByPid.get(this.selfPid), depth = 0; cur && cur > 1 && depth < 32; depth++) {
-      selfAncestors.add(cur);
-      cur = parentByPid.get(cur);
-    }
+    const selfAncestors = new Set(tree.ancestors(this.selfPid));
 
     interface Candidate {
       raw: RawProcessInfo;
@@ -351,7 +337,7 @@ export class ProcessMonitor extends EventEmitter {
       if (this.terminating.has(raw.pid)) continue;
       const cmdLower = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
       // Skip `npm exec` wrapper parents when their actual node child process is running
-      if (cmdLower.includes('npm exec ') && parentPidsWithChildren.has(raw.pid)) {
+      if (cmdLower.includes('npm exec ') && tree.hasChildren(raw.pid)) {
         continue;
       }
       const classified = this.classifyProcess(raw);
@@ -365,11 +351,7 @@ export class ProcessMonitor extends EventEmitter {
     // terminal is a coding agent, whatever it is called, so no list of agent products is needed.
     const candidateByPid = new Map(candidates.map((c) => [c.raw.pid, c]));
     for (const server of candidates.filter((c) => c.category === 'mcp')) {
-      const clientPid = this.findMcpClient(
-        server.raw,
-        rawByPid,
-        (pid) => candidateByPid.get(pid)?.category,
-      );
+      const clientPid = this.findMcpClient(server.raw, tree, (pid) => candidateByPid.get(pid)?.category);
       if (clientPid === undefined || clientPid === this.selfPid || this.terminating.has(clientPid)) {
         continue;
       }
@@ -381,7 +363,7 @@ export class ProcessMonitor extends EventEmitter {
         }
         continue;
       }
-      const client: Candidate = { raw: rawByPid.get(clientPid)!, category: 'agent', detectedBy: 'mcp-client' };
+      const client: Candidate = { raw: tree.get(clientPid)!, category: 'agent', detectedBy: 'mcp-client' };
       candidates.push(client);
       candidateByPid.set(clientPid, client);
     }
@@ -390,12 +372,10 @@ export class ProcessMonitor extends EventEmitter {
     // server opened. Decided by the process tree alone: "node", "chromium" or "playwright" in a
     // command line listed the user's own servers and apps as well (cut on 20.11.2026).
     const agentAbove = (pid: number): boolean => {
-      let cur = parentByPid.get(pid);
-      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
+      for (const cur of tree.ancestors(pid)) {
         // its own subtree: what it runs is no work of the agent that started it
         if (cur === this.selfPid) return false;
         if (candidateByPid.get(cur)?.category === 'agent') return true;
-        cur = parentByPid.get(cur);
       }
       return false;
     };
@@ -418,7 +398,7 @@ export class ProcessMonitor extends EventEmitter {
       const text = `${raw.name} ${raw.cmd ?? ''}`.toLowerCase();
       if (IGNORED_SYSTEM_PATTERNS.some((pattern) => text.includes(pattern))) continue;
       // A shell or npm with a process under it only wraps that process
-      if (parentPidsWithChildren.has(raw.pid) && programNames(raw).some((name) => LAUNCHER_NAMES.has(name))) {
+      if (tree.hasChildren(raw.pid) && programNames(raw).some((name) => LAUNCHER_NAMES.has(name))) {
         continue;
       }
       const child: Candidate = { raw, category: 'child' };
@@ -431,17 +411,8 @@ export class ProcessMonitor extends EventEmitter {
     const descendantsOf = new Map<number, number[]>();
     for (const r of rawList) {
       if (r.pid === this.selfPid) continue;
-      const chain: number[] = [];
-      let underSelf = false;
-      for (let cur = r.ppid, depth = 0; cur && cur > 1 && depth < 32; depth++) {
-        if (cur === this.selfPid) {
-          underSelf = true;
-          break;
-        }
-        chain.push(cur);
-        cur = parentByPid.get(cur);
-      }
-      if (underSelf) continue;
+      const chain = tree.ancestors(r.pid);
+      if (chain.includes(this.selfPid)) continue;
       for (const ancestor of chain) {
         if (!candidateByPid.has(ancestor)) continue;
         const list = descendantsOf.get(ancestor);
@@ -453,22 +424,16 @@ export class ProcessMonitor extends EventEmitter {
     // An editor, desktop app or terminal an agent started is never held, nor what runs in it
     // (safety review, 22.11.2026)
     const hostOnTheWay = (pid: number, agent: number | undefined): boolean => {
-      for (let cur: number | undefined = pid, depth = 0; cur && cur > 1 && cur !== agent && depth < 32; depth++) {
-        const raw = rawByPid.get(cur);
+      for (const cur of tree.selfAndAncestors(pid)) {
+        if (cur === agent) return false;
+        const raw = tree.get(cur);
         if (raw && isAppOrTerminal(raw)) return true;
-        cur = parentByPid.get(cur);
       }
       return false;
     };
 
-    const nearestAgent = (pid: number): number | undefined => {
-      let cur = parentByPid.get(pid);
-      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
-        if (candidateByPid.get(cur)?.category === 'agent') return cur;
-        cur = parentByPid.get(cur);
-      }
-      return undefined;
-    };
+    const nearestAgent = (pid: number): number | undefined =>
+      tree.ancestors(pid).find((cur) => candidateByPid.get(cur)?.category === 'agent');
 
     const cwdMap = await this.cwdResolver(candidates.map((c) => c.raw.pid));
 
@@ -500,22 +465,14 @@ export class ProcessMonitor extends EventEmitter {
       if (isInsideRoot(raw.cwd ?? cwdMap.get(raw.pid))) repoPids.add(raw.pid);
     }
 
-    const hasRepoAncestor = (pid: number): boolean => {
-      let cur = parentByPid.get(pid);
-      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
-        if (repoPids.has(cur)) return true;
-        cur = parentByPid.get(cur);
-      }
-      return false;
-    };
+    const hasRepoAncestor = (pid: number): boolean => tree.ancestors(pid).some((cur) => repoPids.has(cur));
     const belongsToRepo = (pid: number): boolean => repoPids.has(pid) || hasRepoAncestor(pid);
 
     const detectHost = (raw: RawProcessInfo): string | undefined => {
       if (!raw.ppid) return undefined;
       if (raw.ppid === 1) return 'detached';
-      let cur: number | undefined = raw.ppid;
-      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
-        const ancestor = rawByPid.get(cur);
+      for (const cur of tree.ancestors(raw.pid)) {
+        const ancestor = tree.get(cur);
         if (!ancestor) return undefined;
         // Only an actual editor, desktop app or terminal names a host: a script in ~/WebstormProjects
         // must not make its MCP server look attached to JetBrains IDE.
@@ -525,7 +482,6 @@ export class ProcessMonitor extends EventEmitter {
             if (pattern.test(identity)) return label;
           }
         }
-        cur = ancestor.ppid;
       }
       return undefined;
     };
@@ -619,12 +575,9 @@ export class ProcessMonitor extends EventEmitter {
         rawCmdLower.includes('cli.js test-server');
 
       // Check whether this process (or its parent wrapper) has a living parent agent
+      const grandparent = raw.ppid ? tree.parentOf(raw.ppid) : undefined;
       const hasLiveParentChain = Boolean(
-        raw.ppid &&
-          allLivePids.has(raw.ppid) &&
-          (!parentByPid.get(raw.ppid) ||
-            parentByPid.get(raw.ppid) === 1 ||
-            allLivePids.has(parentByPid.get(raw.ppid)!)),
+        raw.ppid && tree.has(raw.ppid) && (!grandparent || grandparent === 1 || tree.has(grandparent)),
       );
 
       // An idle MCP server of an open editor or desktop app waits for its next tool call; it was
@@ -769,7 +722,7 @@ export class ProcessMonitor extends EventEmitter {
 
     // Held PIDs that never made it into the list and are gone now
     for (const pid of Array.from(this.paused)) {
-      if (!allLivePids.has(pid) && !heldAfterList(pid)) this.forgetHold(pid);
+      if (!tree.has(pid) && !heldAfterList(pid)) this.forgetHold(pid);
     }
 
     // What the agents of this repository run beyond the list: pause holds that too. Never strayps,
@@ -777,8 +730,7 @@ export class ProcessMonitor extends EventEmitter {
     this.pauseExtras = new Map();
     for (const raw of rawList) {
       if (this.tracked.has(raw.pid) || raw.pid === this.selfPid || selfAncestors.has(raw.pid)) continue;
-      let cur = parentByPid.get(raw.pid);
-      for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
+      for (const cur of tree.ancestors(raw.pid)) {
         if (cur === this.selfPid) break;
         const ancestor = this.tracked.get(cur);
         if (ancestor?.category === 'agent') {
@@ -792,13 +744,11 @@ export class ProcessMonitor extends EventEmitter {
           }
           break;
         }
-        cur = parentByPid.get(cur);
       }
     }
     // With the list it belongs to: set while a scan waits, it paired a new tree with the old list
-    this.lastParentByPid = parentByPid;
+    this.lastScan = { at: listedAt, tree };
     this.lastSelfAncestors = selfAncestors;
-    this.lastTree = { at: listedAt, raws: rawList };
 
     const processes = this.getProcesses();
     this.emit('scan-complete', processes);
@@ -877,7 +827,7 @@ export class ProcessMonitor extends EventEmitter {
    * list alone stops at the first shell or npx in between.
    */
   public parentOf(pid: number): number | undefined {
-    return this.lastParentByPid.get(pid);
+    return this.lastScan.tree.parentOf(pid);
   }
 
   /**
@@ -1037,7 +987,7 @@ export class ProcessMonitor extends EventEmitter {
       const at =
         target.startedAt !== undefined && target.elapsedSec !== undefined
           ? target.startedAt + target.elapsedSec * 1000
-          : this.lastTree.at;
+          : this.lastScan.at;
       if (this.youngerThanExpected(ages.get(target.pid), target.elapsedSec, at)) {
         gone.push(target.pid);
         continue;
@@ -1119,9 +1069,9 @@ export class ProcessMonitor extends EventEmitter {
       } catch {
         fresh = undefined;
       }
-      const tree = fresh ?? this.lastTree.raws;
+      const tree = fresh ? new ProcessTree(fresh) : this.lastScan.tree;
       // the ages in `tree` are those of this moment, or of the last scan (monotonic clock)
-      const at = fresh ? this.monotonicNow() : this.lastTree.at;
+      const at = fresh ? this.monotonicNow() : this.lastScan.at;
       if (fresh) alive = new Set(fresh.map((raw) => raw.pid));
       const { found, asked } = this.startedBy(agents, tree);
       for (const raw of asked) missed.add(raw.pid);
@@ -1152,43 +1102,16 @@ export class ProcessMonitor extends EventEmitter {
    * started), which is named in `asked`; an editor, desktop app or terminal; strayps itself and the
    * wrappers that started it.
    */
-  private startedBy(agents: Set<number>, tree: RawProcessInfo[]): { found: RawProcessInfo[]; asked: RawProcessInfo[] } {
-    const byPid = new Map(tree.map((raw) => [raw.pid, raw]));
-    const childrenOf = new Map<number, RawProcessInfo[]>();
-    for (const raw of tree) {
-      if (!raw.ppid || raw.ppid === raw.pid) continue;
-      const list = childrenOf.get(raw.ppid);
-      if (list) list.push(raw);
-      else childrenOf.set(raw.ppid, [raw]);
-    }
-    const parentOf = (pid: number): number | undefined => byPid.get(pid)?.ppid ?? this.lastParentByPid.get(pid);
-    const selfChain = new Set<number>([this.selfPid]);
-    for (let cur = parentOf(this.selfPid), depth = 0; cur && cur > 1 && depth < 32; depth++) {
-      selfChain.add(cur);
-      cur = parentOf(cur);
-    }
+  private startedBy(agents: Set<number>, tree: ProcessTree): { found: RawProcessInfo[]; asked: RawProcessInfo[] } {
+    const selfChain = new Set<number>([this.selfPid, ...tree.ancestors(this.selfPid, this.lastScan.tree)]);
 
     // Everything below the agents, breadth first: parents before what they run
-    const below: RawProcessInfo[] = [];
-    const visited = new Set<number>(agents);
-    let level = Array.from(agents);
-    for (let depth = 0; level.length > 0 && depth < 32; depth++) {
-      const next: number[] = [];
-      for (const pid of level) {
-        for (const child of childrenOf.get(pid) ?? []) {
-          if (visited.has(child.pid)) continue;
-          visited.add(child.pid);
-          below.push(child);
-          next.push(child.pid);
-        }
-      }
-      level = next;
-    }
+    const below = tree.below(agents);
 
     const categories = new Map<number, ProcessCategory | undefined>();
     const categoryOf = (pid: number): ProcessCategory | undefined => {
       if (!categories.has(pid)) {
-        const raw = byPid.get(pid);
+        const raw = tree.get(pid);
         categories.set(pid, raw ? this.classifyProcess(raw)?.category : undefined);
       }
       return categories.get(pid);
@@ -1198,7 +1121,7 @@ export class ProcessMonitor extends EventEmitter {
     const clients = new Set<number>();
     for (const raw of below) {
       if (categoryOf(raw.pid) !== 'mcp') continue;
-      const client = this.findMcpClient(raw, byPid, categoryOf);
+      const client = this.findMcpClient(raw, tree, categoryOf);
       if (client !== undefined) clients.add(client);
     }
     const isAgent = (raw: RawProcessInfo): boolean =>
@@ -1284,12 +1207,11 @@ export class ProcessMonitor extends EventEmitter {
    */
   private findMcpClient(
     server: RawProcessInfo,
-    rawByPid: Map<number, RawProcessInfo>,
+    tree: ProcessTree,
     categoryOf: (pid: number) => ProcessCategory | undefined,
   ): number | undefined {
-    let cur = server.ppid;
-    for (let depth = 0; cur && cur > 1 && depth < 32; depth++) {
-      const ancestor = rawByPid.get(cur);
+    for (const cur of tree.ancestors(server.pid)) {
+      const ancestor = tree.get(cur);
       if (!ancestor) return undefined;
       const text = `${ancestor.name} ${ancestor.cmd ?? ''}`;
       // Editors, desktop apps and terminals are judged by their program file alone, never by a
@@ -1302,7 +1224,6 @@ export class ProcessMonitor extends EventEmitter {
       }
       const launcher = programNames(ancestor).some((name) => LAUNCHER_NAMES.has(name));
       if (!launcher && categoryOf(cur) !== 'mcp') return cur;
-      cur = ancestor.ppid;
     }
     return undefined;
   }
