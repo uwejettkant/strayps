@@ -23,26 +23,27 @@ export {
   writeConfigValue,
 } from './core/config.js';
 export type { ActivityEvent, ActivityEventType } from './core/events.js';
+export { ProcessMonitor, type ProcessMonitorOptions } from './core/process-monitor.js';
+export { redactSecrets } from './core/processes/command-line.js';
+export { programNames } from './core/processes/program-names.js';
+export { BUILT_IN_AGENT_NAMES } from './core/processes/recognition.js';
 export {
-  type AgentDetection,
-  BUILT_IN_AGENT_NAMES,
   defaultProcessKiller,
   defaultProcessLister,
-  type MonitoredProcess,
-  type PauseOutcome,
-  type PauseTarget,
   parseCpuTime,
-  parsePsOutput,
-  redactSecrets,
   parseElapsedTime,
-  type ProcessCategory,
-  type ProcessHealthStatus,
-  type ProcessKilledEvent,
-  ProcessMonitor,
-  type ProcessMonitorOptions,
-  programNames,
-  type RawProcessInfo,
-} from './core/process-monitor.js';
+  parsePsOutput,
+} from './core/processes/system.js';
+export type {
+  AgentDetection,
+  MonitoredProcess,
+  PauseOutcome,
+  PauseTarget,
+  ProcessCategory,
+  ProcessHealthStatus,
+  ProcessKilledEvent,
+  RawProcessInfo,
+} from './core/processes/types.js';
 export {
   type KillConfirmation,
   type KillOptions,

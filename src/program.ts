@@ -16,7 +16,9 @@ import {
   writeConfigValue,
 } from './core/config.js';
 import type { ActivityEventType } from './core/events.js';
-import { ProcessMonitor, PS_BIN, type RawProcessInfo } from './core/process-monitor.js';
+import { ProcessMonitor } from './core/process-monitor.js';
+import { PS_BIN } from './core/processes/system.js';
+import type { RawProcessInfo } from './core/processes/types.js';
 import { MonitorSession } from './core/session.js';
 import { DEFAULT_PORT, listenDashboardServer, type RunningDashboardServer } from './server.js';
 import {

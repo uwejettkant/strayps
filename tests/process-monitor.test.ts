@@ -1,11 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import {
-  parseElapsedTime,
-  ProcessMonitor,
-  type RawProcessInfo,
-} from '../src/core/process-monitor.js';
+import { ProcessMonitor } from '../src/core/process-monitor.js';
+import { parseElapsedTime } from '../src/core/processes/system.js';
+import type { RawProcessInfo } from '../src/core/processes/types.js';
 
 describe('ProcessMonitor', () => {
   it('lists MCP servers and tracks their CPU activity, but no browser or app that no agent started', async () => {

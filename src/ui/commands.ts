@@ -1,4 +1,5 @@
-import { formatMemory, type MonitoredProcess, type PauseTarget, sumMemory } from '../core/process-monitor.js';
+import { formatMemory, sumMemory } from '../core/processes/memory.js';
+import type { MonitoredProcess, PauseTarget } from '../core/processes/types.js';
 import type { MonitorSession } from '../core/session.js';
 import { sanitize } from './format.js';
 

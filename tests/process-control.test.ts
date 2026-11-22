@@ -1,18 +1,11 @@
 import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  defaultProcessAges,
-  MEMORY_READ_INTERVAL_MS,
-  parseCpuTime,
-  parseFootprintJson,
-  parsePsOutput,
-  redactSecrets,
-  parseLsofCwdOutput,
-  ProcessMonitor,
-  STALE_QUIET_SEC,
-  type RawProcessInfo,
-  resolveProcessCwds,
-} from '../src/core/process-monitor.js';
+import { ProcessMonitor, STALE_QUIET_SEC } from '../src/core/process-monitor.js';
+import { redactSecrets } from '../src/core/processes/command-line.js';
+import { parseLsofCwdOutput, resolveProcessCwds } from '../src/core/processes/cwd.js';
+import { MEMORY_READ_INTERVAL_MS, parseFootprintJson } from '../src/core/processes/memory.js';
+import { defaultProcessAges, parseCpuTime, parsePsOutput } from '../src/core/processes/system.js';
+import type { RawProcessInfo } from '../src/core/processes/types.js';
 import { cleanupTmpDirs, createHarness } from './helpers/harness.js';
 import { takeBlockedKills } from './helpers/kill-guard.js';
 

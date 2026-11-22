@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ConfigManager, type ConfigOverrides } from '../../src/core/config.js';
-import { ProcessMonitor, type RawProcessInfo } from '../../src/core/process-monitor.js';
+import { ProcessMonitor } from '../../src/core/process-monitor.js';
+import type { RawProcessInfo } from '../../src/core/processes/types.js';
 import { MonitorSession } from '../../src/core/session.js';
 
 const created: string[] = [];

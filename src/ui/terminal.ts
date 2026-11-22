@@ -1,4 +1,4 @@
-import { formatMemory, sumMemory } from '../core/process-monitor.js';
+import { formatMemory, sumMemory } from '../core/processes/memory.js';
 import type { StatusSnapshot, MonitorSession } from '../core/session.js';
 import { type CommandResult, completeInput, HELP_LINES, parseCommand, runCommand } from './commands.js';
 import {

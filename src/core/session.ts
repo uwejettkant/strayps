@@ -7,14 +7,10 @@ import {
   ConfigManager,
 } from './config.js';
 import type { ActivityEvent, ActivityEventType } from './events.js';
-import {
-  formatMemory,
-  homeDirectory,
-  type MonitoredProcess,
-  type PauseTarget,
-  type ProcessKilledEvent,
-  ProcessMonitor,
-} from './process-monitor.js';
+import { ProcessMonitor } from './process-monitor.js';
+import { homeDirectory } from './processes/cwd.js';
+import { formatMemory } from './processes/memory.js';
+import type { MonitoredProcess, PauseTarget, ProcessKilledEvent } from './processes/types.js';
 
 export interface MonitorSessionDeps {
   /** The current repository: its agents are the ones `pause` holds and the list marks as "this repo". */

@@ -1,5 +1,6 @@
 import os from 'node:os';
-import { formatMemory, type MonitoredProcess, sumMemory } from '../core/process-monitor.js';
+import { formatMemory, sumMemory } from '../core/processes/memory.js';
+import type { MonitoredProcess } from '../core/processes/types.js';
 import type { StatusSnapshot } from '../core/session.js';
 import type { ActivityEvent } from '../core/events.js';
 
