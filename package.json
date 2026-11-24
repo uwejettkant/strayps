@@ -58,7 +58,7 @@
     "@hono/node-server": "^2.1.11",
     "commander": "^12.1.0",
     "hono": "^4.13.19",
-    "ps-list": "^8.1.1"
+    "ps-list": "^9.0.0"
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.3.5",
