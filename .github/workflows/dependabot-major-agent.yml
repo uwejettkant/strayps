@@ -96,6 +96,8 @@ jobs:
       - name: Run Gemini CLI to inspect and fix breaking changes
         if: steps.pr.outputs.should_run == 'true' && steps.key.outputs.available == 'true'
         uses: google-github-actions/run-gemini-cli@v0.1.22
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           prompt: |
