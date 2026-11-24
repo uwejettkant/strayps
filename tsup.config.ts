@@ -5,8 +5,8 @@ export default defineConfig({
   entry: ['src/index.ts', 'src/cli.ts'],
   format: ['cjs'],
   target: 'node20',
-  dts: { entry: 'src/index.ts' },
   clean: true,
+  onSuccess: 'tsc --emitDeclarationOnly',
   esbuildPlugins: [
     {
       // dist/cli.js loads dist/index.js at runtime instead of carrying a second copy of the library
