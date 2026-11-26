@@ -1,147 +1,282 @@
 name: Dependabot Major-Update Agent
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Dependabot PR number to inspect and fix"
+        description: "Dependabot Pull Request number to inspect and fix"
         required: true
         type: string
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: read
+  contents: read
 
 jobs:
-  fix-dependabot-pr:
+  generate-patch:
+    name: Generate & Verify Fix (Read-Only)
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'workflow_dispatch') ||
-      (github.event.workflow_run.conclusion == 'failure' &&
-       github.event.workflow_run.event == 'pull_request' &&
-       github.event.workflow_run.pull_requests[0].number != null)
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      valid: ${{ steps.pr.outputs.valid }}
+      number: ${{ steps.pr.outputs.number }}
+      head_ref: ${{ steps.pr.outputs.head_ref }}
+      head_oid: ${{ steps.pr.outputs.head_oid }}
+      outcome: ${{ steps.diff.outputs.outcome }}
+
     steps:
-      - name: Verify PR is a same-repo Dependabot PR
+      - name: Check GEMINI_API_KEY secret
+        id: check_secret
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GEMINI_API_KEY secret is not configured. Skipping Gemini Major-Update Agent."
+          else
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve and strictly validate Dependabot PR
         id: pr
+        if: steps.check_secret.outputs.has_key == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           INPUT_PR: ${{ inputs.pr_number }}
-          WORKFLOW_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
         run: |
-          PR_NUM="${INPUT_PR:-$WORKFLOW_PR}"
-          if [ -z "$PR_NUM" ]; then
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          set -euo pipefail
+
+          if [[ ! "$INPUT_PR" =~ ^[1-9][0-9]*$ ]]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Invalid pr_number input. Expected positive integer."
+            exit 1
           fi
 
-          PR_JSON=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json author,headRefName,isCrossRepository,title,state)
-          AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
+          PR_JSON=$(gh pr view "$INPUT_PR" --repo "$GH_REPO" --json number,headRefName,baseRefName,headRefOid,isCrossRepository,author,state)
           IS_CROSS=$(echo "$PR_JSON" | jq -r '.isCrossRepository')
-          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
-          TITLE=$(echo "$PR_JSON" | jq -r '.title')
+          AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
           STATE=$(echo "$PR_JSON" | jq -r '.state')
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
+          BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')
+          HEAD_OID=$(echo "$PR_JSON" | jq -r '.headRefOid')
 
-          if [ "$STATE" != "OPEN" ] || [ "$IS_CROSS" != "false" ]; then
-            echo "Skipping: PR #$PR_NUM is not an open same-repo PR."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          if [ "$IS_CROSS" != "false" ] || [ "$STATE" != "OPEN" ] || [ "$BASE_REF" != "main" ]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "Ignoring PR #$INPUT_PR (isCrossRepository=$IS_CROSS, state=$STATE, baseRefName=$BASE_REF)."
             exit 0
           fi
 
-          if [ "$AUTHOR" != "app/dependabot" ] && [ "$AUTHOR" != "dependabot[bot]" ]; then
-            echo "Skipping: PR #$PR_NUM author is '$AUTHOR', not Dependabot."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          if [ "$AUTHOR" != "dependabot[bot]" ] && [ "$AUTHOR" != "app/dependabot" ]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "Ignoring PR #$INPUT_PR (author=$AUTHOR is not dependabot)."
             exit 0
           fi
 
-          echo "should_run=true" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          if [[ ! "$HEAD_REF" =~ ^dependabot/npm_and_yarn/[A-Za-z0-9._/-]+$ ]] || [[ ! "$HEAD_OID" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "Ignoring PR #$INPUT_PR due to unexpected headRefName or headRefOid."
+            exit 0
+          fi
+
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+          echo "number=$INPUT_PR" >> "$GITHUB_OUTPUT"
           echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
-          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "head_oid=$HEAD_OID" >> "$GITHUB_OUTPUT"
 
-      - name: Check GEMINI_API_KEY secret
-        id: key
-        if: steps.pr.outputs.should_run == 'true'
-        env:
-          HAS_KEY: ${{ secrets.GEMINI_API_KEY != '' }}
-        run: |
-          if [ "$HAS_KEY" != "true" ]; then
-            echo "GEMINI_API_KEY secret is not configured; skipping."
-            echo "available=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout PR branch
-        if: steps.pr.outputs.should_run == 'true' && steps.key.outputs.available == 'true'
-        uses: actions/checkout@v4
+      - name: Checkout exact PR commit
+        if: steps.pr.outputs.valid == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.pr.outputs.head_ref }}
+          ref: ${{ steps.pr.outputs.head_oid }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
-        if: steps.pr.outputs.should_run == 'true' && steps.key.outputs.available == 'true'
-        uses: actions/setup-node@v4
+        if: steps.pr.outputs.valid == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22'
+          node-version: "24"
           cache: npm
 
       - name: Install dependencies
-        if: steps.pr.outputs.should_run == 'true' && steps.key.outputs.available == 'true'
+        if: steps.pr.outputs.valid == 'true'
         run: npm ci
 
-      - name: Run Gemini CLI to inspect and fix breaking changes
-        if: steps.pr.outputs.should_run == 'true' && steps.key.outputs.available == 'true'
-        uses: google-github-actions/run-gemini-cli@v0.1.22
+      - name: Resolve Gemini CLI version (>= 7-day release cooldown)
+        id: cli_version
+        if: steps.pr.outputs.valid == 'true'
+        run: |
+          set -euo pipefail
+          VERSION=$(node -e '
+            const { execFileSync } = require("node:child_process");
+            const raw = execFileSync("npm", ["view", "@google/gemini-cli", "time", "--json"], { encoding: "utf8" });
+            const times = JSON.parse(raw);
+            const cutoff = Date.now() - 7 * 86_400_000;
+            const stable = Object.entries(times)
+              .filter(([v, t]) => /^\d+\.\d+\.\d+$/.test(v) && Date.parse(t) <= cutoff)
+              .sort((a, b) => Date.parse(b[1]) - Date.parse(a[1]));
+            if (!stable.length) process.exit(1);
+            process.stdout.write(stable[0][0]);
+          ')
+          echo "Resolved @google/gemini-cli version (>=7d old): $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Run Gemini CLI to fix breaking changes
+        if: steps.pr.outputs.valid == 'true'
+        uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
         env:
-          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+          GEMINI_CLI_TRUST_WORKSPACE: "true"
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_cli_version: ${{ steps.cli_version.outputs.version }}
+          github_pr_number: ${{ steps.pr.outputs.number }}
+          settings: |
+            {
+              "tools": {
+                "core": [
+                  "read_file",
+                  "write_file",
+                  "replace",
+                  "glob",
+                  "grep_search",
+                  "list_directory",
+                  "run_shell_command(npm run check)",
+                  "run_shell_command(npm run typecheck)",
+                  "run_shell_command(npm test)",
+                  "run_shell_command(npm run build)",
+                  "run_shell_command(git diff)"
+                ]
+              }
+            }
           prompt: |
-            You are helping maintain the `strayps` repository on Dependabot PR #${{ steps.pr.outputs.pr_number }}: "${{ steps.pr.outputs.title }}".
+            This Dependabot Pull Request updates npm dependencies relative to origin/main and failed CI (`npm run check`).
+            1. Read `AGENTS.md` and `package.json` (note `engines.node` is `>=20.0.0`).
+            2. Inspect the dependency diff (`git diff origin/main...HEAD -- package.json package-lock.json`).
+            3. If a runtime dependency (`dependencies`, not `devDependencies`) now requires Node > 20 in its `engines.node`, do NOT edit any files.
+            4. Otherwise, run `npm run check` and make minimal, clean fixes in `src/` or `tests/` while strictly respecting all safety invariants in `AGENTS.md`.
+            5. Do NOT modify `.github/`, `.claude/`, `.agents/`, `.npmrc`, `AGENTS.md`, `SECURITY.md`, `LICENSE`, `package.json`, or `package-lock.json`.
+            6. Do NOT run `git commit` or `git push`.
 
-            1. Read `AGENTS.md` and `package.json` (note that `engines.node` is `>=20.0.0`).
-            2. Inspect what changed in `package.json` / `package-lock.json` (`git diff origin/main...HEAD -- package.json`).
-            3. If a runtime dependency (`dependencies`, not `devDependencies`) now requires Node > 20 in its `engines.node`, do NOT edit any files — instead write a short explanation into `/tmp/agent-note.txt` explaining why this PR breaks Node 20 compatibility.
-            4. Otherwise, run `npm run check` to see the exact typecheck, test, or build failures.
-            5. Make minimal, clean fixes to the codebase/tests/config to resolve the breaking changes while strictly respecting all safety invariants in `AGENTS.md`, and re-run `npm run check` until it passes.
-            6. Do NOT run `git commit` or `git push`. Leave your verified edits in the working tree and write a concise 2-4 line summary of what you found/changed into `/tmp/agent-note.txt`.
+      - name: Validate modified paths and run deterministic checks
+        id: verify
+        if: steps.pr.outputs.valid == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rm -rf .gemini gemini-artifacts
 
-      - name: Verify check gate, push fix if green, and comment on PR
-        if: steps.pr.outputs.should_run == 'true' && steps.key.outputs.available == 'true'
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [[ "$file" =~ ^(\.github/|\.claude/|\.agents/|\.husky/|\.git/) ]] || [[ "$file" =~ ^(\.npmrc|\.nvmrc|AGENTS\.md|CLAUDE\.md|SECURITY\.md|LICENSE|package\.json|package-lock\.json)$ ]]; then
+              echo "::error::Disallowed file modification by agent: $file"
+              exit 1
+            fi
+          done < <(git status --porcelain -uall | cut -c4-)
+
+          npm audit --omit=dev
+          npm run check
+
+      - name: Export verified patch
+        id: diff
+        if: steps.pr.outputs.valid == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf .gemini gemini-artifacts
+
+          if [ "${{ steps.verify.outcome }}" != "success" ]; then
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$(git status --porcelain -uall)" ]; then
+            echo "outcome=no_changes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add -A -- ':!.gemini' ':!gemini-artifacts'
+          git diff --cached --binary > "${RUNNER_TEMP}/gemini-fix.patch"
+          echo "outcome=patched" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified patch artifact
+        if: steps.pr.outputs.valid == 'true' && steps.diff.outputs.outcome == 'patched'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gemini-fix-patch
+          path: ${{ runner.temp }}/gemini-fix.patch
+          if-no-files-found: error
+          retention-days: 1
+
+  apply-patch:
+    name: Push Verified Fix & Comment
+    needs: generate-patch
+    if: always() && needs.generate-patch.outputs.valid == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Comment when checks already pass without changes
+        if: needs.generate-patch.outputs.outcome == 'no_changes'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUM: ${{ steps.pr.outputs.pr_number }}
-          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.generate-patch.outputs.number }}
         run: |
-          NOTE=""
-          if [ -f /tmp/agent-note.txt ]; then
-            NOTE=$(cat /tmp/agent-note.txt)
-          fi
+          gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body "Gemini Major-Update Agent: \`npm run check\` and runtime \`npm audit\` already pass without code changes."
 
-          if [ -n "$(git status --porcelain)" ]; then
-            if npm run check; then
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git add -A
-              git commit -m "fix: adapt codebase for Dependabot PR #$PR_NUM"
-              git push origin "HEAD:$HEAD_REF"
-              gh pr comment "$PR_NUM" --repo "${{ github.repository }}" --body "🤖 **Gemini Agent:** Applied fixes and verified \`npm run check\` passes.
+      - name: Comment when checks still fail
+        if: needs.generate-patch.outputs.outcome != 'no_changes' && needs.generate-patch.outputs.outcome != 'patched'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.generate-patch.outputs.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body "Gemini Major-Update Agent could not automatically produce a passing fix. No changes were pushed; please review manually."
 
-          $NOTE
+      - name: Checkout exact PR commit
+        if: needs.generate-patch.outputs.outcome == 'patched'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.generate-patch.outputs.head_oid }}
+          persist-credentials: false
 
-          *(Note: Pushes from \`GITHUB_TOKEN\` do not trigger CI automatically — please re-run CI or close/reopen the PR before merging.)*"
-            else
-              git checkout -- .
-              gh pr comment "$PR_NUM" --repo "${{ github.repository }}" --body "🤖 **Gemini Agent:** Attempted a fix, but \`npm run check\` still failed. Changes were reverted; manual review needed.
+      - name: Download verified patch artifact
+        if: needs.generate-patch.outputs.outcome == 'patched'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gemini-fix-patch
+          path: ${{ runner.temp }}/patch
 
-          $NOTE"
+      - name: Re-validate paths, commit, push, and comment
+        if: needs.generate-patch.outputs.outcome == 'patched'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.generate-patch.outputs.number }}
+          HEAD_REF: ${{ needs.generate-patch.outputs.head_ref }}
+          PATCH_FILE: ${{ runner.temp }}/patch/gemini-fix.patch
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [[ "$file" =~ ^(\.github/|\.claude/|\.agents/|\.husky/|\.git/) ]] || [[ "$file" =~ ^(\.npmrc|\.nvmrc|AGENTS\.md|CLAUDE\.md|SECURITY\.md|LICENSE|package\.json|package-lock\.json)$ ]]; then
+              echo "::error::Refusing to apply patch touching disallowed path: $file"
+              exit 1
             fi
-          else
-            gh pr comment "$PR_NUM" --repo "${{ github.repository }}" --body "🤖 **Gemini Agent:** No automated changes were applied.
+          done < <(git apply --numstat "$PATCH_FILE" | cut -f3-)
 
-          $NOTE"
-          fi
+          git apply --index "$PATCH_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: resolve breaking changes for dependency update"
+
+          AUTH_HEADER=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" \
+            push origin "HEAD:refs/heads/${HEAD_REF}"
+
+          gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body "Gemini Major-Update Agent fixed breaking changes and verified \`npm run check\`. Please re-run CI (or close/reopen the PR) and review manually before merging."
