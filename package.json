@@ -47,6 +47,7 @@
     "build:css": "tailwindcss -i src/ui/styles/dashboard.css -o src/ui/public/dashboard.css --minify",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
+    "test:unit": "vitest run --exclude tests/cli.e2e.test.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "check": "npm run typecheck && npm test && npm run build",
