@@ -37,7 +37,10 @@ It is a safety tool. People install it so that less goes wrong. Every change is 
 4. **One path for state and actions.** Front ends read `MonitorSession.getSnapshot()` and act through session methods. A new action goes into the session first, then into the terminal command (`src/ui/commands.ts`, shared by both terminal front ends), with a test at session level and one per front end. The dashboard shows state and gets no action.
 5. **One source per fact.** The version lives in `package.json` (`getVersion()`). Numbers in the README (tests, bundle size) are copied from command output, never estimated.
 6. **Git and publishing.** Work on `feature/<topic>` or `fix/<topic>`, Conventional Commits, one commit per finished block. No push, no tag, no `npm publish`, no GitHub release without the maintainer's explicit go-ahead.
-7. **Gate before every commit:** `npm run check`. Report failures as they are; do not explain them away, and do not skip a test to get green.
+7. **Tiered gate** (report failures as they are; do not explain them away, and do not skip a test to get green):
+   - **Tier 1 — Documentation only** (`README.md`, `AGENTS.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.agents/**`, `.claude/**`) with no code or config change: no build or test run required (verify command output if factual numbers in `README.md` change, per rule 5).
+   - **Tier 2 — Fast inner loop vs. commit gate:** use `npm run test:unit` (~2 s, skips `tests/cli.e2e.test.ts` subprocess tests) for quick iteration while developing; run `npm run check` (`typecheck`, all Vitest suites including `cli.e2e`, CSS + `tsup` build) **once before every code or config commit**.
+   - **Tier 3 — End-to-end scenario pass** (`scenario-testing` skill: `pty-drive.py`, read-only dashboard check, `package-check.sh`): run before a release and whenever changes touch terminal/plain output (`src/ui/**`), dashboard server (`src/server.ts`), CLI wiring (`src/program.ts`), process/signal handling, or build/packaging (`package.json`, `tsup.config.ts`).
 8. **No secrets** in chat, repository or logs. Do not print process command lines from the real machine into documents: they can contain tokens.
 9. **Report what you find.** A problem outside the current change goes to the maintainer, not into a file in this repository; once the repository is public, as a GitHub issue. A security problem never goes into a public issue: see [`SECURITY.md`](./SECURITY.md).
 
@@ -46,9 +49,10 @@ It is a safety tool. People install it so that less goes wrong. Every change is 
 Node 22.12 or newer for development (the test runner needs it).
 
 ```bash
-npm run check          # typecheck (sources and tests), all tests, build — the gate
+npm run check          # typecheck (sources and tests), all tests, build — commit gate
 npm run typecheck      # tsc for src/ and for tests/
 npm test               # vitest run (unit, API, CLI end-to-end)
+npm run test:unit      # fast inner loop (~2 s): vitest run excluding tests/cli.e2e.test.ts
 npm run test:watch     # vitest in watch mode
 npm run test:coverage  # tests with a coverage report
 npm run build          # dashboard.css (Tailwind), then tsup: dist/index.js (library), dist/cli.js (binary), dist/index.d.ts
