@@ -77,5 +77,8 @@
   "os": [
     "darwin",
     "linux"
-  ]
+  ],
+  "overrides": {
+    "esbuild": "^0.28.2"
+  }
 }
